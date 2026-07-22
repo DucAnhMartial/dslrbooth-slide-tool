@@ -3,5 +3,3 @@ dist/
 *.log
 logs/
 .env
-.planning/
-!/.planning/config.json
