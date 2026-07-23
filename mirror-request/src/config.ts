@@ -5,7 +5,6 @@ import type { EnvConfig } from './types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-dotenv.config({ path: path.join(__dirname, '../.env.example') });
 dotenv.config();
 
 export function loadConfig(): EnvConfig {
