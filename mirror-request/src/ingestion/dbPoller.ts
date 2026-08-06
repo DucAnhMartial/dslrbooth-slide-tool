@@ -1,73 +1,116 @@
-import { QueueManager } from '../queue/queueManager';
 import { getStore } from '../state/localStore';
 import logger from '../logging/logger';
-
-export interface DBPollCursor {
-  poll_key: string;
-  last_value: string;
-  updated_at: string;
-}
 
 export class DBPoller {
   private intervalMs: number;
   private batchSize: number;
   private timer: NodeJS.Timeout | null = null;
   private running = false;
+  private pool: any;
+  private store: ReturnType<typeof getStore>;
 
-  constructor(intervalMs: number, batchSize: number, private queue: QueueManager) {
+  constructor(intervalMs: number, batchSize: number, store: ReturnType<typeof getStore>) {
     this.intervalMs = intervalMs;
     this.batchSize = batchSize;
+    this.store = store;
+    this.pool = null;
   }
 
   start(): void {
     if (this.running) return;
     this.running = true;
-    void this.poll();                       // run immediately
-    this.timer = setInterval(() => void this.poll(), this.intervalMs);
-    logger.info(`DB poller started: every ${this.intervalMs}ms, batch ${this.batchSize}`);
+
+    const dbHost = process.env.DB_HOST ?? 'localhost';
+    const dbPort = Number(process.env.DB_PORT ?? '3306');
+    const dbName = process.env.DB_NAME ?? 'photobooth';
+    const dbUser = process.env.DB_USER ?? '';
+    const dbPass = process.env.DB_PASSWORD ?? '';
+
+    if (!dbUser) {
+      logger.warn('DB poller skipped: DB_USER not configured');
+      return;
+    }
+
+    try {
+      const mysql = require('mysql2/promise');
+      this.pool = mysql.createPool({
+        host: dbHost,
+        port: dbPort,
+        database: dbName,
+        user: dbUser,
+        password: dbPass,
+        waitForConnections: true,
+        connectionLimit: 2,
+      });
+    } catch (err) {
+      logger.error('DB poller: mysql2 not available, skipping. Install mysql2 to enable DB polling.');
+      this.running = false;
+      return;
+    }
+
+    this.doPoll()
+      .then(() => {
+        logger.info(`DB poller connected: ${dbHost}:${dbPort}/${dbName}`);
+        this.timer = setInterval(() => this.doPoll(), this.intervalMs);
+      })
+      .catch((err: Error) => {
+        logger.error('DB poller: initial connect failed', err);
+        this.running = false;
+      });
   }
 
   stop(): void {
     if (!this.running) return;
     this.running = false;
-    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    if (this.pool?.end) {
+      this.pool.end().catch(() => {});
+    }
   }
 
-  private async poll(): Promise<void> {
-    if (!this.running) return;
+  private async doPoll(): Promise<void> {
+    if (!this.running || !this.pool) return;
+    let conn;
     try {
-      const store = getStore();
-      const cursor = store.getCursor('registrations');
-      const lastId = cursor?.last_value ?? '00000000-00000000-00000000-00000000';
-      // Read-only query - never writes to the real backend DB.
-      // Replace the body with your actual SELECT when wiring up the real DB connection.
-      const rows: Array<{ id: string; name: string; email: string; phone: string; mode: string; registered_at: string }> = [];
-      if (rows.length === 0) return;
+      conn = await this.pool.getConnection();
+      const cursor = this.store.getCursor('registrations');
+      const lastAt = cursor ?? '1970-01-01T00:00:00.000Z';
 
-      for (const row of rows) {
-        if (store.isProcessed(row.id)) continue;              // idempotency guard
-        store.upsertRegistration(row);
-        store.markProcessed(row.id);
-        this.queue.enqueue({
+      const [rows] = await conn.query(
+        'SELECT id, name, email, phone, mode, registered_at FROM registrations WHERE registered_at > ? ORDER BY registered_at ASC LIMIT ?',
+        [lastAt, this.batchSize]
+      );
+
+      const records = rows as Array<{ id: string; name: string; email: string; phone: string; mode: string; registered_at: string }>;
+      if (records.length === 0) return;
+
+      for (const row of records) {
+        if (this.store.isProcessed(row.id)) continue;
+        this.store.upsertRegistration({
           id: row.id,
-          registration: {
-            ...row,
-            phone: row.phone ?? '',
-            registered_at: row.registered_at ?? new Date().toISOString(),
-          },
-          status: 'queued',
-          queued_at: Date.now(),
-          retries: 0,
+          name: row.name,
+          email: row.email,
+          phone: row.phone ?? '',
+          mode: row.mode,
+          registered_at: row.registered_at ?? new Date().toISOString(),
         });
-        logger.info(`DB poller ingested registration ${mask(JSON.stringify(row))}`);
+        this.store.markProcessed(row.id);
+        this.store.enqueueJob({ id: row.id, queued_at: Date.now() });
+        logger.info(`DB poller ingested ${row.id}`);
       }
 
-      const lastRow = rows.at(-1);
+      const lastRow = records.at(-1);
       if (lastRow) {
-        store.setCursor('registrations', lastRow.id);
+        this.store.setCursor('registrations', lastRow.registered_at);
       }
     } catch (err) {
-      logger.error('DB poller cycle failed', err as Error);
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error(`DB poller cycle failed: ${message}`);
+    } finally {
+      conn?.release();
     }
   }
 }

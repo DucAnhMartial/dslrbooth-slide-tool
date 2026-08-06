@@ -1,4 +1,4 @@
-export type BoothState = 'IDLE' | 'BUSY' | 'TIMEOUT_RESET';
+export type BoothState = 'IDLE' | 'ANNOUNCING' | 'BUSY' | 'TIMEOUT_RESET';
 
 export interface Registration {
   id: string;
@@ -52,13 +52,14 @@ export interface DBPollCursor {
 
 export interface NotificationRecord {
   jobId: string;
-  channel: 'email' | 'sms';
+  channel: 'email' | 'sms' | 'webhook';
   recipient: string;
   status: string;
   attempts: number;
   lastAttemptAt?: string;
   errorMessage?: string;
   deliveredAt?: string;
+  lastError?: string;
 }
 
 export interface DisplaySnapshot {
@@ -68,6 +69,9 @@ export interface DisplaySnapshot {
   boothState: BoothState;
   agentOnline: boolean;
   guestName: string | null;
+  countdownSeconds: number | null;
+  announcementEndsAt: number | null;
+  upNext: Array<{ jobId: string; name: string; position: number }>;
 }
 
 export interface EnvConfig {
@@ -95,6 +99,7 @@ export interface EnvConfig {
   HEARTBEAT_TIMEOUT_MS: number;
   NOTIFY_MAX_RETRIES: number;
   NOTIFY_RETRY_BASE_DELAY_MS: number;
+  NOTIFY_WEBHOOK_URL: string;
   LOCAL_STORE_PATH: string;
   LOG_LEVEL: string;
 }
