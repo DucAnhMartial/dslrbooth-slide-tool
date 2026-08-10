@@ -131,12 +131,13 @@ export class NotificationService {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(this.fetchTimeoutMs),
       });
       if (!response.ok) throw new Error(`Webhook returned HTTP ${response.status}`);
       this.store.saveNotification({ jobId: row.jobId, status: 'delivered', attempts: nextAttempt });
       notifyLogger.info(`Notification sent for ${row.jobId} (attempt ${nextAttempt})`);
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = this.classifyError(err);
       // D-08 (corrected under D-15): strictly `<`, not `<=`. With the
       // shipped default maxRetries=2: attempt 1 fails and 1 < 3 retries;
       // attempt 2 fails and 2 < 3 retries; attempt 3 fails and 3 < 3 is
@@ -160,6 +161,20 @@ export class NotificationService {
         });
       }
     }
+  }
+
+  // D-07: the distinction between 'timeout' and any other reason is what
+  // tells an operator apart a receiver that is hung from one that is
+  // absent — both surface as "delivery failed", but only a 'timeout'
+  // means the process on the far side (e.g. web-slide on port 3001) is
+  // alive and stuck rather than unreachable. Confirmed against a real
+  // never-responding http.Server (test/notification-fetch-timeout.test.ts
+  // test 1): the deadline set above rejects fetch with an Error whose
+  // name is 'TimeoutError', matching RESEARCH.md Assumption A4.
+  private classifyError(err: unknown): string {
+    if (err instanceof Error && err.name === 'TimeoutError') return 'timeout';
+    if (err instanceof Error) return err.message;
+    return String(err);
   }
 }
 
