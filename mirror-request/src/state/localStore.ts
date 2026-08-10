@@ -178,6 +178,29 @@ export class LocalStore {
     return job.id;
   }
 
+  getInFlightJobs(): QueueJob[] {
+    return this.db.prepare(
+      "SELECT * FROM queue_job WHERE status IN ('dispatched','in_progress') ORDER BY dispatched_at DESC"
+    ).all() as QueueJob[];
+  }
+
+  // queued_at is deliberately absent from the SET list below — this omission
+  // IS D-06's guarantee that a requeued guest keeps their original place in
+  // line (getNextQueuedJob() orders by queued_at ASC).
+  requeueWithRetry(jobId: string): { retries: number } {
+    this.db.prepare(
+      "UPDATE queue_job SET status = 'queued', retries = retries + 1 WHERE id = ?"
+    ).run(jobId);
+    const row = this.db.prepare('SELECT retries FROM queue_job WHERE id = ?').get(jobId) as { retries: number } | undefined;
+    return { retries: row?.retries ?? 0 };
+  }
+
+  failJob(jobId: string, stallReason: string): void {
+    this.db.prepare(
+      "UPDATE queue_job SET status = 'failed', stall_reason = ? WHERE id = ?"
+    ).run(stallReason, jobId);
+  }
+
   // idempotency
   isProcessed(regId: string): boolean {
     return this.db.prepare('SELECT 1 FROM processed_id WHERE reg_id = ?').get(regId) !== undefined;

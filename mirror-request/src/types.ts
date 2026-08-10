@@ -13,6 +13,7 @@ export interface Registration {
 export interface QueueJob {
   id: string;
   registration: Registration;
+  // status holds one of: queued, dispatched, in_progress, completed, failed
   status: string;
   queued_at: number;
   dispatched_at?: number;
@@ -21,6 +22,7 @@ export interface QueueJob {
   session_ended_at?: number;
   completed_at?: number;
   ack_error_message?: string;
+  stall_reason?: string;
   retries: number;
 }
 
@@ -96,6 +98,8 @@ export interface EnvConfig {
   TWILIO_AUTH_TOKEN: string;
   TWILIO_FROM_NUMBER: string;
   SESSION_TIMEOUT_MS: number;
+  NEXT_GUEST_COUNTDOWN_MS: number;
+  SESSION_MAX_RETRIES: number;
   HEARTBEAT_TIMEOUT_MS: number;
   NOTIFY_MAX_RETRIES: number;
   NOTIFY_RETRY_BASE_DELAY_MS: number;

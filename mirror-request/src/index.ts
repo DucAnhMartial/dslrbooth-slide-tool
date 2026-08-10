@@ -65,6 +65,11 @@ const poller = new DBPoller(
 const server = app.listen(config.PORT, config.HOST, () => {
   log.info(`Extension Service ready on ${config.HOST}:${config.PORT}`);
   poller.start();
+  try {
+    queue.recover();
+  } catch (err) {
+    log.warn(err instanceof Error ? err.message : String(err));
+  }
   queue.start();
   agentServer.start(server);
   displayServer.start(server);
