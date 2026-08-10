@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { LocalStore } from '../state/localStore';
-import logger from '../logging/logger';
+import logger, { debugRawPayload } from '../logging/logger';
 import { checkWebhookAuth } from './webhookAuth';
 
 export interface MirrorReceiverOptions {
@@ -120,7 +120,12 @@ export function createMirrorReceiver(store: LocalStore, whitelist: string[], opt
     };
 
     store.upsertRegistration(registration);
+    // D-13 (SQLite retention) stays exactly as it was; the call below is the
+    // additive, gated development-only echo D-16 permits — it returns
+    // immediately outside NODE_ENV!=='production' + DEBUG=set, so it never
+    // fires in production and never reaches the duplicate/403/400 paths.
     store.saveRawPayload(id, JSON.stringify(req.body));
+    debugRawPayload('on-register', JSON.stringify(req.body));
     store.markProcessed(id);
     store.enqueueJob({ id, queued_at: Date.now() });
     options.onEnqueue?.(id);
