@@ -119,35 +119,6 @@ export class LocalStore {
     return this.db.prepare('SELECT * FROM queue_job WHERE id = ?').get(id) as QueueJob | undefined;
   }
 
-  getJobRegistration(jobId: string): { job: QueueJob; registration: Registration } | undefined {
-    const row = this.db.prepare(`
-      SELECT
-        q.id AS job_id, q.status, q.queued_at, q.dispatched_at, q.acknowledged_at,
-        q.session_started_at, q.session_ended_at, q.completed_at, q.ack_error_message, q.retries,
-        r.id AS registration_id, r.name, r.email, r.phone, r.mode, r.registered_at
-      FROM queue_job q
-      JOIN registration r ON r.id = q.registration_id
-      WHERE q.id = ?
-    `).get(jobId) as Record<string, unknown> | undefined;
-    if (!row) return undefined;
-    return {
-      job: {
-        id: String(row.job_id), status: String(row.status), queued_at: Number(row.queued_at),
-        dispatched_at: row.dispatched_at as number | undefined,
-        acknowledged_at: row.acknowledged_at as number | undefined,
-        session_started_at: row.session_started_at as number | undefined,
-        session_ended_at: row.session_ended_at as number | undefined,
-        completed_at: row.completed_at as number | undefined,
-        ack_error_message: row.ack_error_message as string | undefined,
-        retries: Number(row.retries),
-      },
-      registration: {
-        id: String(row.registration_id), name: String(row.name), email: String(row.email),
-        phone: String(row.phone), mode: String(row.mode), registered_at: String(row.registered_at),
-      },
-    };
-  }
-
   getNextQueuedJob(): QueueJob | undefined {
     return this.db.prepare("SELECT * FROM queue_job WHERE status = 'queued' ORDER BY queued_at ASC LIMIT 1").get() as QueueJob | undefined;
   }
