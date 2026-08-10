@@ -119,6 +119,35 @@ export class LocalStore {
     return this.db.prepare('SELECT * FROM queue_job WHERE id = ?').get(id) as QueueJob | undefined;
   }
 
+  getJobRegistration(jobId: string): { job: QueueJob; registration: Registration } | undefined {
+    const row = this.db.prepare(`
+      SELECT
+        q.id AS job_id, q.status, q.queued_at, q.dispatched_at, q.acknowledged_at,
+        q.session_started_at, q.session_ended_at, q.completed_at, q.ack_error_message, q.retries,
+        r.id AS registration_id, r.name, r.email, r.phone, r.mode, r.registered_at
+      FROM queue_job q
+      JOIN registration r ON r.id = q.registration_id
+      WHERE q.id = ?
+    `).get(jobId) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    return {
+      job: {
+        id: String(row.job_id), status: String(row.status), queued_at: Number(row.queued_at),
+        dispatched_at: row.dispatched_at as number | undefined,
+        acknowledged_at: row.acknowledged_at as number | undefined,
+        session_started_at: row.session_started_at as number | undefined,
+        session_ended_at: row.session_ended_at as number | undefined,
+        completed_at: row.completed_at as number | undefined,
+        ack_error_message: row.ack_error_message as string | undefined,
+        retries: Number(row.retries),
+      },
+      registration: {
+        id: String(row.registration_id), name: String(row.name), email: String(row.email),
+        phone: String(row.phone), mode: String(row.mode), registered_at: String(row.registered_at),
+      },
+    };
+  }
+
   getNextQueuedJob(): QueueJob | undefined {
     return this.db.prepare("SELECT * FROM queue_job WHERE status = 'queued' ORDER BY queued_at ASC LIMIT 1").get() as QueueJob | undefined;
   }
@@ -206,13 +235,37 @@ export class LocalStore {
     return this.getQueuedJobs().length;
   }
 
-  // notifications (stubs, implemented in Phase 4)
-  saveNotification(_n: Partial<NotificationRecord> & { jobId: string }): void {
-    // no-op until Phase 4
+  getJobRegistration(jobId: string): { job: QueueJob; registration: Registration } | undefined {
+    const jobRow = this.db.prepare('SELECT * FROM queue_job WHERE id = ?').get(jobId) as
+      | (QueueJob & { registration_id?: string })
+      | undefined;
+    if (!jobRow?.registration_id) return undefined;
+
+    const registration = this.db.prepare('SELECT * FROM registration WHERE id = ?').get(jobRow.registration_id) as Registration | undefined;
+    if (!registration) return undefined;
+
+    const job = { ...jobRow, registration } as QueueJob;
+    return { job, registration };
   }
 
-  getNotification(_jobId: string): NotificationRecord | undefined {
-    return undefined;
+  // notifications
+  saveNotification(n: Partial<NotificationRecord> & { jobId: string }): void {
+    this.db.prepare(`
+      INSERT INTO notification_record (jobId, status, attempts, lastError, updatedAt)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(jobId) DO UPDATE SET
+        status = excluded.status,
+        attempts = excluded.attempts,
+        lastError = excluded.lastError,
+        updatedAt = excluded.updatedAt
+    `).run(n.jobId, n.status ?? 'pending', n.attempts ?? 0, n.errorMessage ?? n.lastError ?? null, new Date().toISOString());
+  }
+
+  getNotification(jobId: string): NotificationRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM notification_record WHERE jobId = ?').get(jobId) as {
+      jobId: string; status: string; attempts: number; lastError?: string; updatedAt: string;
+    } | undefined;
+    return row ? { jobId: row.jobId, channel: 'webhook', recipient: '', status: row.status, attempts: row.attempts, lastError: row.lastError } : undefined;
   }
 
   close(): void {

@@ -40,10 +40,8 @@ export function loadConfig(): EnvConfig {
 
   required('AGENT_WS_TOKEN', 'replace-with-agent-token');
   required('DB_PASSWORD', 'replace-with-readonly-password');
-  required('SMTP_PASS', 'replace-with-smtp-password');
-  required('TWILIO_ACCOUNT_SID', 'replace-with-twilio-sid');
-  required('TWILIO_AUTH_TOKEN', 'replace-with-twilio-token');
-// NOTIFY_WEBHOOK_URL is optional in simplified Phase 4
+  // Delivery is handled by the optional photo webhook. SMTP/Twilio settings
+  // remain in the config type for backwards compatibility but are not needed.
 
   if (errors.length > 0) {
     throw new Error(`Configuration errors:\n  - ${errors.join('\n  - ')}`);
@@ -74,7 +72,7 @@ export function loadConfig(): EnvConfig {
     HEARTBEAT_TIMEOUT_MS:     toNum('HEARTBEAT_TIMEOUT_MS',  30_000),
     NOTIFY_MAX_RETRIES:       toNum('NOTIFY_MAX_RETRIES',       3),
     NOTIFY_RETRY_BASE_DELAY_MS: toNum('NOTIFY_RETRY_BASE_DELAY_MS', 1000),
-  NOTIFY_WEBHOOK_URL: get('NOTIFY_WEBHOOK_URL') ?? '',
+    NOTIFY_WEBHOOK_URL: get('NOTIFY_WEBHOOK_URL') ?? '',
     LOCAL_STORE_PATH: get('LOCAL_STORE_PATH') ?? './data/extension-service.sqlite',
     LOG_LEVEL: get('LOG_LEVEL') ?? 'info',
   };
