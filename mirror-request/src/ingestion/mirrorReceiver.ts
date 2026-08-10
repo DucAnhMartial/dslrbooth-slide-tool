@@ -1,13 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { LocalStore } from '../state/localStore';
 import logger from '../logging/logger';
-import {
-  SIGNATURE_HEADER,
-  TIMESTAMP_HEADER,
-  WEBHOOK_ID_HEADER,
-  getRawBody,
-  verifySignature,
-} from './webhookAuth';
+import { checkWebhookAuth } from './webhookAuth';
 
 export interface MirrorReceiverOptions {
   hmacSecret: string;
@@ -44,19 +38,12 @@ export function createMirrorReceiver(store: LocalStore, whitelist: string[], opt
     }
 
     if (options.hmacSecret) {
-      const signature = req.headers[SIGNATURE_HEADER];
-      const timestamp = req.headers[TIMESTAMP_HEADER];
-      const webhookId = req.headers[WEBHOOK_ID_HEADER];
-      const rawBody = getRawBody(req);
+      const authenticated = checkWebhookAuth(req, store, {
+        secret: options.hmacSecret,
+        skewMs: options.timestampSkewMs,
+      });
 
-      const headersPresent =
-        typeof signature === 'string' && typeof timestamp === 'string' && typeof webhookId === 'string';
-
-      if (
-        !rawBody ||
-        !headersPresent ||
-        !verifySignature(rawBody, timestamp as string, webhookId as string, signature as string, options.hmacSecret)
-      ) {
+      if (!authenticated) {
         logger.warn(`Blocked /on-register: webhook authentication failed from ${ip}`);
         return res.status(403).json({ error: 'Forbidden' });
       }

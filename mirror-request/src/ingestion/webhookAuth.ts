@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 import express, { Request } from 'express';
+import type { LocalStore } from '../state/localStore';
 
 /**
  * Header names as Express sees them: Express lower-cases all incoming header
@@ -79,25 +80,37 @@ export function verifySignature(
   }
 }
 
-export function isTimestampFresh(timestamp: string, skewMs: number, now: number = Date.now()): boolean {
+/**
+ * The header value is treated as epoch milliseconds — the same unconfirmed
+ * signing-contract caveat as `buildCanonicalString()` (RESEARCH.md A1). The
+ * window is symmetric on purpose: a future-dated timestamp is exactly as
+ * suspicious as a stale one (clock-skew abuse must not have a free direction).
+ */
+export function isTimestampFresh(timestamp: string, skewMs: number, nowMs: number = Date.now()): boolean {
   const ts = Number.parseInt(timestamp, 10);
   if (Number.isNaN(ts)) return false;
-  return Math.abs(now - ts) <= skewMs;
+  return Math.abs(nowMs - ts) <= skewMs;
 }
 
-export interface WebhookAuthResult {
-  ok: boolean;
+export interface CheckWebhookAuthOptions {
+  secret: string;
+  skewMs: number;
+  nowMs?: number;
 }
 
 /**
- * Convenience wrapper combining header extraction + signature verification.
- * Currently used only as a documented reference point; `mirrorReceiver.ts`
- * inlines the equivalent guard directly in the `/on-register` handler so it
- * can produce the exact D-12 403 response shape without an extra indirection
- * layer. Exported so later plans (dedup/replay) have a single named entry
- * point to extend if the guard grows beyond a simple boolean.
+ * The single webhook-authentication decision function: signature, timestamp
+ * freshness, and replay all gate through here. Returns a bare boolean and
+ * logs nothing — the caller (`mirrorReceiver.ts`) owns the single generic
+ * denial log line and response body, which is what keeps D-12 ("never reveal
+ * which check failed") enforceable in one place instead of scattered across
+ * every check.
+ *
+ * The replay id is recorded only after every other check has passed, so a
+ * probing attacker who sends a bad signature or a stale timestamp cannot
+ * burn a legitimate `X-Webhook-Id` for the real sender.
  */
-export function checkWebhookAuth(req: Request, secret: string): WebhookAuthResult {
+export function checkWebhookAuth(req: Request, store: LocalStore, opts: CheckWebhookAuthOptions): boolean {
   const signature = req.headers[SIGNATURE_HEADER];
   const timestamp = req.headers[TIMESTAMP_HEADER];
   const webhookId = req.headers[WEBHOOK_ID_HEADER];
@@ -109,8 +122,21 @@ export function checkWebhookAuth(req: Request, secret: string): WebhookAuthResul
     typeof webhookId !== 'string' ||
     !rawBody
   ) {
-    return { ok: false };
+    return false;
   }
 
-  return { ok: verifySignature(rawBody, timestamp, webhookId, signature, secret) };
+  if (!verifySignature(rawBody, timestamp, webhookId, signature, opts.secret)) {
+    return false;
+  }
+
+  if (!isTimestampFresh(timestamp, opts.skewMs, opts.nowMs ?? Date.now())) {
+    return false;
+  }
+
+  if (store.hasSeenWebhookId(webhookId)) {
+    return false;
+  }
+
+  store.recordWebhookId(webhookId, Date.now());
+  return true;
 }
