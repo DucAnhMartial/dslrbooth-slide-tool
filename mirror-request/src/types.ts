@@ -62,6 +62,8 @@ export interface NotificationRecord {
   errorMessage?: string;
   deliveredAt?: string;
   lastError?: string;
+  photoUrl?: string;
+  dueAt?: number;
 }
 
 export interface DisplaySnapshot {
@@ -103,6 +105,9 @@ export interface EnvConfig {
   HEARTBEAT_TIMEOUT_MS: number;
   NOTIFY_MAX_RETRIES: number;
   NOTIFY_RETRY_BASE_DELAY_MS: number;
+  NOTIFY_FETCH_TIMEOUT_MS: number;
+  NOTIFY_SWEEP_INTERVAL_MS: number;
+  NOTIFY_CLAIM_LEASE_MS: number;
   NOTIFY_WEBHOOK_URL: string;
   LOCAL_STORE_PATH: string;
   LOG_LEVEL: string;

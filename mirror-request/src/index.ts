@@ -71,6 +71,7 @@ const server = app.listen(config.PORT, config.HOST, () => {
     log.warn(err instanceof Error ? err.message : String(err));
   }
   queue.start();
+  notifier.start();
   agentServer.start(server);
   displayServer.start(server);
 });
@@ -79,6 +80,7 @@ function shutdown(code: number): void {
   log.info('Shutting down');
   poller.stop();
   queue.stop();
+  notifier.stop();
   agentServer.stop();
   displayServer.stop();
   store.close();

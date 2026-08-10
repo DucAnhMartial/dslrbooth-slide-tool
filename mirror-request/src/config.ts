@@ -95,8 +95,16 @@ export function loadConfig(): EnvConfig {
     NEXT_GUEST_COUNTDOWN_MS:  toNum('NEXT_GUEST_COUNTDOWN_MS', 7000),
     SESSION_MAX_RETRIES:      toNum('SESSION_MAX_RETRIES', 2),
     HEARTBEAT_TIMEOUT_MS:     toNum('HEARTBEAT_TIMEOUT_MS',  30_000),
-    NOTIFY_MAX_RETRIES:       toNum('NOTIFY_MAX_RETRIES',       3),
+    // D-15: default flipped from 3 to 2. D-08 changes the number's meaning
+    // from "total attempts" to "retries after the first attempt" — holding
+    // this at 3 would silently turn today's 3 real attempts into 4. Together
+    // with the semantic flip, behaviour is unchanged (still 3 total
+    // attempts), and the value now matches SESSION_MAX_RETRIES's meaning.
+    NOTIFY_MAX_RETRIES:       toNum('NOTIFY_MAX_RETRIES',       2),
     NOTIFY_RETRY_BASE_DELAY_MS: toNum('NOTIFY_RETRY_BASE_DELAY_MS', 1000),
+    NOTIFY_FETCH_TIMEOUT_MS: toNum('NOTIFY_FETCH_TIMEOUT_MS', 10_000),
+    NOTIFY_SWEEP_INTERVAL_MS: toNum('NOTIFY_SWEEP_INTERVAL_MS', 3_000),
+    NOTIFY_CLAIM_LEASE_MS: toNum('NOTIFY_CLAIM_LEASE_MS', 60_000),
     NOTIFY_WEBHOOK_URL: get('NOTIFY_WEBHOOK_URL') ?? '',
     LOCAL_STORE_PATH: get('LOCAL_STORE_PATH') ?? './data/extension-service.sqlite',
     LOG_LEVEL: get('LOG_LEVEL') ?? 'info',

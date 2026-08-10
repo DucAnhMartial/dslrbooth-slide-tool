@@ -59,6 +59,8 @@ export class LocalStore {
       status TEXT NOT NULL DEFAULT 'pending',
       attempts INTEGER NOT NULL DEFAULT 0,
       lastError TEXT,
+      photoUrl TEXT,
+      dueAt INTEGER,
       updatedAt TEXT NOT NULL DEFAULT 'now'
     );
     CREATE TABLE IF NOT EXISTS booth_state (
@@ -82,6 +84,38 @@ export class LocalStore {
     if (!hasReceivedAt) {
       this.db.exec('ALTER TABLE registration ADD COLUMN received_at INTEGER');
       this.db.prepare('UPDATE registration SET received_at = ? WHERE received_at IS NULL').run(Date.now());
+    }
+
+    // notification_record: D-13. photoUrl was never a persisted column
+    // before this phase — it only ever existed on the wire inside one
+    // file_upload WebSocket event and was never written to queue_job or
+    // registration, so a pre-existing non-terminal row has nothing to
+    // recover a photo URL from. Marking it terminal here is the only honest
+    // option; fabricating a placeholder URL would POST a bogus image to the
+    // slideshow. The backfill runs only when a column was actually added
+    // this call, so an already-migrated database is never rescanned (and
+    // never re-fails a legitimately in-flight row) on every boot. No blanket
+    // dueAt backfill is added: the status write above already makes every
+    // matching row terminal, and terminal rows are never selected by the
+    // sweeper's getDueNotifications() query.
+    const notifColumns = this.db.prepare('PRAGMA table_info(notification_record)').all() as Array<{ name: string }>;
+    const hasPhotoUrl = notifColumns.some((c) => c.name === 'photoUrl');
+    const hasDueAt = notifColumns.some((c) => c.name === 'dueAt');
+    let notifColumnAdded = false;
+    if (!hasPhotoUrl) {
+      this.db.exec('ALTER TABLE notification_record ADD COLUMN photoUrl TEXT');
+      notifColumnAdded = true;
+    }
+    if (!hasDueAt) {
+      this.db.exec('ALTER TABLE notification_record ADD COLUMN dueAt INTEGER');
+      notifColumnAdded = true;
+    }
+    if (notifColumnAdded) {
+      this.db.prepare(
+        `UPDATE notification_record
+         SET status = 'failed', lastError = 'photoUrl unavailable — record predates persisted-queue migration'
+         WHERE photoUrl IS NULL AND status NOT IN ('delivered','failed')`
+      ).run();
     }
   }
 
@@ -320,23 +354,98 @@ export class LocalStore {
   }
 
   // notifications
+  //
+  // photoUrl/dueAt use COALESCE(excluded.<col>, notification_record.<col>)
+  // on conflict, unlike status/attempts/lastError's bare excluded.<col>. The
+  // sweeper calls this method on every delivery attempt to record a status
+  // change without re-supplying the photo URL, so a bare excluded.photoUrl
+  // would overwrite the persisted URL with NULL on the very first retry —
+  // silently reintroducing the data loss this phase exists to remove.
   saveNotification(n: Partial<NotificationRecord> & { jobId: string }): void {
     this.db.prepare(`
-      INSERT INTO notification_record (jobId, status, attempts, lastError, updatedAt)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO notification_record (jobId, status, attempts, lastError, photoUrl, dueAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(jobId) DO UPDATE SET
         status = excluded.status,
         attempts = excluded.attempts,
         lastError = excluded.lastError,
+        photoUrl = COALESCE(excluded.photoUrl, notification_record.photoUrl),
+        dueAt = COALESCE(excluded.dueAt, notification_record.dueAt),
         updatedAt = excluded.updatedAt
-    `).run(n.jobId, n.status ?? 'pending', n.attempts ?? 0, n.errorMessage ?? n.lastError ?? null, new Date().toISOString());
+    `).run(
+      n.jobId,
+      n.status ?? 'pending',
+      n.attempts ?? 0,
+      n.errorMessage ?? n.lastError ?? null,
+      n.photoUrl ?? null,
+      n.dueAt ?? null,
+      new Date().toISOString(),
+    );
   }
 
   getNotification(jobId: string): NotificationRecord | undefined {
     const row = this.db.prepare('SELECT * FROM notification_record WHERE jobId = ?').get(jobId) as {
-      jobId: string; status: string; attempts: number; lastError?: string; updatedAt: string;
+      jobId: string; status: string; attempts: number; lastError?: string; photoUrl?: string; dueAt?: number; updatedAt: string;
     } | undefined;
-    return row ? { jobId: row.jobId, channel: 'webhook', recipient: '', status: row.status, attempts: row.attempts, lastError: row.lastError } : undefined;
+    return row
+      ? {
+          jobId: row.jobId,
+          channel: 'webhook',
+          recipient: '',
+          status: row.status,
+          attempts: row.attempts,
+          lastError: row.lastError,
+          photoUrl: row.photoUrl ?? undefined,
+          dueAt: row.dueAt ?? undefined,
+        }
+      : undefined;
+  }
+
+  // D-05 expressed structurally: the trailing WHERE on the conflict branch
+  // means a repeat file_upload for a job whose notification already reached
+  // a terminal state ('delivered' or 'failed') cannot re-arm it for another
+  // delivery. Removing that WHERE would let a duplicate/replayed file_upload
+  // event send an already-delivered guest's photo a second time.
+  enqueueNotification(n: { jobId: string; photoUrl: string; dueAt: number }): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO notification_record (jobId, photoUrl, status, attempts, dueAt, updatedAt)
+      VALUES (?, ?, 'pending', 0, ?, ?)
+      ON CONFLICT(jobId) DO UPDATE SET
+        photoUrl = excluded.photoUrl,
+        status = 'pending',
+        attempts = 0,
+        dueAt = excluded.dueAt,
+        updatedAt = excluded.updatedAt
+      WHERE notification_record.status NOT IN ('delivered','failed')
+    `).run(n.jobId, n.photoUrl, n.dueAt, now);
+  }
+
+  // D-05: 'delivered' and 'failed' are deliberately absent from this
+  // predicate — no application-level `if (alreadySent)` exists anywhere to
+  // be deleted by a later edit. 'sending' is deliberately present: a claim
+  // writes a lease deadline into dueAt, so a row whose owning process died
+  // mid-flight becomes due again on its own and is picked up by this same
+  // query — that is what makes D-04's "restart-proof by construction" hold
+  // for in-flight rows too, and is why this phase adds no boot-time recovery
+  // pass of its own.
+  getDueNotifications(now: number): Array<{ jobId: string; photoUrl: string; attempts: number }> {
+    return this.db.prepare(`
+      SELECT jobId, photoUrl, attempts FROM notification_record
+      WHERE status IN ('pending','retrying','sending') AND dueAt <= ? AND photoUrl IS NOT NULL
+      ORDER BY dueAt ASC
+    `).all(now) as Array<{ jobId: string; photoUrl: string; attempts: number }>;
+  }
+
+  // Same structural guard as getDueNotifications() above: only a row still
+  // in a non-terminal state and past its due time can be claimed.
+  claimNotification(jobId: string, now: number, leaseUntil: number): boolean {
+    const result = this.db.prepare(`
+      UPDATE notification_record
+      SET status = 'sending', dueAt = ?, updatedAt = ?
+      WHERE jobId = ? AND status IN ('pending','retrying','sending') AND dueAt <= ?
+    `).run(leaseUntil, new Date().toISOString(), jobId, now);
+    return result.changes === 1;
   }
 
   close(): void {
