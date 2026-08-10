@@ -28,6 +28,7 @@ describe('Queue countdown with multiple registrations', () => {
       getQueuePosition: () => 1,
       getQueueLength: () => queued.length,
       getQueuedGuestSummaries: () => queued.map((job, index) => ({ jobId: job.id, name: `Guest ${job.id}`, position: index + 1 })),
+      getJobRegistration: () => undefined,
     } as unknown as LocalStore;
     const service = new QueueService(store);
     const dispatched: string[] = [];
@@ -114,6 +115,10 @@ describe('booth state transitions', () => {
         return id ?? undefined;
       },
       getQueuePosition: () => 1,
+      getJobRegistration: (jobId: string) => ({
+        job: { id: jobId },
+        registration: { id: 'reg-1', name: 'Guest One', email: '', phone: '', mode: 'boomerang', registered_at: '' },
+      }),
       requeueWithRetry,
       failJob,
     } as unknown as LocalStore;
@@ -155,11 +160,11 @@ describe('booth state transitions', () => {
     service.stop();
   });
 
-  it('the countdown elapsing: booth is BUSY, the job is dispatched, and exactly one command is sent shaped {type, action, jobId} (QUE-03)', () => {
+  it('the countdown elapsing: booth is BUSY, the job is dispatched, and exactly one command is sent shaped {type, action, jobId, mode} (QUE-03, AGT-02)', () => {
     vi.useFakeTimers();
     const { store, boothSequence, jobStatus } = buildStore();
     const service = new QueueService(store);
-    const dispatched: Array<{ type: string; action: string; jobId: string }> = [];
+    const dispatched: Array<{ type: string; action: string; jobId: string; mode?: string }> = [];
     service.bindSendCommand((cmd) => dispatched.push(cmd));
 
     service.start();
@@ -169,7 +174,7 @@ describe('booth state transitions', () => {
     expect(boothSequence).toEqual(['IDLE', 'ANNOUNCING', 'BUSY']);
     expect(jobStatus['job-1']).toBe('dispatched');
     expect(dispatched).toHaveLength(1);
-    expect(dispatched[0]).toEqual({ type: 'command', action: 'start_session', jobId: 'job-1' });
+    expect(dispatched[0]).toEqual({ type: 'command', action: 'start_session', jobId: 'job-1', mode: 'boomerang' });
 
     service.stop();
   });

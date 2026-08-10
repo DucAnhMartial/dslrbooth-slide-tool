@@ -239,10 +239,11 @@ export class QueueService {
       return;
     }
     const now = Date.now();
+    const registration = this.store.getJobRegistration(job.id)?.registration;
     this.store.updateJobStatus(job.id, 'dispatched', 'dispatched_at', now);
     this.store.setBoothBusy();
     this.startBusyTimer(job.id);
-    this.sendCommandCb?.({ type: 'command', action: 'start_session', jobId: job.id });
+    this.sendCommandCb?.({ type: 'command', action: 'start_session', jobId: job.id, mode: registration?.mode });
     queueLogger.info(`Dispatched job ${job.id} → Agent`);
   }
 
