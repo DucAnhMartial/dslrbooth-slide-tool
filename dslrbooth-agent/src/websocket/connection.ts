@@ -50,10 +50,8 @@ export class WsConnection {
     this.shouldReconnect = true
 
     try {
-      const wsUrl = this.config.token
-  ? `${this.config.url.replace(/\/$/, '')}?token=${encodeURIComponent(this.config.token)}`
-  : this.config.url
-      this.ws = new WebSocket(wsUrl, {
+      this.ws = new WebSocket(this.config.url, {
+        headers: this.config.token ? { authorization: `Bearer ${this.config.token}` } : undefined,
         handshakeTimeout: 10000,
         // The service does not use WebSocket compression. Disabling it on both
         // ends prevents intermediaries or stale deployments from producing

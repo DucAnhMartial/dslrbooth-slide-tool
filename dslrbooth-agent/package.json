@@ -9,9 +9,15 @@
     "dev": "ts-node -r dotenv/config src/index.ts",
     "start": "node -r dotenv/config dist/index.js",
     "service:install": "node -r dotenv/config service/install-service.js",
-    "service:uninstall": "node -r dotenv/config service/install-service.js uninstall"
+    "service:uninstall": "node -r dotenv/config service/install-service.js uninstall",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
-  "keywords": ["dslrBooth", "agent", "windows-service"],
+  "keywords": [
+    "dslrBooth",
+    "agent",
+    "windows-service"
+  ],
   "license": "UNLICENSED",
   "dependencies": {
     "dotenv": "^16.4.5",
@@ -27,6 +33,7 @@
     "@types/ws": "^8.5.12",
     "pkg": "^5.8.1",
     "ts-node": "^10.9.2",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.4"
   }
 }
