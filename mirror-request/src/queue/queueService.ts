@@ -223,6 +223,8 @@ export class QueueService {
       this.sessionAcked(jobId);
     } else if (eventType === 'file_upload' && jobId && payload) {
       this.sendNotification(jobId, String(payload.photoUrl ?? ''));
+    } else {
+      queueLogger.debug(`Unhandled Agent event: ${eventType}${jobId ? ` (job ${jobId})` : ''}`);
     }
   }
 
