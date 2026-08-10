@@ -52,7 +52,12 @@ export class DBPoller {
         connectionLimit: 2,
       });
     } catch (err) {
-      logger.error('DB poller: mysql2 not available, skipping. Install mysql2 to enable DB polling.');
+      // This is the one failure the poller genuinely cannot retry out of, so
+      // it is also the one branch besides stop() allowed to clear `running`
+      // (D-05). It still only warns, matching the DB_USER-not-configured
+      // branch immediately above: two adjacent "polling is disabled"
+      // branches must not report at different severities.
+      logger.warn('DB poller: mysql2 not available, skipping. Install mysql2 to enable DB polling.');
       this.running = false;
       return;
     }
@@ -63,8 +68,12 @@ export class DBPoller {
         this.timer = setInterval(() => this.doPoll(), this.intervalMs);
       })
       .catch((err: Error) => {
-        logger.error('DB poller: initial connect failed', err);
-        this.running = false;
+        // D-05: a first-cycle failure retries on the next cycle; it must not
+        // stop the service or permanently disable polling. The interval is
+        // scheduled unconditionally and `running` is left untouched here.
+        const message = err instanceof Error ? err.message : String(err);
+        logger.warn(`DB poller initial cycle failed, will retry every ${this.intervalMs}ms: ${message}`);
+        this.timer = setInterval(() => this.doPoll(), this.intervalMs);
       });
   }
 
@@ -97,7 +106,14 @@ export class DBPoller {
       if (records.length === 0) return;
 
       for (const row of records) {
-        if (this.store.isProcessed(row.id)) continue;
+        if (!row.id || !row.name) {
+          logger.warn(`DB poller skipped malformed source row: id=${row.id ?? '(missing)'} name=${row.name ? 'present' : '(missing)'}`);
+          continue;
+        }
+        if (this.store.isProcessed(row.id)) {
+          logger.info(`DB poller reconciled ${row.id}: already ingested via mirror webhook, skipping`);
+          continue;
+        }
         this.store.upsertRegistration({
           id: row.id,
           name: row.name,
@@ -116,8 +132,12 @@ export class DBPoller {
         this.store.setCursor('registrations', lastRow.registered_at);
       }
     } catch (err) {
+      // D-05: warn and retry on the next scheduled cycle; never crash the
+      // process. Only err.message is logged — never the caught error object,
+      // this.dbConfig, or a connection string — so credentials never reach
+      // the log file (T-01-18).
       const message = err instanceof Error ? err.message : String(err);
-      logger.error(`DB poller cycle failed: ${message}`);
+      logger.warn(`DB poller cycle failed: ${message}`);
     } finally {
       conn?.release();
     }

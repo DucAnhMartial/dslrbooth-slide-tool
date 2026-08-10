@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { LocalStore } from '../src/state/localStore';
 import { DBPoller } from '../src/ingestion/dbPoller';
+import logger from '../src/logging/logger';
+import { loadConfig } from '../src/config';
 
 // `dbPoller.ts` loads the driver via a lazy `require('mysql2/promise')` (kept
 // lazy on purpose so a missing driver degrades to a log instead of a crash —
@@ -137,5 +139,167 @@ describe('DBPoller — typed config + mocked-pool harness', () => {
     expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|DROP|ALTER)\b/i);
 
     poller.stop();
+  });
+});
+
+describe('DBPoller — retry, reconcile, audit-skip, advance (task 2)', () => {
+  let dir: string;
+  let dbPath: string;
+  let store: LocalStore;
+  let queryMock: ReturnType<typeof vi.fn>;
+  let releaseMock: ReturnType<typeof vi.fn>;
+  let endMock: ReturnType<typeof vi.fn>;
+  let getConnectionMock: ReturnType<typeof vi.fn>;
+  let createPoolMock: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  let infoSpy: ReturnType<typeof vi.spyOn>;
+
+  const dbConfig = { host: 'h', port: 3306, database: 'd', user: 'u', password: 'super-secret-pw' };
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-dbpoller-t2-'));
+    dbPath = path.join(dir, 'test.sqlite');
+    store = new LocalStore(dbPath);
+
+    queryMock = vi.fn().mockResolvedValue([[]]);
+    releaseMock = vi.fn();
+    endMock = vi.fn().mockResolvedValue(undefined);
+    getConnectionMock = vi.fn().mockResolvedValue({ query: queryMock, release: releaseMock });
+    createPoolMock = vi.spyOn(mysql2Promise, 'createPool').mockReturnValue({
+      getConnection: getConnectionMock,
+      end: endMock,
+    });
+    warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => logger);
+    infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => logger);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('a first-cycle rejection still schedules the interval, and the next tick ingests successfully', async () => {
+    vi.useFakeTimers();
+
+    const goodRow = { id: 'r1', name: 'Alice', email: '', phone: '', mode: 'photo', registered_at: '2026-01-01T00:00:00.000Z' };
+    getConnectionMock
+      .mockRejectedValueOnce(new Error('connection refused'))
+      .mockResolvedValue({ query: queryMock, release: releaseMock });
+    queryMock.mockResolvedValue([[goodRow]]);
+
+    const poller = new DBPoller(3000, 50, store, dbConfig);
+    poller.start();
+
+    // First cycle: getConnection() rejects, caught inside doPoll(), and the
+    // .then() branch of start()'s promise chain still schedules the interval.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('DB poller cycle failed'));
+
+    // Second cycle: advancing past intervalMs runs doPoll() again; this time
+    // getConnection() resolves and the row is ingested normally.
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(store.getRegistration('r1')).toBeDefined();
+    poller.stop();
+  });
+
+  it('a rejected query inside a cycle produces exactly one logger.warn call and no thrown rejection escaping doPoll()', async () => {
+    queryMock.mockRejectedValue(new Error('syntax error'));
+
+    const poller = new DBPoller(3000, 50, store, dbConfig);
+    let escaped: unknown;
+    try {
+      poller.start();
+      await new Promise((resolve) => setImmediate(resolve));
+    } catch (err) {
+      escaped = err;
+    }
+    expect(escaped).toBeUndefined();
+
+    const cycleFailedCalls = warnSpy.mock.calls.filter((args) =>
+      typeof args[0] === 'string' && args[0].includes('DB poller cycle failed')
+    );
+    expect(cycleFailedCalls).toHaveLength(1);
+
+    poller.stop();
+  });
+
+  it('an already-processed id produces one logger.info reconciliation line and no persistence call', async () => {
+    store.markProcessed('r1');
+    const row = { id: 'r1', name: 'Alice', email: '', phone: '', mode: 'photo', registered_at: '2026-01-01T00:00:00.000Z' };
+    queryMock.mockResolvedValue([[row]]);
+
+    const poller = new DBPoller(3000, 50, store, dbConfig);
+    poller.start();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('reconciled r1'));
+    expect(store.getRegistration('r1')).toBeUndefined();
+    expect(store.getQueuedJobs()).toHaveLength(0);
+
+    poller.stop();
+  });
+
+  it('a malformed row (missing id or name) is audit-skipped without persistence, and the cursor still advances', async () => {
+    const malformed = { id: '', name: 'Bob', email: '', phone: '', mode: 'photo', registered_at: '2026-01-01T00:00:00.000Z' };
+    queryMock.mockResolvedValue([[malformed]]);
+
+    const poller = new DBPoller(3000, 50, store, dbConfig);
+    poller.start();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('skipped malformed source row'));
+    expect(store.getQueuedJobs()).toHaveLength(0);
+    expect(store.getCursor('registrations')).toBe('2026-01-01T00:00:00.000Z');
+
+    poller.stop();
+  });
+
+  it('a batch of [malformed, good] leaves the cursor at the good row\'s registered_at (last fetched, not last ingested)', async () => {
+    const malformed = { id: '', name: '', email: '', phone: '', mode: 'photo', registered_at: '2026-01-01T00:00:00.000Z' };
+    const good = { id: 'r2', name: 'Carol', email: '', phone: '', mode: 'photo', registered_at: '2026-01-02T00:00:00.000Z' };
+    queryMock.mockResolvedValue([[malformed, good]]);
+
+    const poller = new DBPoller(3000, 50, store, dbConfig);
+    poller.start();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(store.getCursor('registrations')).toBe('2026-01-02T00:00:00.000Z');
+    expect(store.getRegistration('r2')).toBeDefined();
+
+    poller.stop();
+  });
+
+  it('no log line emitted by doPoll() contains the database password or an email address', async () => {
+    queryMock.mockRejectedValue(new Error('connection failed'));
+
+    const poller = new DBPoller(3000, 50, store, dbConfig);
+    poller.start();
+    await new Promise((resolve) => setImmediate(resolve));
+    poller.stop();
+
+    const allMessages = [...warnSpy.mock.calls, ...infoSpy.mock.calls]
+      .map((args) => args[0])
+      .filter((m): m is string => typeof m === 'string');
+
+    for (const message of allMessages) {
+      expect(message).not.toContain('super-secret-pw');
+      expect(message).not.toMatch(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+    }
+  });
+
+  it('D-08: DB_POLL_INTERVAL_MS defaults to 3000ms when unset', () => {
+    const envSnapshot = { ...process.env };
+    process.env.NODE_ENV = 'test';
+    process.env.AGENT_WS_TOKEN = 'real-agent-token';
+    process.env.DB_PASSWORD = 'real-db-password';
+    delete process.env.DB_POLL_INTERVAL_MS;
+
+    const config = loadConfig();
+    expect(config.DB_POLL_INTERVAL_MS).toBe(3000);
+
+    process.env = envSnapshot;
   });
 });
