@@ -168,3 +168,128 @@ describe('QueueService — live busyTimer timeout joins the bounded retry policy
     service.stop();
   });
 });
+
+describe('QueueService — an Agent NAK counts against the same retry budget (BTH-02, D-05, D-07)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('a NAK sets the booth IDLE, clears the busy timer, requeues once, and warns once', () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(queueLogger, 'warn');
+    const queued = [{ id: 'job-a' }];
+    const { store, requeueWithRetry, getBooth } = buildStore(queued);
+    const service = new QueueService(store, CONFIG);
+    service.bindSendCommand(() => {});
+
+    service.start();
+    vi.advanceTimersByTime(250);
+    vi.advanceTimersByTime(CONFIG.NEXT_GUEST_COUNTDOWN_MS); // dispatch job-a, BUSY
+    warnSpy.mockClear();
+
+    service.onAgentAck('job-a', false, 'camera offline');
+
+    expect(getBooth()).toBe('IDLE');
+    expect(requeueWithRetry).toHaveBeenCalledTimes(1);
+    expect(requeueWithRetry).toHaveBeenCalledWith('job-a');
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+
+    // The old busyTimer must actually be cleared — advancing past the
+    // original session timeout must not double-count the stall.
+    vi.advanceTimersByTime(CONFIG.SESSION_TIMEOUT_MS);
+    expect(requeueWithRetry).toHaveBeenCalledTimes(1);
+    service.stop();
+  });
+
+  it('a NAK on a job already at the retry ceiling fails it with agent_nak, and the next tick announces the following guest', () => {
+    vi.useFakeTimers();
+    const queued = [{ id: 'job-a' }, { id: 'job-b' }];
+    const { store, requeueWithRetry, failJob } = buildStore(queued);
+    requeueWithRetry.mockReturnValue({ retries: 3 });
+    const service = new QueueService(store, CONFIG);
+    const dispatched: string[] = [];
+    service.bindSendCommand(cmd => dispatched.push(cmd.jobId));
+
+    service.start();
+    vi.advanceTimersByTime(250);
+    vi.advanceTimersByTime(CONFIG.NEXT_GUEST_COUNTDOWN_MS); // dispatch job-a
+    expect(dispatched).toEqual(['job-a']);
+
+    service.onAgentAck('job-a', false, 'camera offline');
+
+    expect(failJob).toHaveBeenCalledWith('job-a', 'agent_nak');
+    expect(service.getAnnouncement()?.jobId).toBe('job-b');
+
+    vi.advanceTimersByTime(CONFIG.NEXT_GUEST_COUNTDOWN_MS);
+    expect(dispatched).toEqual(['job-a', 'job-b']);
+    service.stop();
+  });
+
+  it('makes no updateJobStatus call in the NAK branch', () => {
+    vi.useFakeTimers();
+    const queued = [{ id: 'job-a' }];
+    const { store, updateJobStatus } = buildStore(queued);
+    const service = new QueueService(store, CONFIG);
+    service.bindSendCommand(() => {});
+
+    service.start();
+    vi.advanceTimersByTime(250);
+    vi.advanceTimersByTime(CONFIG.NEXT_GUEST_COUNTDOWN_MS);
+    updateJobStatus.mockClear();
+
+    service.onAgentAck('job-a', false, 'camera offline');
+
+    expect(updateJobStatus).not.toHaveBeenCalled();
+    service.stop();
+  });
+
+  it('onAgentAck(jobId, true) is unaffected: still transitions via sessionAcked and re-arms the busy timer', () => {
+    vi.useFakeTimers();
+    const queued = [{ id: 'job-a' }];
+    const { store, updateJobStatus, requeueWithRetry } = buildStore(queued);
+    const service = new QueueService(store, CONFIG);
+    service.bindSendCommand(() => {});
+
+    service.start();
+    vi.advanceTimersByTime(250);
+    vi.advanceTimersByTime(CONFIG.NEXT_GUEST_COUNTDOWN_MS);
+    updateJobStatus.mockClear();
+
+    service.onAgentAck('job-a', true);
+
+    expect(updateJobStatus).toHaveBeenCalledWith('job-a', 'in_progress', 'acknowledged_at', expect.any(Number));
+
+    // The busy timer was re-armed fresh from the ack, for the full SESSION_TIMEOUT_MS.
+    vi.advanceTimersByTime(CONFIG.SESSION_TIMEOUT_MS - 1);
+    expect(requeueWithRetry).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(requeueWithRetry).toHaveBeenCalledTimes(1);
+    service.stop();
+  });
+
+  it('three consecutive NAKs of one job under a budget of 2 produce exactly one failJob call', () => {
+    vi.useFakeTimers();
+    const queued = [{ id: 'job-a' }];
+    const { store, requeueWithRetry, failJob } = buildStore(queued);
+    requeueWithRetry
+      .mockReturnValueOnce({ retries: 1 })
+      .mockReturnValueOnce({ retries: 2 })
+      .mockReturnValueOnce({ retries: 3 });
+    const service = new QueueService(store, CONFIG);
+    service.bindSendCommand(() => {});
+
+    service.start();
+    vi.advanceTimersByTime(250);
+    vi.advanceTimersByTime(CONFIG.NEXT_GUEST_COUNTDOWN_MS); // dispatch job-a
+
+    service.onAgentAck('job-a', false, 'nak-1');
+    service.onAgentAck('job-a', false, 'nak-2');
+    service.onAgentAck('job-a', false, 'nak-3');
+
+    expect(requeueWithRetry).toHaveBeenCalledTimes(3);
+    expect(failJob).toHaveBeenCalledTimes(1);
+    expect(failJob).toHaveBeenCalledWith('job-a', 'agent_nak');
+    service.stop();
+  });
+});

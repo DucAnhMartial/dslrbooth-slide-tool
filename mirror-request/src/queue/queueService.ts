@@ -160,9 +160,9 @@ export class QueueService {
       this.sessionAcked(jobId);
     } else {
       queueLogger.debug(`Agent nak for job ${jobId}: ${errorMessage ?? 'no error message'}`);
-      this.store.updateJobStatus(jobId, 'queued', 'session_started_at', Date.now());
       this.store.setBoothIdle();
       this.clearBusyTimer();
+      this.handleStall(jobId, 'agent_nak');
       this.tick();
     }
   }
