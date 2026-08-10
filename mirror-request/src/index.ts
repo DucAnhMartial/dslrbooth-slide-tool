@@ -4,6 +4,7 @@ import { getConfig } from './config';
 import { getStore } from './state/localStore';
 import { labelLogger } from './logging/logger';
 import { createMirrorReceiver } from './ingestion/mirrorReceiver';
+import { jsonWithRawBody } from './ingestion/webhookAuth';
 import { DBPoller } from './ingestion/dbPoller';
 import { createQueueService } from './queue/queueService';
 import { AgentServer } from './agent/agentServer';
@@ -16,10 +17,14 @@ const config = getConfig();
 const log = labelLogger('server');
 
 const app = express();
-app.use(express.json());
+app.use(jsonWithRawBody());
 
 const store = getStore();
-const mirror = createMirrorReceiver(store, config.PROXY_IP_WHITELIST);
+const mirror = createMirrorReceiver(store, config.PROXY_IP_WHITELIST, {
+  hmacSecret: config.WEBHOOK_HMAC_SECRET,
+  timestampSkewMs: config.WEBHOOK_TIMESTAMP_SKEW_MS,
+  dedupWindowMs: config.REGISTRATION_DEDUP_WINDOW_MS,
+});
 app.use(mirror);
 app.get('/display-screen', (_req, res) => res.type('html').send(renderDisplayPage()));
 

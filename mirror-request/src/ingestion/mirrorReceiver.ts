@@ -1,9 +1,27 @@
 import { Router, Request, Response } from 'express';
 import { LocalStore } from '../state/localStore';
 import logger from '../logging/logger';
+import {
+  SIGNATURE_HEADER,
+  TIMESTAMP_HEADER,
+  WEBHOOK_ID_HEADER,
+  getRawBody,
+  verifySignature,
+} from './webhookAuth';
 
-export function createMirrorReceiver(store: LocalStore, whitelist: string[], onEnqueue?: (jobId: string) => void): ReturnType<typeof Router> {
+export interface MirrorReceiverOptions {
+  hmacSecret: string;
+  timestampSkewMs: number;
+  dedupWindowMs: number;
+  onEnqueue?: (jobId: string) => void;
+}
+
+export function createMirrorReceiver(store: LocalStore, whitelist: string[], options: MirrorReceiverOptions): ReturnType<typeof Router> {
   const router = Router();
+
+  if (!options.hmacSecret) {
+    logger.warn('Webhook signature verification disabled: no HMAC secret configured');
+  }
 
   function isWhitelisted(req: Request): boolean {
     if (whitelist.length === 0) return true;
@@ -23,6 +41,25 @@ export function createMirrorReceiver(store: LocalStore, whitelist: string[], onE
     if (!isWhitelisted(req)) {
       logger.warn(`Blocked /on-register from non-whitelisted IP: ${ip}`);
       return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    if (options.hmacSecret) {
+      const signature = req.headers[SIGNATURE_HEADER];
+      const timestamp = req.headers[TIMESTAMP_HEADER];
+      const webhookId = req.headers[WEBHOOK_ID_HEADER];
+      const rawBody = getRawBody(req);
+
+      const headersPresent =
+        typeof signature === 'string' && typeof timestamp === 'string' && typeof webhookId === 'string';
+
+      if (
+        !rawBody ||
+        !headersPresent ||
+        !verifySignature(rawBody, timestamp as string, webhookId as string, signature as string, options.hmacSecret)
+      ) {
+        logger.warn(`Blocked /on-register: webhook authentication failed from ${ip}`);
+        return res.status(403).json({ error: 'Forbidden' });
+      }
     }
 
     const { id, name, email, phone, mode, qr_token, registered_at } = req.body ?? {};
@@ -49,7 +86,7 @@ export function createMirrorReceiver(store: LocalStore, whitelist: string[], onE
     store.saveRawPayload(id, JSON.stringify(req.body));
     store.markProcessed(id);
     store.enqueueJob({ id, queued_at: Date.now() });
-    onEnqueue?.(id);
+    options.onEnqueue?.(id);
 
     logger.info(`Ingested registration ${id} from ${ip}`);
     return res.status(200).json({ accepted: true, jobId: id });

@@ -102,4 +102,7 @@ export interface EnvConfig {
   NOTIFY_WEBHOOK_URL: string;
   LOCAL_STORE_PATH: string;
   LOG_LEVEL: string;
+  WEBHOOK_HMAC_SECRET: string;
+  WEBHOOK_TIMESTAMP_SKEW_MS: number;
+  REGISTRATION_DEDUP_WINDOW_MS: number;
 }

@@ -75,6 +75,9 @@ export function loadConfig(): EnvConfig {
     NOTIFY_WEBHOOK_URL: get('NOTIFY_WEBHOOK_URL') ?? '',
     LOCAL_STORE_PATH: get('LOCAL_STORE_PATH') ?? './data/extension-service.sqlite',
     LOG_LEVEL: get('LOG_LEVEL') ?? 'info',
+    WEBHOOK_HMAC_SECRET: get('WEBHOOK_HMAC_SECRET') ?? '',
+    WEBHOOK_TIMESTAMP_SKEW_MS: toNum('WEBHOOK_TIMESTAMP_SKEW_MS', 300_000),
+    REGISTRATION_DEDUP_WINDOW_MS: toNum('REGISTRATION_DEDUP_WINDOW_MS', 300_000),
   };
 }
 
