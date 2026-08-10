@@ -7,11 +7,11 @@ import { LocalStore } from '../src/state/localStore';
 import { QueueService } from '../src/queue/queueService';
 
 // `booth_state` is a single global row (`CHECK (id = 1)`), shared across every
-// test file that uses the `getStore()` singleton under parallel Vitest
-// workers (02-VALIDATION.md, binding). This file never calls `getStore()` —
-// every test below either drives a real `LocalStore` on its own per-file
-// temp database (`constructor(dbPath?)`, following db-poller.test.ts's
-// pattern) or a hand-built mocked store.
+// test file that uses the shared store singleton under parallel Vitest
+// workers (02-VALIDATION.md, binding). This file never reaches for that
+// singleton — every test below either drives a real `LocalStore` on its own
+// per-file temp database (`constructor(dbPath?)`, following
+// db-poller.test.ts's pattern) or a hand-built mocked store.
 
 describe('QueueService.recover() — end-to-end restart recovery (D-01, D-02, Pitfall 1)', () => {
   let dir: string;
@@ -122,6 +122,142 @@ describe('QueueService.recover() — end-to-end restart recovery (D-01, D-02, Pi
     expect(orphan.status).toBe('queued');
     expect(orphan.retries).toBe(1);
     expect(orphan.queued_at).toBe(1_000);
+  });
+});
+
+describe('QueueService.recover() — D-03 age-based BUSY survival, D-04 ANNOUNCING reset', () => {
+  const NOW = Date.UTC(2026, 7, 10, 12, 0, 0);
+
+  afterEach(() => vi.useRealTimers());
+
+  it('BUSY at 60s of a 300_000ms timeout with one in-flight row leaves the booth BUSY and re-arms the timer for exactly the 240_000ms remainder', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+
+    const setBoothTimeout = vi.fn();
+    const setBoothIdle = vi.fn();
+    const requeueWithRetry = vi.fn().mockReturnValue({ retries: 1 });
+    const failJob = vi.fn();
+    const store = {
+      getBoothState: () => 'BUSY',
+      getBoothStateDetailed: () => ({ state: 'BUSY', updated_at: new Date(NOW - 60_000).toISOString() }),
+      getInFlightJobs: () => [{ id: 'job-live' }],
+      setBoothTimeout,
+      setBoothIdle,
+      updateJobStatus: vi.fn(),
+      requeueWithRetry,
+      failJob,
+    } as unknown as LocalStore;
+
+    const queue = new QueueService(store, { SESSION_TIMEOUT_MS: 300_000, NEXT_GUEST_COUNTDOWN_MS: 7_000, SESSION_MAX_RETRIES: 2 });
+    queue.recover();
+
+    // No reset call is made — the booth stays BUSY.
+    expect(setBoothTimeout).not.toHaveBeenCalled();
+    expect(setBoothIdle).not.toHaveBeenCalled();
+    // The single in-flight row is the survivor — it is not swept.
+    expect(requeueWithRetry).not.toHaveBeenCalled();
+    expect(failJob).not.toHaveBeenCalled();
+
+    // The re-armed busyTimer fires at exactly 240_000ms, not 300_000ms and
+    // not immediately.
+    vi.advanceTimersByTime(239_999);
+    expect(setBoothTimeout).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(setBoothTimeout).toHaveBeenCalledTimes(1);
+  });
+
+  it('sweeps only the older in-flight row, leaving the most recently dispatched one alone', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+
+    const requeueWithRetry = vi.fn().mockReturnValue({ retries: 1 });
+    const store = {
+      getBoothState: () => 'BUSY',
+      getBoothStateDetailed: () => ({ state: 'BUSY', updated_at: new Date(NOW - 60_000).toISOString() }),
+      // dispatched_at DESC — job-live (most recent) first, job-old (earlier) second.
+      getInFlightJobs: () => [{ id: 'job-live' }, { id: 'job-old' }],
+      setBoothTimeout: vi.fn(),
+      setBoothIdle: vi.fn(),
+      updateJobStatus: vi.fn(),
+      requeueWithRetry,
+      failJob: vi.fn(),
+    } as unknown as LocalStore;
+
+    const queue = new QueueService(store, { SESSION_TIMEOUT_MS: 300_000, NEXT_GUEST_COUNTDOWN_MS: 7_000, SESSION_MAX_RETRIES: 2 });
+    queue.recover();
+
+    expect(requeueWithRetry).toHaveBeenCalledTimes(1);
+    expect(requeueWithRetry).toHaveBeenCalledWith('job-old');
+  });
+
+  it('resets the booth when age is 60s but there are zero in-flight rows — nothing to protect', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+
+    const setBoothTimeout = vi.fn();
+    const store = {
+      getBoothState: () => 'BUSY',
+      getBoothStateDetailed: () => ({ state: 'BUSY', updated_at: new Date(NOW - 60_000).toISOString() }),
+      getInFlightJobs: () => [],
+      setBoothTimeout,
+      setBoothIdle: vi.fn(),
+      requeueWithRetry: vi.fn(),
+      failJob: vi.fn(),
+    } as unknown as LocalStore;
+
+    const queue = new QueueService(store, { SESSION_TIMEOUT_MS: 300_000, NEXT_GUEST_COUNTDOWN_MS: 7_000, SESSION_MAX_RETRIES: 2 });
+    queue.recover();
+
+    expect(setBoothTimeout).toHaveBeenCalledTimes(1);
+  });
+
+  it('ANNOUNCING resets to IDLE without a timeout warning, and still sweeps any in-flight orphan row', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+
+    const setBoothTimeout = vi.fn();
+    const setBoothIdle = vi.fn();
+    const requeueWithRetry = vi.fn().mockReturnValue({ retries: 1 });
+    const store = {
+      getBoothState: () => 'ANNOUNCING',
+      getBoothStateDetailed: () => ({ state: 'ANNOUNCING', updated_at: new Date(NOW - 3_000).toISOString() }),
+      getInFlightJobs: () => [{ id: 'orphan-job' }],
+      setBoothTimeout,
+      setBoothIdle,
+      requeueWithRetry,
+      failJob: vi.fn(),
+    } as unknown as LocalStore;
+
+    const queue = new QueueService(store, { SESSION_TIMEOUT_MS: 300_000, NEXT_GUEST_COUNTDOWN_MS: 7_000, SESSION_MAX_RETRIES: 2 });
+    queue.recover();
+
+    expect(setBoothIdle).toHaveBeenCalledTimes(1);
+    expect(setBoothTimeout).not.toHaveBeenCalled();
+    expect(requeueWithRetry).toHaveBeenCalledWith('orphan-job');
+  });
+
+  it('treats an unparsable updated_at on a BUSY booth as unknown, therefore dead — resets and sweeps', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+
+    const setBoothTimeout = vi.fn();
+    const requeueWithRetry = vi.fn().mockReturnValue({ retries: 1 });
+    const store = {
+      getBoothState: () => 'BUSY',
+      getBoothStateDetailed: () => ({ state: 'BUSY', updated_at: 'not-a-real-timestamp' }),
+      getInFlightJobs: () => [{ id: 'job-corrupt-age' }],
+      setBoothTimeout,
+      setBoothIdle: vi.fn(),
+      requeueWithRetry,
+      failJob: vi.fn(),
+    } as unknown as LocalStore;
+
+    const queue = new QueueService(store, { SESSION_TIMEOUT_MS: 300_000, NEXT_GUEST_COUNTDOWN_MS: 7_000, SESSION_MAX_RETRIES: 2 });
+    queue.recover();
+
+    expect(setBoothTimeout).toHaveBeenCalledTimes(1);
+    expect(requeueWithRetry).toHaveBeenCalledWith('job-corrupt-age');
   });
 });
 

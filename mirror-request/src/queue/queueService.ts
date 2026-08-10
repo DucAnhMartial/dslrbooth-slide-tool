@@ -60,25 +60,57 @@ export class QueueService {
   }
 
   /**
-   * Startup reconciliation (D-01..D-02, RESEARCH.md Pattern 1). Must be
+   * Startup reconciliation (D-01..D-04, RESEARCH.md Pattern 1). Must be
    * called once, before the first tick() runs, or tick()'s `booth !== 'IDLE'`
    * guard blocks the queue forever whenever the booth was left BUSY across a
-   * restart. In this task a BUSY booth is always treated as dead — task 2
-   * adds the age check that lets a genuinely live session survive.
+   * restart.
+   *
+   * BUSY is read against wall-clock age rather than trusted blindly (D-01):
+   * age under SESSION_TIMEOUT_MS with at least one in-flight row means the
+   * session may still be live, so the booth stays BUSY and the most recently
+   * dispatched in-flight row is re-armed with only the remaining time (D-03)
+   * — a wrongly-reset booth self-heals on the next dispatch, while a
+   * wrongly-BUSY booth is the deadlock this phase removes, so an unparsable
+   * or future-dated timestamp falls through to the safer dead-session
+   * branch. ANNOUNCING resets to IDLE quietly — the countdown is only
+   * 5-10s and the announced job stays 'queued' for the next tick to
+   * re-announce (D-04). Every in-flight row except the one surviving job is
+   * swept through the retry policy, in every booth state — orphans from an
+   * earlier incident have no link back to the current booth_state
+   * (RESEARCH.md Pitfall 1), and the single-booth invariant guarantees at
+   * most one row can ever be genuinely in flight.
    */
   recover(): void {
-    const { state } = this.store.getBoothStateDetailed();
+    const { state, updated_at } = this.store.getBoothStateDetailed();
     const inFlight = this.store.getInFlightJobs();
 
+    let survivorId: string | null = null;
+
     if (state === 'BUSY') {
-      this.store.setBoothTimeout('restart recovery: booth was BUSY at startup');
+      const ageMs = Date.now() - Date.parse(updated_at);
+      const isPossiblyLive = Number.isFinite(ageMs) && ageMs >= 0 && ageMs < this.sessionTimeoutMs && inFlight.length > 0;
+
+      if (isPossiblyLive) {
+        const survivor = inFlight[0]; // dispatched_at DESC — most recently dispatched
+        survivorId = survivor.id;
+        const remainingMs = this.sessionTimeoutMs - ageMs;
+        this.startBusyTimer(survivorId, remainingMs);
+        queueLogger.info(`Booth possibly live: keeping job ${survivorId} BUSY with ${Math.ceil(remainingMs / 1000)}s remaining`);
+      } else {
+        this.store.setBoothTimeout('restart recovery: booth was BUSY at startup');
+      }
+    } else if (state === 'ANNOUNCING') {
+      this.store.setBoothIdle();
     }
 
+    let sweptCount = 0;
     for (const job of inFlight) {
+      if (job.id === survivorId) continue;
       this.handleStall(job.id, 'restart_recovery_timeout');
+      sweptCount++;
     }
 
-    queueLogger.info(`Recovery complete: booth was ${state}, swept ${inFlight.length} in-flight job(s)`);
+    queueLogger.info(`Recovery complete: booth was ${state}, swept ${sweptCount} in-flight job(s)`);
   }
 
   /**
