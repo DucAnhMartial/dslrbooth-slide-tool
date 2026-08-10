@@ -3,3 +3,8 @@ dist/
 *.log
 logs/
 .env
+
+# Local SQLite state — runtime artifact, not source
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
