@@ -144,7 +144,15 @@ export class NotificationService {
       // false, so it goes terminal — exactly 3 total delivery attempts.
       // `<=` here would yield 4: exhaustion must happen ON the attempt
       // where nextAttempt == 1 + maxRetries, not one attempt later.
+      // In words: the configured number is retries *after* the first
+      // attempt, so the shipped default of 2 yields 3 total attempts —
+      // identical in count to this service's pre-phase behaviour, and
+      // identical in both meaning and value to SESSION_MAX_RETRIES (D-15).
       if (nextAttempt < 1 + this.maxRetries) {
+        // A retry that will be attempted again is not yet an operator
+        // problem — no error-level log here. Logging one per attempt would
+        // make the error-line count a function of the retry budget instead
+        // of a count of guests who never got their photo.
         this.store.saveNotification({
           jobId: row.jobId,
           status: 'retrying',
@@ -153,12 +161,18 @@ export class NotificationService {
           dueAt: Date.now() + this.baseDelayMs * 2 ** (nextAttempt - 1),
         });
       } else {
+        // D-09: terminal state written first, then exactly one log line,
+        // never a throw — the same order queueService.ts's handleStall()
+        // uses for stall_reason. This is the only operator-visible signal
+        // that this guest never got their photo; grepping for it must
+        // yield exactly one line per permanently-failed delivery.
         this.store.saveNotification({
           jobId: row.jobId,
           status: 'failed',
           attempts: nextAttempt,
           lastError: reason,
         });
+        notifyLogger.error(`Notification permanently failed for job ${row.jobId} after ${nextAttempt} attempts: ${reason}`);
       }
     }
   }
