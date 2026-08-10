@@ -249,7 +249,7 @@ describe('POST /on-register — timestamp freshness + replay protection', () => 
     const timestamp = String(Date.now());
     const webhookId = randomUUID();
     const signature = sign(timestamp, webhookId, bodyString, SECRET);
-    const countBefore = getStore().countWebhookIds();
+    expect(getStore().hasSeenWebhookId(webhookId)).toBe(false);
 
     const sendRequest = () =>
       request(app)
@@ -267,7 +267,10 @@ describe('POST /on-register — timestamp freshness + replay protection', () => 
     const second = await sendRequest();
     expectForbidden(second);
 
-    expect(getStore().countWebhookIds()).toBe(countBefore + 1);
+    // Assert on THIS webhook id, not on a global row count: the suite shares one
+    // LocalStore singleton and vitest runs files in parallel workers, so a count
+    // delta races with unrelated tests recording their own ids (~30% failure rate).
+    expect(getStore().hasSeenWebhookId(webhookId)).toBe(true);
   });
 });
 
