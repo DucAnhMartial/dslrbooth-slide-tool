@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+# Packaged binary — 43MB build artifact, regenerable from src/
+*.exe
+
+# Environment (SECRETS - never commit)
+.env
+
+# Logs (runtime)
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Test coverage
+coverage/
