@@ -211,6 +211,21 @@ export class LocalStore {
     return { retries: row?.retries ?? 0 };
   }
 
+  // A deliberate sibling of requeueWithRetry() above, not a variant of it.
+  // queued_at is absent from the SET list for the same reason it is absent
+  // there — that omission IS D-06's guarantee that a requeued guest keeps
+  // their original place in line, since getNextQueuedJob() orders by
+  // queued_at ASC. retries is also deliberately absent: a system-side fault
+  // (the Agent itself dying) must never spend the guest's retry budget
+  // (D-01, D-12) — that budget exists to bound a bad *job*, not to punish a
+  // guest for the booth's own failure. Do not add a retry count return, a
+  // row read-back, or a parameter; the two methods staying trivially
+  // different at the call site is what keeps the D-01 contrast visible in
+  // the code.
+  requeueNoRetry(jobId: string): void {
+    this.db.prepare("UPDATE queue_job SET status = 'queued' WHERE id = ?").run(jobId);
+  }
+
   failJob(jobId: string, stallReason: string): void {
     this.db.prepare(
       "UPDATE queue_job SET status = 'failed', stall_reason = ? WHERE id = ?"

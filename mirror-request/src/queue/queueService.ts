@@ -181,6 +181,41 @@ export class QueueService {
     }
   }
 
+  /**
+   * D-12/D-13: the Agent transport reports a real disconnect (clean close or
+   * heartbeat eviction) through this seam, bound once in createQueueService()
+   * to plan 03-02's registerDisconnectHandler(). Both halves of D-13's mutual
+   * exclusion with the live busyTimer live in the first two statements here,
+   * and neither is optional:
+   *   - the `!== 'BUSY'` guard handles the order where busyTimer already won:
+   *     it has already set the booth IDLE and resolved the job through
+   *     handleStall(), so this path must add nothing.
+   *   - clearBusyTimer() handles the opposite order: it cancels the
+   *     still-pending timer so it cannot also resolve the same job later.
+   * Node's single-threaded event loop makes those two sufficient — a timer
+   * callback and a socket close callback are separate macrotasks that can
+   * never interleave, only run in some order, and a timer that has not yet
+   * begun executing is unconditionally cancellable. No lock or flag needed.
+   *
+   * handleStall() is deliberately never called from this path: it is the
+   * single, always-retry-charging definition of Phase 2's D-05/D-06/D-07
+   * policy, and a system-side fault (D-01) must not spend the guest's
+   * budget. getInFlightJobs() is reused rather than tracking "the current
+   * job" in a new field — it is Phase 2's existing single source of truth
+   * for that question, and the loop also covers the orphan case the
+   * single-booth invariant makes rare but not impossible.
+   */
+  onAgentDisconnected(): void {
+    if (this.store.getBoothState() !== 'BUSY') return;
+    this.clearBusyTimer();
+    this.store.setBoothIdle();
+    for (const job of this.store.getInFlightJobs()) {
+      this.store.requeueNoRetry(job.id);
+      queueLogger.warn(`Job ${job.id} requeued after Agent disconnect (no retry charged)`);
+    }
+    this.tick();
+  }
+
   onAgentEvent(eventType: string, jobId?: string, payload?: Record<string, unknown>): void {
     if (eventType === 'session_end') {
       this.sessionEnded();
@@ -298,6 +333,7 @@ export function createQueueService(
     agentServer.registerEventHandler((eventType, jobId, payload) => qs.onAgentEvent(eventType, jobId, payload));
     qs.bindAnnouncement((data) => agentServer.sendEvent({ type: 'announcement', data }));
     qs.bindIsAgentOnline(() => agentServer.isAgentOnline());
+    agentServer.registerDisconnectHandler(() => qs.onAgentDisconnected());
   }
   if (notificationService) {
     qs.bindNotificationService(notificationService);
