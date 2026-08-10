@@ -137,6 +137,17 @@ any of them):
 | `NEXT_GUEST_COUNTDOWN_MS` | `7000` (7 s) | How long the `ANNOUNCING` state holds before the next guest's session is dispatched; the effective value is always clamped to 5000-10000 ms regardless of what this is set to |
 | `SESSION_MAX_RETRIES` | `2` | How many times a stalled job is returned to the queue before it is marked `failed` — 2 retries means 3 dispatch attempts total (see §6) |
 
+Guest notification variables added in Phase 4 (optional, have working
+defaults — see §8 for the full delivery contract these govern):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NOTIFY_WEBHOOK_URL` | unset (empty string) | Where the guest's name and photo are POSTed (see §8). **When unset, the service warns and skips delivery rather than failing** — safe, but silent: a misconfigured or forgotten value produces no error anywhere and looks identical to "no photos were taken." Confirm this is set to the real slideshow receiver URL before a production deploy. |
+| `NOTIFY_MAX_RETRIES` | `2` | **Meaning changed in Phase 4 (D-08, D-15).** This is now the count of retries *after* the first attempt, matching `SESSION_MAX_RETRIES`'s meaning — the default of `2` yields 3 total delivery attempts, the same total as before this phase. If you set this explicitly in a production `.env`/PM2 environment under the old meaning (where the number was the *total* attempt count), re-read your value: under the new meaning the same number now yields one more attempt than before. See §8's retry-budget note. |
+| `NOTIFY_FETCH_TIMEOUT_MS` | `10000` (10 s) | How long a single delivery attempt waits for the receiver to respond before the attempt is aborted and counted as a timeout (see §8) |
+| `NOTIFY_SWEEP_INTERVAL_MS` | `3000` (3 s) | How often the sweeper checks `notification_record` for rows that are due |
+| `NOTIFY_CLAIM_LEASE_MS` | `60000` (1 min) | How long a claimed row is held before it becomes eligible to be picked up again if the process claiming it dies mid-delivery. The effective value is always clamped to at least twice `NOTIFY_FETCH_TIMEOUT_MS`, so a misconfiguration can never expire a lease under a live in-flight request. |
+
 See `.env.example` for the full list of environment variables this service
 reads.
 
@@ -410,3 +421,197 @@ exactly as before this phase. If you see `retries` incrementing and a
 look at §6. If you see a job back in `queued` with `retries` unchanged and
 `stall_reason` empty, the fault was the link being down — look here
 instead.
+
+## 8. Guest notification delivery
+
+This is the third published contract this service owns, alongside §1's
+webhook signing contract and §7's Agent auth contract — the last leg of the
+guest's journey: when a photo finishes processing, this service tells the
+slideshow so the guest sees their own picture appear on screen.
+
+### The published payload contract
+
+When a delivery is attempted, this service POSTs exactly these five keys as
+a JSON body to `NOTIFY_WEBHOOK_URL` (§3):
+
+```json
+{
+  "jobId": "job-abc123",
+  "guestName": "Nguyễn Văn A",
+  "photoUrl": "https://example.com/photos/job-abc123.jpg",
+  "timestamp": "2026-08-10T09:15:32.104Z",
+  "mode": "boomerang"
+}
+```
+
+**The receiver performs no lookup of any kind.** `web-slide/server.js`
+reads these fields straight off the request body and falls back silently
+when one is absent — `body.guestName` (or two other fallback field names)
+defaulting to the literal string `'Khách hàng'`, `body.photoUrl` defaulting
+to `null` (no image shown), and so on. There is no schema validation, no
+required-field check, and no error response for a malformed or
+short-payload body — a well-formed request always gets a `200`. **This
+means anything the slideshow is supposed to show must be in this payload,
+and a field rename on either side — this service renaming `guestName`, or
+the receiver being changed to read a different key — produces a blank
+display or a `'Khách hàng'` placeholder and no error anywhere.** Nothing on
+either side would report it; the only way to know is a person watching the
+screen. This is why the contract lives here as prose, not just as
+whatever the current code happens to send.
+
+**What this service deliberately does not send:** no `phone`, no `email`,
+no other guest contact detail. The slideshow displays a name and an image;
+it has no use for contact details, so none are sent — not sending PII is
+cheaper than protecting it in transit (D-02, D-03). `web-slide`'s `phone`
+and `email` fields exist in its own data model but are treated as
+vestigial for this integration: they will always receive `''` from this
+service. That is the intended end state, not a bug or drift to fix.
+
+**This webhook is unsigned**, unlike the inbound `/on-register` contract in
+§1. The reason is the absence of personal data in the body — there is
+nothing in a stolen or forged payload worth protecting beyond a guest's
+name and a photo URL that already exists on this service's own storage. If
+the payload ever grows to carry contact details or anything else sensitive,
+signing must be revisited before that change ships.
+
+### The delivery model
+
+An Agent `file_upload` event calls `sendPhotoLink()`, which writes a
+durable work item to `notification_record` carrying the photo URL and a due
+time — it performs no network I/O itself and returns immediately. A
+periodic sweeper (`NOTIFY_SWEEP_INTERVAL_MS`, §3) claims and delivers rows
+that are due. **There is no in-memory retry loop and no startup recovery
+pass** — the sweeper's own due-time query is the recovery mechanism, which
+is what makes a restart mid-retry harmless (D-04). A process killed
+mid-delivery leaves its row claimed with a lease (`status = 'sending'`,
+`dueAt` set to the lease deadline); the row becomes deliverable again on
+its own, with no special-case code, once that lease expires and the
+sweeper's normal due-time query finds it again.
+
+### The status vocabulary
+
+| Status | Meaning | Terminal? | What moves it out |
+|---|---|---|---|
+| `pending` | Enqueued, not yet attempted | No | The sweeper claims it once its `dueAt` has passed |
+| `retrying` | A previous attempt failed and a further attempt is scheduled | No | The sweeper claims it once its (backed-off) `dueAt` has passed |
+| `sending` | Currently claimed by a sweeper process, mid-delivery | No | Delivery succeeds (→ `delivered`), fails and retries remain (→ `retrying`), fails and retries are exhausted (→ `failed`), or the claiming process dies and the lease in `dueAt` expires (→ eligible to be claimed again, same as `pending`/`retrying`) |
+| `delivered` | The receiver answered `2xx` | **Yes** | Nothing — a terminal state, excluded from every query the sweeper runs |
+| `failed` | Retries exhausted, or the row could never be delivered (no registration found, or a pre-migration row with no photo URL) | **Yes** | Nothing automatic — see "Re-arming a failed notification by hand" below |
+
+`sending` carries a lease deadline in `dueAt` rather than being a dead
+end — it is not a status a row gets stuck in. The two terminal states,
+`delivered` and `failed`, are excluded from every query the sweeper runs
+(`getDueNotifications()`'s `status IN ('pending','retrying','sending')`
+and `claimNotification()`'s matching predicate in `src/state/localStore.ts`),
+which is what guarantees a guest's photo is never sent twice (D-05).
+
+### The failure vocabulary
+
+The `lastError` reason strings this service actually writes, from
+`classifyError()` in `src/notifications/notificationService.ts`:
+
+| `lastError` value | What it tells the operator |
+|---|---|
+| `timeout` | The delivery attempt was aborted after `NOTIFY_FETCH_TIMEOUT_MS` with no response. **The receiver is alive and stuck**, not absent — it accepted the connection but never answered. |
+| `Webhook returned HTTP <status>` | The receiver responded, but not with `2xx`. Check the receiver's own logs for that status code. |
+| the underlying `Error.message` (e.g. a `TypeError` for connection refused) | The receiver was not reachable at all — **the receiver is absent**, not stuck. A `fetch` connection-refused error surfaces its own message here. |
+| `registration not found` | The row's `jobId` no longer resolves to a guest registration. Not a network fault — this delivery can never succeed regardless of retries. |
+| `photoUrl unavailable — record predates persisted-queue migration` | Written once, by the migration itself, not by a delivery attempt — see "One migration note" below. |
+
+A `timeout` and a connection-refused `Error.message` lead to different
+fixes: a `timeout` means go look at why the receiver process is hung
+(deadlocked, out of memory, stuck request handler); a connection failure
+means go check whether the receiver process is running at all, or whether
+a network/firewall change broke the path to it.
+
+When retries are exhausted, exactly one line is logged, after the durable
+`failed` write, quoted verbatim from the source:
+
+```
+Notification permanently failed for job ${row.jobId} after ${nextAttempt} attempts: ${reason}
+```
+
+This is the only operator-visible log signal that a specific guest never
+got their photo — grep for `Notification permanently failed` in the
+rotated logs under `logs/` to find every occurrence. No error-level log
+fires on a retry that still has budget remaining (D-09).
+
+### Finding guests who never got their photo
+
+```sql
+SELECT
+  n.jobId,
+  r.name AS guestName,
+  n.lastError,
+  n.attempts,
+  n.updatedAt
+FROM notification_record n
+JOIN queue_job q ON q.id = n.jobId
+JOIN registration r ON r.id = q.registration_id
+WHERE n.status = 'failed'
+ORDER BY n.updatedAt DESC;
+```
+
+This is what D-09 exists for, and what NOT-02's "log để xử lý thủ công"
+("log for manual handling") means in practice — a query, not a code path,
+because a `failed` notification is not something the service can safely
+resolve on its own.
+
+### Re-arming a failed notification by hand
+
+**Take a backup of the database file first** (§2's retention posture
+applies here too):
+
+```sql
+UPDATE notification_record
+SET status = 'pending', dueAt = strftime('%s','now') * 1000
+WHERE jobId = '<job-id>';
+```
+
+**The code will not do this for you by design.** A repeat `file_upload`
+event for a job whose notification has already reached a terminal state
+does not re-arm it — `enqueueNotification()`'s `ON CONFLICT ... WHERE
+status NOT IN ('delivered','failed')` clause in `src/state/localStore.ts`
+makes that a structural no-op, not an `if` a later edit could accidentally
+delete. Terminal is terminal; re-arming a failed delivery is always an
+explicit, deliberate operator action, taken with a backup in hand and a
+specific reason to believe delivery will succeed this time (for example,
+the receiver being confirmed back online after an outage).
+
+### The retry budget
+
+`NOTIFY_MAX_RETRIES` counts retries **after** the first attempt (D-08), not
+the total. The shipped default of `2` therefore yields **3 total delivery
+attempts** — `attemptDelivery()`'s boundary is written and confirmed as
+strictly `nextAttempt < 1 + this.maxRetries`, not `<=`.
+
+This meaning changed in this phase, and the default moved from `3` to `2`
+in the same change specifically so the real number of attempts stayed at
+3 — under the old code, `NOTIFY_MAX_RETRIES=3` with an `attempt <=
+maxRetries` loop also yielded 3 total attempts. **Anyone who set this
+variable explicitly in a production environment file, to any value, is now
+getting one more attempt than before and should re-read their value** (see
+§3's table entry for the same note). The new default also matches
+`SESSION_MAX_RETRIES`'s meaning and value exactly — both now mean "retries
+after the first attempt," both default to `2`.
+
+### One migration note, stated plainly
+
+The first boot after this deploy rewrites rows. `notification_record` never
+stored a photo URL before this phase (D-13) — it existed only as a runtime
+value passed through a live `file_upload` event and was never persisted.
+Any row in `notification_record` that predates this change therefore has no
+`photoUrl` and can never be resumed by the new sweeper. The migration marks
+every such non-terminal row `failed`, with:
+
+```
+lastError = 'photoUrl unavailable — record predates persisted-queue migration'
+```
+
+**This is one-way.** There is no code path that recovers a photo URL for
+one of these rows after the fact — the URL was never written anywhere
+durable, so there is nothing to recover it from. This is honest rather than
+silent: the alternative was leaving those rows looking deliverable forever,
+never actually sending, and never telling anyone why. See Task 3's phase
+gate below for the human decision this triggers before a production
+deploy.
