@@ -1,5 +1,6 @@
 import { WebSocket, WebSocketServer } from 'ws';
 import http from 'http';
+import { timingSafeEqual } from 'crypto';
 import { getConfig } from '../config';
 import logger from '../logging/logger';
 
@@ -20,6 +21,31 @@ export class AgentServer {
   registerAckHandler(fn: AgentAckHandler): void { this.ackHandler = fn; }
   registerEventHandler(fn: AgentEventHandler): void { this.eventHandler = fn; }
 
+  /**
+   * Verifies the `Authorization: Bearer <token>` header against the
+   * configured `AGENT_WS_TOKEN`, reproducing the shape of `webhookAuth.ts`'s
+   * `verifySignature()` (Phase 1's precedent). `timingSafeEqual` throws
+   * `ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH` on a length mismatch rather than
+   * returning false, so the explicit length guard below is required — without
+   * it a wrong-length header would surface as an uncaught exception instead
+   * of a clean rejection. The whole body is wrapped in try/catch for the same
+   * reason a malformed header must never crash the upgrade path. Returns a
+   * bare boolean and logs nothing: the presented and configured credentials
+   * must never appear in a message, an error, or a thrown value (D-08).
+   */
+  private isValidBearerToken(authHeader: string): boolean {
+    const PREFIX = 'Bearer ';
+    if (!authHeader.startsWith(PREFIX)) return false;
+    try {
+      const received = Buffer.from(authHeader.slice(PREFIX.length), 'utf8');
+      const expected = Buffer.from(this.config.AGENT_WS_TOKEN, 'utf8');
+      if (received.length !== expected.length) return false;
+      return timingSafeEqual(received, expected);
+    } catch {
+      return false;
+    }
+  }
+
   start(httpServer: http.Server): void {
     this.wss = new WebSocketServer({
       noServer: true,
@@ -29,18 +55,21 @@ export class AgentServer {
     httpServer.on('upgrade', (req, socket, head) => {
       const pathname = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname;
       if (pathname !== '/agent' || !this.wss) return;
+
+      const authHeader = req.headers.authorization ?? '';
+      if (!this.isValidBearerToken(authHeader)) {
+        logger.warn('Agent WS rejected: invalid or missing Authorization header');
+        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
       this.wss.handleUpgrade(req, socket, head, (ws) => {
         this.wss?.emit('connection', ws, req);
       });
     });
 
-    this.wss.on('connection', (ws, req) => {
-      const token = new URL(req.url ?? '', `http://${req.headers.host}`).searchParams.get('token') ?? '';
-      if (token !== this.config.AGENT_WS_TOKEN) {
-        logger.warn('Agent WS rejected: invalid token');
-        ws.close(4001, 'unauthorized');
-        return;
-      }
+    this.wss.on('connection', (ws) => {
       if (this.agentConn) {
         try { this.agentConn.ws.close(); } catch { /* ignore */ }
       }

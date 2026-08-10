@@ -31,10 +31,17 @@ describe('Agent WebSocket transport', () => {
     if (!address || typeof address === 'string') throw new Error('Missing server address');
 
     const extensions = await new Promise<string | undefined>((resolve, reject) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${address.port}/agent?token=invalid-test-token`, {
+      const ws = new WebSocket(`ws://127.0.0.1:${address.port}/agent`, {
+        headers: { authorization: 'Bearer test-agent-token' },
         perMessageDeflate: true,
       });
       ws.once('upgrade', (response) => {
+        // Under D-06 the credential is now valid, so the connection stays
+        // open (unlike the old post-handshake-close-on-invalid-token
+        // behavior this case relied on incidentally). Close it explicitly
+        // once the header has been read, or afterEach's httpServer.close()
+        // hangs waiting for this socket to end.
+        ws.close();
         resolve(response.headers['sec-websocket-extensions']);
       });
       ws.once('error', reject);
