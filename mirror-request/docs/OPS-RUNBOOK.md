@@ -127,6 +127,16 @@ Other webhook-related variables (optional, have working defaults):
 | `WEBHOOK_TIMESTAMP_SKEW_MS` | `300000` (5 min) | Timestamp freshness window, symmetric (past and future) |
 | `REGISTRATION_DEDUP_WINDOW_MS` | `300000` (5 min) | Time window for the id/email/phone duplicate-registration check |
 
+Queue and booth timing variables added in Phase 2 (optional, have working
+defaults — none of them is required, and no production deploy needs to set
+any of them):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SESSION_TIMEOUT_MS` | `300000` (5 min) | How long a dispatched/in-progress session may run before the booth is considered stalled — used both by the live busy timer and by startup recovery's age check (see §5, §6) |
+| `NEXT_GUEST_COUNTDOWN_MS` | `7000` (7 s) | How long the `ANNOUNCING` state holds before the next guest's session is dispatched; the effective value is always clamped to 5000-10000 ms regardless of what this is set to |
+| `SESSION_MAX_RETRIES` | `2` | How many times a stalled job is returned to the queue before it is marked `failed` — 2 retries means 3 dispatch attempts total (see §6) |
+
 See `.env.example` for the full list of environment variables this service
 reads.
 
@@ -142,3 +152,121 @@ NODE_ENV=production node -e "require('./dist/config').loadConfig()"
 This should print nothing and exit `0`. If it throws, the error message
 names exactly which variable (§3) is missing or still a placeholder in
 your production environment — fix that variable and re-run.
+
+## 5. Booth state machine
+
+There is exactly one booth, tracked as a single row in the `booth_state`
+table (`id = 1`). It has three live states:
+
+- **IDLE** — nothing dispatched, nothing being announced. The queue tick
+  looks for the next guest every 250 ms.
+- **ANNOUNCING** — a guest has been picked and is being counted down
+  (5-10 s, configurable via `NEXT_GUEST_COUNTDOWN_MS`, §3) before dispatch.
+  This is a first-class state with its own transitions, not an
+  implementation detail — treating it as one is how the restart defect this
+  phase fixed came to exist.
+- **BUSY** — a session has been dispatched to the Agent and is either
+  awaiting acknowledgement or actively running.
+
+The type `BoothState` in `src/types.ts` declares a fourth value,
+`TIMEOUT_RESET`, which no code path in this service ever writes. It is
+dead by design — do not look for it in the database.
+
+### Transition table
+
+| From | To | Trigger | What happens to the job |
+|---|---|---|---|
+| IDLE | ANNOUNCING | The 250 ms tick finds a queued job and the booth is idle | The job stays `queued`; its guest name and countdown are broadcast to the display feed |
+| ANNOUNCING | BUSY | The countdown (`NEXT_GUEST_COUNTDOWN_MS`) elapses | The job is marked `dispatched`, `dispatched_at` is stamped, and the dispatch command is sent to the Agent |
+| BUSY | IDLE | The Agent reports `session_end` | The in-progress job is marked `completed`, `session_ended_at`/`completed_at` are stamped, and the tick immediately looks for the next guest |
+| BUSY | BUSY (timer re-armed) | The Agent acknowledges the session (`session_start` or a positive ack) | The job is marked `in_progress`, `acknowledged_at` is stamped, and the busy timer restarts for a full `SESSION_TIMEOUT_MS` |
+| BUSY | IDLE | The Agent rejects the session (a negative ack / NAK) | The job is requeued under the bounded retry policy (`stall_reason = 'agent_nak'`, see §6) or failed if retries are exhausted, and the tick immediately looks for the next guest |
+| BUSY | IDLE | The busy timer fires — no acknowledgement or `session_end` arrived within `SESSION_TIMEOUT_MS` | The job is requeued under the bounded retry policy (`stall_reason = 'session_ack_timeout'`, see §6) or failed if retries are exhausted, and the tick immediately looks for the next guest |
+| ANNOUNCING (at startup) | IDLE | The service starts and finds the booth left `ANNOUNCING` from before a restart | The job is left untouched (still `queued`) — the countdown is only 5-10 s, so it is simply re-announced by the next tick rather than resumed |
+| BUSY (at startup, session stale) | IDLE | The service starts and finds the booth `BUSY`, but `now - booth_state.updated_at` is at or past `SESSION_TIMEOUT_MS` (or the timestamp cannot be parsed) | Every in-flight (`dispatched`/`in_progress`) job is swept through the bounded retry policy (`stall_reason = 'restart_recovery_timeout'`, see §6) |
+| BUSY (at startup, session possibly live) | BUSY (timer re-armed) | The service starts and finds the booth `BUSY` with `now - booth_state.updated_at` under `SESSION_TIMEOUT_MS`, and at least one in-flight job | The booth stays `BUSY`; the most recently dispatched job is treated as the survivor and its timer is re-armed for only the *remaining* time (`SESSION_TIMEOUT_MS` minus the elapsed age) — never a fresh full timeout. Any other in-flight job found at the same time is swept through the retry policy as an orphan from an earlier incident |
+
+Startup recovery (the last three rows) runs once, before the first tick,
+every time the service boots. It exists because a restart destroys the
+in-memory session timer but never the persisted `booth_state`/`queue_job`
+rows — see §6.
+
+## 6. When a job gets stuck
+
+On every startup, before serving anything, the service reconciles the
+persisted booth state against wall-clock age and resolves every job left in
+`dispatched` or `in_progress` (see §5's last three transition rows). Most of
+the time this means a stuck booth heals itself on the next restart. This
+section is for diagnosing a job that is stalled *right now*, without
+restarting the service, and for handling the case where a job should never
+be re-dispatched at all.
+
+### Read-only inspection
+
+Run this from the `mirror-request/` directory with the service either
+running or stopped — it opens the database read-only and cannot write to
+it:
+
+```bash
+node -e "
+const Database = require('better-sqlite3');
+const db = new Database(process.env.LOCAL_STORE_PATH || './data/extension-service.sqlite', { readonly: true });
+console.log('booth_state:', db.prepare('SELECT * FROM booth_state WHERE id = 1').get());
+console.log('non-terminal queue_job rows:');
+console.log(db.prepare(
+  \"SELECT id, status, retries, stall_reason, queued_at, dispatched_at FROM queue_job WHERE status NOT IN ('completed','failed')\"
+).all());
+"
+```
+
+### `stall_reason` vocabulary
+
+Every job that goes through the bounded retry policy carries one of these
+fixed, server-authored `stall_reason` values — never guest-supplied text:
+
+| `stall_reason` | What actually happened |
+|---|---|
+| `restart_recovery_timeout` | The service restarted and found this job still in flight with a booth state too old to trust as live (§5's startup-BUSY-stale row) |
+| `session_ack_timeout` | The Agent was dispatched a session but never acknowledged it (and never sent `session_end`) within `SESSION_TIMEOUT_MS` |
+| `agent_nak` | The Agent explicitly rejected the dispatched session |
+
+### Retries and failure
+
+Every stall increments `queue_job.retries`. A job is retried up to
+`SESSION_MAX_RETRIES` times (default `2`, meaning 3 dispatch attempts
+total, §3); once that budget is exceeded the job's status becomes `failed`,
+its `stall_reason` records why, a warning is logged, and **the queue moves
+on to the next guest** — one broken job never holds up everyone behind it.
+
+**No guest is notified when their job fails.** Recording `stall_reason`
+precisely enough to act on is this phase's obligation; sending the guest a
+message about it is a later phase's delivery channel (Phase 4). A `failed`
+row means somebody may need to be contacted by hand.
+
+### Marking a job as "do not re-dispatch"
+
+A job only re-enters the dispatch cycle while its status is `queued`. To
+stop a specific job being re-dispatched — for example a registration from
+days ago whose guest has long since left — mark it `failed` by hand.
+**Take a backup of the database file first** (§2's retention posture
+applies here too):
+
+```bash
+sqlite3 ./data/extension-service.sqlite \
+  "UPDATE queue_job SET status = 'failed', stall_reason = 'manual_operator_stop' WHERE id = '<job-id>';"
+```
+
+`queue_job` rows in `failed` status are not pruned by anything in this
+service — they are covered by §2's manual retention policy like every
+other row.
+
+### Reading the logs vs. reading the database
+
+The masking filter in `src/logging/logger.ts` replaces any run of 7 or
+more consecutive digits with asterisks. Job ids this service actually
+receives can contain such a run, so a job id may appear partially
+asterisked in the rotated log files under `logs/`. This is a known,
+deliberate limitation carried over from Phase 1 — the same rule also
+protects guest phone numbers, and it is not changed here. **The
+authoritative record of what happened to a job is `queue_job.stall_reason`
+and `queue_job.retries` in the database, not the log line.**
