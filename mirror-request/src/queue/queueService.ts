@@ -21,6 +21,17 @@ export class QueueService {
   private sessionMaxRetries: number;
 
   private notificationService: { sendPhotoLink: (jid: string, url: string) => Promise<void> } | null = null;
+  /**
+   * D-02..D-04: whether the Agent transport is connected right now. Defaults
+   * to online so every pre-Phase-3 QueueService test — which never binds
+   * this read — keeps its existing meaning unchanged.
+   */
+  private isAgentOnlineCb: () => boolean = () => true;
+  /**
+   * D-03: set on the first skipped dispatch of an outage, cleared the moment
+   * the booth is allowed to leave IDLE again, so a long outage logs once.
+   */
+  private agentOfflineDispatchSkipLogged = false;
   private sendCommandCb: ((payload: {
     type: 'command'; action: 'start_session'; jobId: string; mode?: string
   }) => void) | null = null;
@@ -132,6 +143,9 @@ export class QueueService {
   bindSendCommand(cb: (payload: { type: 'command'; action: 'start_session'; jobId: string; mode?: string }) => void): void {
       this.sendCommandCb = cb;
     }
+  bindIsAgentOnline(cb: () => boolean): void {
+    this.isAgentOnlineCb = cb;
+  }
   bindAnnouncement(cb: NonNullable<QueueService['sendAnnouncementCb']>): void {
     this.sendAnnouncementCb = cb;
   }
@@ -183,6 +197,14 @@ export class QueueService {
     if (this.announcingJobId) return;
     const job = this.store.getNextQueuedJob();
     if (!job) return;
+    if (!this.isAgentOnlineCb()) {
+      if (!this.agentOfflineDispatchSkipLogged) {
+        queueLogger.warn(`Skipping dispatch: Agent not connected (job ${job.id} stays queued)`);
+        this.agentOfflineDispatchSkipLogged = true;
+      }
+      return;
+    }
+    this.agentOfflineDispatchSkipLogged = false;
     this.beginAnnouncement(job);
   }
 
@@ -209,6 +231,13 @@ export class QueueService {
   }
 
   private dispatchJob(job: { id: string }): void {
+    if (!this.isAgentOnlineCb()) {
+      queueLogger.warn(`Skipping dispatch: Agent disconnected during announcement (job ${job.id} stays queued)`);
+      this.agentOfflineDispatchSkipLogged = true;
+      this.store.setBoothIdle();
+      this.tick();
+      return;
+    }
     const now = Date.now();
     this.store.updateJobStatus(job.id, 'dispatched', 'dispatched_at', now);
     this.store.setBoothBusy();
@@ -267,6 +296,7 @@ export function createQueueService(
     agentServer.registerAckHandler((jobId, ok, err) => qs.onAgentAck(jobId, ok, err));
     agentServer.registerEventHandler((eventType, jobId, payload) => qs.onAgentEvent(eventType, jobId, payload));
     qs.bindAnnouncement((data) => agentServer.sendEvent({ type: 'announcement', data }));
+    qs.bindIsAgentOnline(() => agentServer.isAgentOnline());
   }
   if (notificationService) {
     qs.bindNotificationService(notificationService);
