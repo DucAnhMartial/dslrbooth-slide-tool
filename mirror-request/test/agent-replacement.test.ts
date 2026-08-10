@@ -138,3 +138,86 @@ describe('Agent WS replacement (AGT-01, D-10, D-11)', () => {
     clientB.terminate();
   });
 });
+
+describe('Agent disconnect seam (queueService binding point, plan 03-04)', () => {
+  let httpServer: http.Server | undefined;
+  let agentServer: AgentServer | undefined;
+  let port: number;
+  let openSockets: WebSocket[] = [];
+
+  beforeEach(async () => {
+    httpServer = http.createServer();
+    agentServer = new AgentServer();
+    agentServer.start(httpServer);
+    await new Promise<void>((resolve) => httpServer?.listen(0, '127.0.0.1', resolve));
+    const address = httpServer.address();
+    if (!address || typeof address === 'string') throw new Error('Missing server address');
+    port = address.port;
+    openSockets = [];
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    for (const ws of openSockets) {
+      try { ws.terminate(); } catch { /* already closed */ }
+    }
+    agentServer?.stop();
+    if (httpServer?.listening) {
+      await new Promise<void>((resolve) => httpServer?.close(() => resolve()));
+    }
+  });
+
+  function connect(): Promise<WebSocket> {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/agent`, {
+        headers: { authorization: `Bearer ${VALID_TOKEN}` },
+      });
+      openSockets.push(ws);
+      ws.once('open', () => resolve(ws));
+      ws.once('error', reject);
+    });
+  }
+
+  function waitClose(ws: WebSocket): Promise<void> {
+    return new Promise((resolve) => {
+      if (ws.readyState === WebSocket.CLOSED) return resolve();
+      ws.once('close', () => resolve());
+    });
+  }
+
+  function settle(ms = 100): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  it('a displaced (stale) connection close invokes the handler zero times; the survivor invokes it exactly once', async () => {
+    const calls: number[] = [];
+    agentServer?.registerDisconnectHandler(() => calls.push(1));
+
+    const clientA = await connect();
+    const clientB = await connect();
+    await waitClose(clientA);
+    await settle();
+
+    expect(calls).toHaveLength(0);
+
+    clientB.close();
+    await waitClose(clientB);
+    await settle();
+
+    expect(calls).toHaveLength(1);
+  });
+
+  it('with no handler registered, connect-then-close runs without throwing', async () => {
+    const clientA = await connect();
+    const clientB = await connect();
+    await waitClose(clientA);
+    await settle();
+
+    clientB.close();
+    await waitClose(clientB);
+    await settle();
+
+    // Reaching this point without an unhandled exception is the assertion.
+    expect(true).toBe(true);
+  });
+});

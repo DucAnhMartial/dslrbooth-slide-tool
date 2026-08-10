@@ -20,6 +20,7 @@ export class AgentServer {
 
   private ackHandler: AgentAckHandler = () => {};
   private eventHandler: AgentEventHandler = () => {};
+  private disconnectHandler: () => void = () => {};
 
   constructor(opts: { heartbeatIntervalMs?: number; heartbeatTimeoutMs?: number } = {}) {
     this.heartbeatIntervalMs = opts.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL;
@@ -28,6 +29,7 @@ export class AgentServer {
 
   registerAckHandler(fn: AgentAckHandler): void { this.ackHandler = fn; }
   registerEventHandler(fn: AgentEventHandler): void { this.eventHandler = fn; }
+  registerDisconnectHandler(fn: () => void): void { this.disconnectHandler = fn; }
 
   /**
    * Verifies the `Authorization: Bearer <token>` header against the
@@ -120,6 +122,7 @@ export class AgentServer {
         if (this.agentConn?.id === id) {
           this.agentConn = null;
           logger.info('Agent disconnected');
+          this.disconnectHandler();
         }
       });
 
@@ -173,6 +176,7 @@ export class AgentServer {
         this.agentConn.online = false;
         try { this.agentConn.ws.close(4002, 'heartbeat timeout'); } catch { /* ignore */ }
         this.agentConn = null;
+        this.disconnectHandler();
       }
     }, this.heartbeatIntervalMs);
   }

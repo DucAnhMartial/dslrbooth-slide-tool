@@ -84,6 +84,21 @@ describe('Agent heartbeat watchdog (AGT-05)', () => {
     expect(closeCode).toBe(4002);
   });
 
+  it('a heartbeat eviction invokes the disconnect handler exactly once, not twice for the close that follows', async () => {
+    let count = 0;
+    await startServer(new AgentServer({ heartbeatIntervalMs: 20, heartbeatTimeoutMs: 60 }));
+    agentServer?.registerDisconnectHandler(() => { count += 1; });
+
+    await connect();
+
+    await pollUntil(() => agentServer?.isAgentOnline() === false, 1000);
+    // Give the socket's own 'close' event, which follows the eviction
+    // asynchronously, time to have been delivered as well.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(count).toBe(1);
+  });
+
   it('stays online while heartbeats arrive well inside the injected timeout', async () => {
     await startServer(new AgentServer({ heartbeatIntervalMs: 25, heartbeatTimeoutMs: 500 }));
 
