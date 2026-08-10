@@ -17,9 +17,33 @@ export function createMirrorReceiver(store: LocalStore, whitelist: string[], opt
     logger.warn('Webhook signature verification disabled: no HMAC secret configured');
   }
 
+  /**
+   * The single source of the peer address, used by both `isWhitelisted` and
+   * the handler's logged `ip`, so the value that is checked and the value
+   * that is logged can never diverge.
+   *
+   * No Express application-level `trust proxy` setting is enabled anywhere
+   * in this service (see `src/index.ts`). Without it, `req.ip` resolves to
+   * the direct TCP peer — the reverse proxy itself — which is exactly what
+   * `PROXY_IP_WHITELIST` is meant to match. Enabling `trust proxy` unscoped
+   * would make Express read `X-Forwarded-For` for `req.ip`, letting any
+   * client forge that header and impersonate an allow-listed address,
+   * defeating AUTH-02 (T-01-10). If the deployment topology ever gains
+   * another hop, scope `trust proxy` to that specific hop's address —
+   * never to `true` or a blanket value — and re-verify this reasoning.
+   */
+  function clientIp(req: Request): string {
+    return (req.ip || req.socket.remoteAddress || '').split(',')[0].trim();
+  }
+
   function isWhitelisted(req: Request): boolean {
+    // Development escape hatch only: an empty whitelist allows every
+    // request. 01-01 task 2's production-strict loadConfig() validation
+    // rejects both an empty PROXY_IP_WHITELIST and the bare ['127.0.0.1']
+    // default when NODE_ENV=production, making this branch unreachable
+    // in production.
     if (whitelist.length === 0) return true;
-    const ip = (req.ip || req.connection.remoteAddress || '').split(',')[0].trim();
+    const ip = clientIp(req);
     return whitelist.some((allowed) => {
       if (allowed.endsWith('.*')) {
         const prefix = allowed.slice(0, -2);
@@ -30,7 +54,7 @@ export function createMirrorReceiver(store: LocalStore, whitelist: string[], opt
   }
 
   router.post('/on-register', (req: Request, res: Response) => {
-    const ip = req.ip || req.connection.remoteAddress || 'unknown';
+    const ip = clientIp(req) || 'unknown';
 
     if (!isWhitelisted(req)) {
       logger.warn(`Blocked /on-register from non-whitelisted IP: ${ip}`);

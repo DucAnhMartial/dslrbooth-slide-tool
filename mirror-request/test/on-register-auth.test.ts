@@ -37,6 +37,31 @@ function makeBody(id: string): string {
 }
 
 /**
+ * Like buildApp, but for the `whitelist = ['203.0.113.*']` prefix-matching
+ * behavior that cannot be exercised through a live loopback connection
+ * (supertest always originates from loopback). Overrides `req.ip` via a
+ * pre-router middleware so only the IP dimension varies — the router's
+ * `clientIp()`/`isWhitelisted()` logic under test is completely unaware
+ * this happened.
+ */
+function buildAppWithFakeIp(hmacSecret: string, whitelist: string[], fakeIp: string): express.Express {
+  const app = express();
+  app.use(jsonWithRawBody());
+  app.use((req, _res, next) => {
+    Object.defineProperty(req, 'ip', { value: fakeIp, configurable: true });
+    next();
+  });
+  app.use(
+    createMirrorReceiver(getStore(), whitelist, {
+      hmacSecret,
+      timestampSkewMs: 300_000,
+      dedupWindowMs: 300_000,
+    })
+  );
+  return app;
+}
+
+/**
  * Every 403 in this file must have this exact shape — no reason field, no
  * extra keys naming which check failed (D-12). Used by every 403 assertion
  * below so a future reason field cannot be added silently.
@@ -239,5 +264,78 @@ describe('POST /on-register — timestamp freshness + replay protection', () => 
     expectForbidden(second);
 
     expect(getStore().countWebhookIds()).toBe(countBefore + 1);
+  });
+});
+
+describe('IP allow-list', () => {
+  function signedRequest(app: express.Express, id: string) {
+    const bodyString = makeBody(id);
+    const timestamp = String(Date.now());
+    const webhookId = randomUUID();
+    const signature = sign(timestamp, webhookId, bodyString, SECRET);
+    return request(app)
+      .post('/on-register')
+      .set('Content-Type', 'application/json')
+      .set('X-Webhook-Signature', signature)
+      .set('X-Webhook-Timestamp', timestamp)
+      .set('X-Webhook-Id', webhookId)
+      .send(bodyString);
+  }
+
+  it('rejects a loopback-origin request even when a forwarding header claims an allow-listed IP', async () => {
+    const app = buildApp(SECRET, ['203.0.113.9']);
+    const id = randomUUID();
+    const bodyString = makeBody(id);
+    const timestamp = String(Date.now());
+    const webhookId = randomUUID();
+    const signature = sign(timestamp, webhookId, bodyString, SECRET);
+
+    const res = await request(app)
+      .post('/on-register')
+      .set('Content-Type', 'application/json')
+      .set('X-Forwarded-For', '203.0.113.9')
+      .set('X-Webhook-Signature', signature)
+      .set('X-Webhook-Timestamp', timestamp)
+      .set('X-Webhook-Id', webhookId)
+      .send(bodyString);
+
+    expectForbidden(res);
+    expect(getStore().getRegistration(id)).toBeUndefined();
+  });
+
+  it('accepts a loopback-origin signed request when the whitelist includes every loopback address form', async () => {
+    const app = buildApp(SECRET, ['127.0.0.1', '::ffff:127.0.0.1', '::1']);
+    const id = randomUUID();
+    const res = await signedRequest(app, id);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ accepted: true, jobId: id });
+  });
+
+  it('allows every request when the whitelist is empty (development escape hatch)', async () => {
+    const app = buildApp(SECRET, []);
+    const id = randomUUID();
+    const res = await signedRequest(app, id);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ accepted: true, jobId: id });
+  });
+
+  it('the prefix branch matches an IP sharing the prefix', async () => {
+    const app = buildAppWithFakeIp(SECRET, ['203.0.113.*'], '203.0.113.44');
+    const id = randomUUID();
+    const res = await signedRequest(app, id);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ accepted: true, jobId: id });
+  });
+
+  it('the prefix branch rejects an IP that does not share the prefix', async () => {
+    const app = buildAppWithFakeIp(SECRET, ['203.0.113.*'], '203.0.114.1');
+    const id = randomUUID();
+    const res = await signedRequest(app, id);
+
+    expectForbidden(res);
+    expect(getStore().getRegistration(id)).toBeUndefined();
   });
 });
