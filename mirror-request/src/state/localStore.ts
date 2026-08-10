@@ -28,7 +28,8 @@ export class LocalStore {
         phone TEXT NOT NULL,
         mode TEXT NOT NULL,
         registered_at TEXT NOT NULL,
-        raw_payload TEXT
+        raw_payload TEXT,
+        received_at INTEGER
       );
       CREATE TABLE IF NOT EXISTS queue_job (
         id TEXT PRIMARY KEY,
@@ -73,19 +74,28 @@ export class LocalStore {
   }
 
   migrate(): void {
-    // Phase 2+ migrations go here
+    // Additive-only migrations. This database file carries live operational
+    // data that D-14 says only the operator may delete, so migrations here
+    // must never drop or recreate a table — only add columns and backfill.
+    const columns = this.db.prepare('PRAGMA table_info(registration)').all() as Array<{ name: string }>;
+    const hasReceivedAt = columns.some((c) => c.name === 'received_at');
+    if (!hasReceivedAt) {
+      this.db.exec('ALTER TABLE registration ADD COLUMN received_at INTEGER');
+      this.db.prepare('UPDATE registration SET received_at = ? WHERE received_at IS NULL').run(Date.now());
+    }
   }
 
   // registrations
-  upsertRegistration(r: Registration & { raw_payload?: string }): Registration {
+  upsertRegistration(r: Registration & { raw_payload?: string; received_at?: number }): Registration {
     const stmt = this.db.prepare(
-      `INSERT OR REPLACE INTO registration (id, name, email, phone, mode, registered_at, raw_payload)
-       VALUES (@id, @name, @email, @phone, @mode, @registered_at, @raw_payload)`
+      `INSERT OR REPLACE INTO registration (id, name, email, phone, mode, registered_at, raw_payload, received_at)
+       VALUES (@id, @name, @email, @phone, @mode, @registered_at, @raw_payload, @received_at)`
     );
     stmt.run({
       id: r.id, name: r.name, email: r.email, phone: r.phone,
       mode: r.mode, registered_at: r.registered_at,
       raw_payload: r.raw_payload ?? null,
+      received_at: r.received_at ?? Date.now(),
     });
     return r;
   }
@@ -96,6 +106,24 @@ export class LocalStore {
 
   saveRawPayload(id: string, json: string): void {
     this.db.prepare('UPDATE registration SET raw_payload = ? WHERE id = ?').run(json, id);
+  }
+
+  // dedup: same id, or same non-empty email/phone, seen inside the window
+  findDuplicateRegistration(args: { id: string; email: string; phone: string; windowStartMs: number }): { id: string } | undefined {
+    const byId = this.db
+      .prepare('SELECT id FROM registration WHERE id = ? AND received_at >= ?')
+      .get(args.id, args.windowStartMs) as { id: string } | undefined;
+    if (byId) return byId;
+
+    return this.db
+      .prepare(
+        `SELECT id FROM registration
+         WHERE received_at >= ?
+           AND ((? <> '' AND email = ?)
+             OR (? <> '' AND phone = ?))
+         ORDER BY received_at ASC LIMIT 1`
+      )
+      .get(args.windowStartMs, args.email, args.email, args.phone, args.phone) as { id: string } | undefined;
   }
 
   // queue
