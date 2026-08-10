@@ -10,8 +10,8 @@ const CONFIG = getConfig();
 export class LocalStore {
   private db: Database.Database;
 
-  constructor() {
-    const resolved = path.resolve(CONFIG.LOCAL_STORE_PATH);
+  constructor(dbPath?: string) {
+    const resolved = path.resolve(dbPath ?? CONFIG.LOCAL_STORE_PATH);
     fs.mkdirSync(path.dirname(resolved), { recursive: true });
     this.db = new Database(resolved);
     this.db.pragma('journal_mode = WAL');
@@ -64,6 +64,10 @@ export class LocalStore {
         id INTEGER PRIMARY KEY CHECK (id = 1),
         state TEXT NOT NULL DEFAULT 'IDLE',
         updated_at TEXT NOT NULL DEFAULT 'now'
+      );
+      CREATE TABLE IF NOT EXISTS webhook_replay (
+        webhook_id TEXT PRIMARY KEY,
+        received_at INTEGER NOT NULL
       );
     `);
   }
@@ -153,6 +157,20 @@ export class LocalStore {
 
   markProcessed(regId: string): void {
     this.db.prepare('INSERT OR IGNORE INTO processed_id (reg_id) VALUES (?)').run(regId);
+  }
+
+  // webhook replay protection
+  hasSeenWebhookId(webhookId: string): boolean {
+    return this.db.prepare('SELECT 1 FROM webhook_replay WHERE webhook_id = ?').get(webhookId) !== undefined;
+  }
+
+  recordWebhookId(webhookId: string, receivedAt: number): void {
+    this.db.prepare('INSERT OR IGNORE INTO webhook_replay (webhook_id, received_at) VALUES (?, ?)').run(webhookId, receivedAt);
+  }
+
+  countWebhookIds(): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS n FROM webhook_replay').get() as { n: number };
+    return Number(row.n);
   }
 
   // cursor
