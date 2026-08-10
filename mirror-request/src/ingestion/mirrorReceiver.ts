@@ -79,8 +79,33 @@ export function createMirrorReceiver(store: LocalStore, whitelist: string[], opt
       return res.status(400).json({ error: 'id and name are required' });
     }
 
+    // Permanent id-based idempotency check first, preserved exactly as
+    // before: an id seen at any point in the past (even outside the dedup
+    // window) always echoes its own jobId.
     if (store.isProcessed(id)) {
       return res.status(200).json({ duplicate: true, jobId: id });
+    }
+
+    // D-01/D-02/D-03 time-windowed dedup ladder: id match first, then a
+    // non-empty email/phone fallback, both bounded by the configured window.
+    // "id is absent" in D-02 is read as "an id MATCH is absent" (see 01-04-PLAN.md,
+    // "Resolution of RESEARCH.md Open Question 2") — id remains a required
+    // field, the fallback catches a resubmission that arrives with a freshly
+    // minted id. A duplicate returns before any persistence call: re-running
+    // upsertRegistration would replace the original row's raw_payload with
+    // the new (identical) one, but more importantly it would defeat D-13 if
+    // the payloads ever legitimately differed (RESEARCH.md Pitfall 7).
+    const now = Date.now();
+    const windowStartMs = now - options.dedupWindowMs;
+    const existing = store.findDuplicateRegistration({
+      id,
+      email: email ?? '',
+      phone: phone ?? '',
+      windowStartMs,
+    });
+    if (existing) {
+      logger.info(`Duplicate registration ${id} within dedup window, returning original job ${existing.id}`);
+      return res.status(200).json({ duplicate: true, jobId: existing.id });
     }
 
     const registration = {
@@ -91,6 +116,7 @@ export function createMirrorReceiver(store: LocalStore, whitelist: string[], opt
       mode: mode ?? 'standard',
       qr_token: qr_token ?? null,
       registered_at: registered_at ?? new Date().toISOString(),
+      received_at: now,
     };
 
     store.upsertRegistration(registration);

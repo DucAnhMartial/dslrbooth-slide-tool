@@ -27,11 +27,15 @@ function sign(timestamp: string, webhookId: string, bodyString: string, secret: 
 }
 
 function makeBody(id: string): string {
+  // email/phone are derived from `id` (already unique per call via randomUUID())
+  // rather than hardcoded, so this auth-focused suite never triggers plan
+  // 01-04's contact-detail dedup fallback across unrelated test cases that
+  // happen to share the same LocalStore singleton.
   return JSON.stringify({
     id,
     name: 'Alice',
-    email: 'alice@example.com',
-    phone: '0900000000',
+    email: `${id}@example.com`,
+    phone: '',
     mode: 'standard',
   });
 }
