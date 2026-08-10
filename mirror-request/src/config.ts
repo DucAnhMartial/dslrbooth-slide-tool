@@ -43,6 +43,27 @@ export function loadConfig(): EnvConfig {
   // Delivery is handled by the optional photo webhook. SMTP/Twilio settings
   // remain in the config type for backwards compatibility but are not needed.
 
+  // D-09: "Production requires both controls [HMAC + IP allow-list]; other
+  // environments may configure them." Chosen mechanism: NODE_ENV === 'production'
+  // drives *mandatory configuration* (fail-fast at startup); runtime enforcement
+  // is driven by whether each control is configured (see mirrorReceiver.ts). No
+  // separate ENFORCE_WEBHOOK_AUTH-style toggle is added — an explicit toggle
+  // would create a supported way to *disable* webhook authentication in
+  // production, which is exactly what D-09 forbids. NODE_ENV is already the
+  // strictness signal this codebase uses (see the console-transport gate in
+  // logging/logger.ts). (RESEARCH.md Open Question 3 / Assumption A3)
+  const nodeEnv = get('NODE_ENV') ?? 'development';
+  const isProduction = nodeEnv === 'production';
+  const webhookSecret = get('WEBHOOK_HMAC_SECRET') ?? '';
+  const ipWhitelist = toCSV('PROXY_IP_WHITELIST', ['127.0.0.1']);
+
+  if (isProduction && !webhookSecret) {
+    errors.push('WEBHOOK_HMAC_SECRET must be configured in production (D-09)');
+  }
+  if (isProduction && (ipWhitelist.length === 0 || (ipWhitelist.length === 1 && ipWhitelist[0] === '127.0.0.1'))) {
+    errors.push('PROXY_IP_WHITELIST must be configured in production with the real reverse-proxy IPs (D-09)');
+  }
+
   if (errors.length > 0) {
     throw new Error(`Configuration errors:\n  - ${errors.join('\n  - ')}`);
   }
@@ -51,9 +72,11 @@ export function loadConfig(): EnvConfig {
     PORT: toNum('PORT', 3002),
     HOST: get('HOST') ?? '0.0.0.0',
     AGENT_WS_TOKEN: get('AGENT_WS_TOKEN') ?? '',
-    PROXY_IP_WHITELIST: toCSV('PROXY_IP_WHITELIST', ['127.0.0.1']),
+    PROXY_IP_WHITELIST: ipWhitelist,
     DB_HOST: get('DB_HOST') ?? 'localhost',
-    DB_PORT: toNum('DB_PORT', 5432),
+    // MySQL default port. Was previously 5432 (a Postgres-era leftover) —
+    // the poller reads MySQL, not Postgres (RESEARCH.md Pitfall 4).
+    DB_PORT: toNum('DB_PORT', 3306),
     DB_NAME: get('DB_NAME') ?? 'photobooth',
     DB_USER: get('DB_USER') ?? 'extension_service_ro',
     DB_PASSWORD: get('DB_PASSWORD') ?? '',
@@ -75,7 +98,7 @@ export function loadConfig(): EnvConfig {
     NOTIFY_WEBHOOK_URL: get('NOTIFY_WEBHOOK_URL') ?? '',
     LOCAL_STORE_PATH: get('LOCAL_STORE_PATH') ?? './data/extension-service.sqlite',
     LOG_LEVEL: get('LOG_LEVEL') ?? 'info',
-    WEBHOOK_HMAC_SECRET: get('WEBHOOK_HMAC_SECRET') ?? '',
+    WEBHOOK_HMAC_SECRET: webhookSecret,
     WEBHOOK_TIMESTAMP_SKEW_MS: toNum('WEBHOOK_TIMESTAMP_SKEW_MS', 300_000),
     REGISTRATION_DEDUP_WINDOW_MS: toNum('REGISTRATION_DEDUP_WINDOW_MS', 300_000),
   };
