@@ -145,6 +145,7 @@ describe('QueueService.recover() — D-03 age-based BUSY survival, D-04 ANNOUNCI
       setBoothTimeout,
       setBoothIdle,
       updateJobStatus: vi.fn(),
+      getJobRegistration: () => undefined,
       requeueWithRetry,
       failJob,
     } as unknown as LocalStore;
@@ -180,6 +181,7 @@ describe('QueueService.recover() — D-03 age-based BUSY survival, D-04 ANNOUNCI
       setBoothTimeout: vi.fn(),
       setBoothIdle: vi.fn(),
       updateJobStatus: vi.fn(),
+      getJobRegistration: () => undefined,
       requeueWithRetry,
       failJob: vi.fn(),
     } as unknown as LocalStore;
@@ -202,6 +204,7 @@ describe('QueueService.recover() — D-03 age-based BUSY survival, D-04 ANNOUNCI
       getInFlightJobs: () => [],
       setBoothTimeout,
       setBoothIdle: vi.fn(),
+      getJobRegistration: () => undefined,
       requeueWithRetry: vi.fn(),
       failJob: vi.fn(),
     } as unknown as LocalStore;
@@ -225,6 +228,7 @@ describe('QueueService.recover() — D-03 age-based BUSY survival, D-04 ANNOUNCI
       getInFlightJobs: () => [{ id: 'orphan-job' }],
       setBoothTimeout,
       setBoothIdle,
+      getJobRegistration: () => undefined,
       requeueWithRetry,
       failJob: vi.fn(),
     } as unknown as LocalStore;
@@ -249,6 +253,7 @@ describe('QueueService.recover() — D-03 age-based BUSY survival, D-04 ANNOUNCI
       getInFlightJobs: () => [{ id: 'job-corrupt-age' }],
       setBoothTimeout,
       setBoothIdle: vi.fn(),
+      getJobRegistration: () => undefined,
       requeueWithRetry,
       failJob: vi.fn(),
     } as unknown as LocalStore;
@@ -293,6 +298,7 @@ describe('QueueService config injection (D-13)', () => {
         // The injected 20_000ms timeout now routes through handleStall()
         // (plan 02-02, task 1), which needs these two store primitives even
         // though this test only asserts on the injected-config timing.
+        getJobRegistration: () => undefined,
         requeueWithRetry: () => ({ retries: 1 }),
         failJob: () => {},
       } as unknown as LocalStore;

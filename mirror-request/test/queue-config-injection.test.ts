@@ -50,6 +50,7 @@ function buildStore(opts: BuildStoreOptions = {}) {
     getQueuedGuestSummaries: () => (jobAlive ? [{ jobId: job.id, name: 'Guest', position: 1 }] : []),
     getQueueLength: () => (jobAlive ? 1 : 0),
     completeInProgressJob: () => undefined,
+    getJobRegistration: () => undefined,
     requeueWithRetry,
     failJob,
   } as unknown as LocalStore;

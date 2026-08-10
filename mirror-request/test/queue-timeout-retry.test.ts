@@ -32,6 +32,7 @@ function buildStore(queued: Array<{ id: string }>) {
       queued.map((job, index) => ({ jobId: job.id, name: `Guest ${job.id}`, position: index + 1 })),
     getQueueLength: () => queued.length,
     completeInProgressJob: () => undefined,
+    getJobRegistration: () => undefined,
     requeueWithRetry,
     failJob,
   } as unknown as LocalStore;
