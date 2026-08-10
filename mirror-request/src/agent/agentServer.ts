@@ -14,6 +14,7 @@ export class AgentServer {
   private agentConn: { ws: WebSocket; id: string; lastHeartbeat: number; online: boolean } | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private config = getConfig();
+  private connSeq = 0;
 
   private ackHandler: AgentAckHandler = () => {};
   private eventHandler: AgentEventHandler = () => {};
@@ -70,10 +71,12 @@ export class AgentServer {
     });
 
     this.wss.on('connection', (ws) => {
+      const id = `agent-${Date.now()}-${++this.connSeq}`;
       if (this.agentConn) {
+        const displacedId = this.agentConn.id;
+        logger.warn(`Agent WS replaced: ${displacedId} displaced by ${id}`);
         try { this.agentConn.ws.close(); } catch { /* ignore */ }
       }
-      const id = `agent-${Date.now()}`;
       this.agentConn = { ws, id, lastHeartbeat: Date.now(), online: true };
       logger.info(`Agent connected: ${id}`);
 
