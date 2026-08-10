@@ -1,6 +1,14 @@
 import { getStore } from '../state/localStore';
 import logger from '../logging/logger';
 
+export interface DBPollerDbConfig {
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  password: string;
+}
+
 export class DBPoller {
   private intervalMs: number;
   private batchSize: number;
@@ -8,11 +16,18 @@ export class DBPoller {
   private running = false;
   private pool: any;
   private store: ReturnType<typeof getStore>;
+  private dbConfig: DBPollerDbConfig;
 
-  constructor(intervalMs: number, batchSize: number, store: ReturnType<typeof getStore>) {
+  constructor(
+    intervalMs: number,
+    batchSize: number,
+    store: ReturnType<typeof getStore>,
+    dbConfig: DBPollerDbConfig
+  ) {
     this.intervalMs = intervalMs;
     this.batchSize = batchSize;
     this.store = store;
+    this.dbConfig = dbConfig;
     this.pool = null;
   }
 
@@ -20,13 +35,7 @@ export class DBPoller {
     if (this.running) return;
     this.running = true;
 
-    const dbHost = process.env.DB_HOST ?? 'localhost';
-    const dbPort = Number(process.env.DB_PORT ?? '3306');
-    const dbName = process.env.DB_NAME ?? 'photobooth';
-    const dbUser = process.env.DB_USER ?? '';
-    const dbPass = process.env.DB_PASSWORD ?? '';
-
-    if (!dbUser) {
+    if (!this.dbConfig.user) {
       logger.warn('DB poller skipped: DB_USER not configured');
       return;
     }
@@ -34,11 +43,11 @@ export class DBPoller {
     try {
       const mysql = require('mysql2/promise');
       this.pool = mysql.createPool({
-        host: dbHost,
-        port: dbPort,
-        database: dbName,
-        user: dbUser,
-        password: dbPass,
+        host: this.dbConfig.host,
+        port: this.dbConfig.port,
+        database: this.dbConfig.database,
+        user: this.dbConfig.user,
+        password: this.dbConfig.password,
         waitForConnections: true,
         connectionLimit: 2,
       });
@@ -50,7 +59,7 @@ export class DBPoller {
 
     this.doPoll()
       .then(() => {
-        logger.info(`DB poller connected: ${dbHost}:${dbPort}/${dbName}`);
+        logger.info(`DB poller connected: ${this.dbConfig.host}:${this.dbConfig.port}/${this.dbConfig.database}`);
         this.timer = setInterval(() => this.doPoll(), this.intervalMs);
       })
       .catch((err: Error) => {

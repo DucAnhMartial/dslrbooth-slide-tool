@@ -53,6 +53,13 @@ const poller = new DBPoller(
   config.DB_POLL_INTERVAL_MS,
   config.DB_POLL_BATCH_SIZE,
   store,
+  {
+    host: config.DB_HOST,
+    port: config.DB_PORT,
+    database: config.DB_NAME,
+    user: config.DB_USER,
+    password: config.DB_PASSWORD,
+  },
 );
 
 const server = app.listen(config.PORT, config.HOST, () => {
