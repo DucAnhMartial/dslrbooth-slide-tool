@@ -127,10 +127,26 @@ export class LocalStore {
   }
 
   // queue
+  //
+  // Logs the FIFO position at the single choke point both ingestion paths
+  // (the webhook receiver and the DB poller) already call, so one log line
+  // covers both (M2 success criterion 1, QUE-01). D-11: this adds no new
+  // deduplication mechanism — the `INSERT OR IGNORE` below, unchanged, plus
+  // Phase 1's `processed_id` table remain the only guard; the `changes === 0`
+  // branch only observes that guarantee.
   enqueueJob(j: { id: string; queued_at: number }): void {
-    this.db.prepare(
+    const result = this.db.prepare(
       `INSERT OR IGNORE INTO queue_job (id, registration_id, status, queued_at) VALUES (@id, @id, 'queued', @queued_at)`
     ).run({ id: j.id, queued_at: j.queued_at });
+
+    if (result.changes === 0) {
+      logger.info(`Job ${j.id} is already queued and was not re-queued`);
+      return;
+    }
+
+    const pos = this.getQueuePosition(j.id) ?? 0;
+    const len = this.getQueueLength();
+    logger.info(`Queued job ${j.id} at position ${pos} of ${len}`);
   }
 
   updateJobStatus(id: string, status: QueueJob['status'], tsField: keyof QueueJob, tsValue: number): void {
