@@ -77,6 +77,13 @@ export class NotificationService {
     this.timer = null;
   }
 
+  // D-05's never-deliver-twice guarantee lives in claimNotification()'s SQL
+  // predicate — specifically in 'delivered' and 'failed' being absent from
+  // its `status IN (...)` list — not in the `sweeping` flag below, which is
+  // only defence in depth against this instance's own interval re-entrancy.
+  // Widening that `IN` list, or moving the claim call to after the first
+  // `await` in the loop below, would each reintroduce double delivery with
+  // no test-visible syntax error.
   async sweep(): Promise<void> {
     // Defence in depth against interval re-entrancy — this flag is
     // explicitly NOT the mechanism that makes D-05 hold; the claim
@@ -93,7 +100,18 @@ export class NotificationService {
           // (RESEARCH.md Pitfall 2) — not an anomaly, so no log line.
           continue;
         }
-        await this.attemptDelivery(row);
+        try {
+          await this.attemptDelivery(row);
+        } catch (err) {
+          // D-10: attemptDelivery() already catches everything the fetch
+          // itself can throw — this outer guard is for whatever it can
+          // still raise from outside that inner block (a store method
+          // throwing, a malformed registration row, a future edit adding a
+          // call above the try). One bad row must never crash the process
+          // or stop the next row's delivery.
+          const reason = err instanceof Error ? err.message : String(err);
+          notifyLogger.warn(`Notification sweep: unexpected error on job ${row.jobId}, continuing: ${reason}`);
+        }
       }
     } finally {
       this.sweeping = false;
