@@ -15,9 +15,16 @@ export class AgentServer {
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private config = getConfig();
   private connSeq = 0;
+  private heartbeatIntervalMs: number;
+  private heartbeatTimeoutMs: number;
 
   private ackHandler: AgentAckHandler = () => {};
   private eventHandler: AgentEventHandler = () => {};
+
+  constructor(opts: { heartbeatIntervalMs?: number; heartbeatTimeoutMs?: number } = {}) {
+    this.heartbeatIntervalMs = opts.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL;
+    this.heartbeatTimeoutMs = opts.heartbeatTimeoutMs ?? this.config.HEARTBEAT_TIMEOUT_MS;
+  }
 
   registerAckHandler(fn: AgentAckHandler): void { this.ackHandler = fn; }
   registerEventHandler(fn: AgentEventHandler): void { this.eventHandler = fn; }
@@ -161,13 +168,13 @@ export class AgentServer {
     this.heartbeatTimer = setInterval(() => {
       if (!this.agentConn) return;
       const elapsed = Date.now() - this.agentConn.lastHeartbeat;
-      if (elapsed > this.config.HEARTBEAT_TIMEOUT_MS) {
-        logger.warn(`Agent heartbeat timeout (${elapsed}ms > ${this.config.HEARTBEAT_TIMEOUT_MS}ms)`);
+      if (elapsed > this.heartbeatTimeoutMs) {
+        logger.warn(`Agent heartbeat timeout (${elapsed}ms > ${this.heartbeatTimeoutMs}ms)`);
         this.agentConn.online = false;
         try { this.agentConn.ws.close(4002, 'heartbeat timeout'); } catch { /* ignore */ }
         this.agentConn = null;
       }
-    }, HEARTBEAT_INTERVAL);
+    }, this.heartbeatIntervalMs);
   }
 
   private stopHeartbeatWatchdog(): void {
