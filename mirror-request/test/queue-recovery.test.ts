@@ -290,6 +290,11 @@ describe('QueueService config injection (D-13)', () => {
         getQueuePosition: () => 1,
         getQueueLength: () => 1,
         getQueuedGuestSummaries: () => [{ jobId: job.id, name: 'Guest', position: 1 }],
+        // The injected 20_000ms timeout now routes through handleStall()
+        // (plan 02-02, task 1), which needs these two store primitives even
+        // though this test only asserts on the injected-config timing.
+        requeueWithRetry: () => ({ retries: 1 }),
+        failJob: () => {},
       } as unknown as LocalStore;
 
       const queue = new QueueService(store, {

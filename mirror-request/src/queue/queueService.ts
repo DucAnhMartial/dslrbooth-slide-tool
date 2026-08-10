@@ -220,8 +220,9 @@ export class QueueService {
   private startBusyTimer(jobId: string, timeoutMs: number = this.sessionTimeoutMs): void {
     this.clearBusyTimer();
     this.busyTimer = setTimeout(() => {
+      this.busyTimer = null;
       this.store.setBoothTimeout('session_ack timeout');
-      this.store.updateJobStatus(jobId, 'queued', 'acknowledged_at', Date.now());
+      this.handleStall(jobId, 'session_ack_timeout');
       this.tick();
     }, timeoutMs);
   }
