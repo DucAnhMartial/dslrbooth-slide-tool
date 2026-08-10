@@ -270,3 +270,143 @@ deliberate limitation carried over from Phase 1 — the same rule also
 protects guest phone numbers, and it is not changed here. **The
 authoritative record of what happened to a job is `queue_job.stall_reason`
 and `queue_job.retries` in the database, not the log line.**
+
+## 7. Agent WebSocket auth contract (`/agent`)
+
+This service authenticates every WebSocket upgrade to `/agent` — the link to
+the booth machine's Agent process. **This is the second published contract
+this service owns**, alongside §1's webhook signing contract, and it has a
+live counterparty: `dslrbooth-agent` is its own repository with its own
+deploy artifact, so — unlike §1, where this service is the only
+implementation — a release of one side that is not paired with a release of
+the other breaks the link completely. Implement and deploy it exactly.
+
+### The contract
+
+| Header | Meaning |
+|---|---|
+| `Authorization` | `Bearer <token>` — the shared secret, and nothing else. This service accepts **only** this header form. |
+
+- The server reads its half of the shared secret from `AGENT_WS_TOKEN` (§3).
+  The Agent reads its half from `EXTENSION_SERVICE_WS_TOKEN`, alongside
+  `EXTENSION_SERVICE_WS_URL` for the connection URL itself
+  (`dslrbooth-agent/src/config.ts`). Both variables, on both machines, must
+  hold the exact same secret value.
+- An upgrade that fails verification is answered with a bare
+  `HTTP/1.1 401 Unauthorized` written directly to the raw socket, and the
+  socket is then destroyed — **before** the WebSocket handshake completes.
+  A rejected client never holds an open socket, even briefly.
+- The secret never belongs in a URL. An older Agent build that still appends
+  `?token=<secret>` to the connection URL will be rejected outright — the
+  server no longer reads a query-string credential in any form. If you are
+  debugging a connection from an Agent that predates this contract, that is
+  the query-string form it is still using; there is nothing on the server
+  side left to accept it.
+- This service never writes the secret to a log line, at any level,
+  including on the rejection path. A rejected upgrade logs one generic line
+  — `invalid or missing Authorization header` — and nothing more specific.
+  That is by design, matching §1's "never leak which specific check failed"
+  rule; do not go looking for a more detailed reason in the logs, because
+  none is ever written.
+
+### What breaks, and why
+
+This is an outage, not a degradation. A server running this contract
+**rejects every connection** from an Agent that has not been updated to send
+the header. The queue keeps accepting registrations exactly as before —
+nothing on the ingestion side changes — but nothing is ever dispatched to
+the booth, because `isAgentOnline()` never reports true and §6's
+connectivity gate holds the queue at `IDLE` indefinitely. No guest is
+turned away and no job is marked `failed`; every registration simply queues
+forever, unserved, until an operator notices the booth is not running
+sessions.
+
+### Deploy ordering
+
+Both components go out in the **same maintenance window**. Never one and
+then the other later.
+
+```bash
+# Server
+cd mirror-request && npm run build
+
+# Agent — rebuilds the deployable binary
+cd dslrbooth-agent && npm run build:exe
+```
+
+`build:exe` produces `dslrbooth-agent.exe`, the artifact that actually runs
+on the booth machine. Deploying a new server without also rebuilding and
+redeploying this binary leaves the booth running an Agent that still speaks
+the old contract.
+
+### Verification before cutover, honestly scoped
+
+Fast, non-production checks — run these first, but understand what they do
+and do not prove:
+
+```bash
+cd mirror-request && npx vitest run test/agent-auth.test.ts
+cd dslrbooth-agent && npm test
+```
+
+These prove each side against its own expectations — that the server
+rejects and accepts the header correctly in isolation, and that the Agent
+builds the header correctly in isolation. **They do not prove the two sides
+meet correctly on a real wire.**
+
+**There is no staging environment referenced anywhere in this repository's
+configuration or in this runbook.** Say that plainly rather than implying a
+rehearsal tier exists: `config.ts` on both sides distinguishes production
+from everything else and nothing further; there is no Dockerfile, no
+compose file, and no staging deploy target — only `ecosystem.config.js` for
+pm2 in production. The only rehearsal actually available before a real
+cutover is local: run the updated server on your own machine, point an
+updated Agent build's `EXTENSION_SERVICE_WS_URL` at it with a matching
+`EXTENSION_SERVICE_WS_TOKEN`, and confirm the server logs `Agent connected`
+rather than the rejection line, and that a dispatched `start_session`
+command reaches the Agent.
+
+### Rollback
+
+The server accepts the header form only — there is no fallback path. Rolling
+the server back to a pre-contract build while the Agent has already been
+updated reproduces the **identical outage in the opposite direction**: the
+old server never sent a 401 for a missing header in the first place, but an
+updated Agent's handshake will not match whatever the old server expects
+either, and the booth stops being served exactly as above, just with the
+two sides' roles reversed.
+
+**Roll back both, or neither.** There is no partial-rollback state that
+leaves the booth working.
+
+### What the operator will see in the logs
+
+Every line below is quoted verbatim from the source as it now stands.
+
+| Log line | Level | Meaning |
+|---|---|---|
+| `Agent WS rejected: invalid or missing Authorization header` | warn | An upgrade to `/agent` failed verification — missing header, wrong scheme, or wrong secret. Never tells you which; see above. |
+| `Agent WS replaced: <old-id> displaced by <new-id>` | warn | A second Agent connected while one was already connected. Last-wins: the new one takes over, naming both connection ids. This is not itself a failure — a real Agent recovering from a flaky network drop looks exactly like this — but two Agents pointed at one server by mistake also looks exactly like this, and now it is visible instead of silent. |
+| `Agent heartbeat timeout (<elapsed>ms > <timeout>ms)` | warn | No heartbeat arrived within `HEARTBEAT_TIMEOUT_MS` (default 30 s, §3). The connection is torn down and treated as a disconnect. |
+| `Skipping dispatch: Agent not connected (job <id> stays queued)` | warn | The queue found a job ready to announce, but the Agent is not connected, so nothing was dispatched. This logs **once per outage**, not once per 250 ms tick — its absence during a long outage is the tick working correctly, not a lost log line. |
+| `Skipping dispatch: Agent disconnected during announcement (job <id> stays queued)` | warn | The Agent dropped during the 5-10 s announcement countdown, after the tick-gate above already passed. Same no-retry outcome as the tick-gate case. |
+| `Job <id> requeued after Agent disconnect (no retry charged)` | warn | The Agent disconnected while a job was dispatched or in progress. The job returns to `queued` immediately. |
+
+**The one fact an operator would otherwise misread**, tying back to §6's
+`stall_reason` vocabulary: a requeue caused by the Agent disconnecting or
+being absent does **not** increment `queue_job.retries` and records **no**
+`stall_reason` — the row simply goes back to `queued` exactly as it was. A
+job that has bounced back with a flat retry count and an empty stall reason
+was not a bad job; it was a booth that was not there. This is deliberate
+(D-01): a booth-side fault must never spend the guest's retry budget, or a
+handful of ordinary outages would eventually mark a perfectly valid
+registration `failed` for a fault that was never the guest's job at all.
+
+Contrast this with §6's vocabulary, which is exclusively **session-side**:
+an acknowledgement timeout (`session_ack_timeout`) or an explicit Agent
+rejection (`agent_nak`) still charges a retry and still records a reason,
+exactly as before this phase. If you see `retries` incrementing and a
+`stall_reason` populated, the fault was in the session, not the link — go
+look at §6. If you see a job back in `queued` with `retries` unchanged and
+`stall_reason` empty, the fault was the link being down — look here
+instead.
