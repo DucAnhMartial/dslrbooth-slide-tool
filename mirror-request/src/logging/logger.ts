@@ -63,4 +63,23 @@ export function labelLogger(name: string) {
   return logger.child({ label: name });
 }
 
+/**
+ * The single sanctioned route from a raw Mirror Request payload to any log
+ * sink (D-16). Returns immediately unless `NODE_ENV` is not `'production'`
+ * AND `DEBUG` is set, so it can never fire in production and is silent by
+ * default everywhere else. D-13's retention of the raw payload happens in
+ * SQLite (`registration.raw_payload`), never in logs — this function is for
+ * local development visibility only, not storage.
+ *
+ * Always pass a plain template string, never the payload object: the printf
+ * formatters above only run `mask()` when `typeof message === 'string'`, so
+ * an object argument would bypass masking entirely.
+ */
+export function debugRawPayload(label: string, payload: string): void {
+  if (!(process.env.NODE_ENV !== 'production' && Boolean(process.env.DEBUG))) {
+    return;
+  }
+  logger.debug(`[raw:${label}] ${payload}`);
+}
+
 export default logger;
