@@ -137,7 +137,8 @@ export class NotificationService {
     try {
       // Exactly the five keys the slideshow needs: the receiver performs no
       // lookup of any kind, so everything it will display must be in this
-      // body (D-01). No email, no phone (D-02, D-03).
+      // body (D-01). No contact details are sent (D-02, D-03) — see
+      // OPS-RUNBOOK.md §8 for the full payload contract and rationale.
       const payload = {
         jobId: row.jobId,
         guestName: registration.name,
