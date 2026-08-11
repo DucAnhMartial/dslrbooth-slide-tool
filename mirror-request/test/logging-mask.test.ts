@@ -3,15 +3,21 @@ import { randomUUID, createHmac } from 'crypto';
 import express from 'express';
 import request from 'supertest';
 import http from 'http';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { WebSocket } from 'ws';
-import { mask, debugRawPayload, logger } from '../src/logging/logger';
+import { mask, debugRawPayload, logger, labelLogger } from '../src/logging/logger';
 import { createMirrorReceiver } from '../src/ingestion/mirrorReceiver';
 import { jsonWithRawBody } from '../src/ingestion/webhookAuth';
 import { getStore, LocalStore } from '../src/state/localStore';
 import { AgentServer } from '../src/agent/agentServer';
-import { QueueService } from '../src/queue/queueService';
-import { NotificationService } from '../src/notifications/notificationService';
+import { QueueService, queueLogger } from '../src/queue/queueService';
+import { NotificationService, notifyLogger } from '../src/notifications/notificationService';
 import { toGuestStatus } from '../src/status/guestStatus';
+import { DisplayServer } from '../src/display/displayServer';
+import { clientIp, isWhitelisted } from '../src/security/ipAllowlist';
+import { renderDisplayPage } from '../src/display/displayPage';
 
 const VALID_AGENT_TOKEN = 'test-agent-token'; // injected by vitest.config.ts's env block
 
@@ -383,5 +389,236 @@ describe('Connection id survives masking (WINDOWS ledger item 5)', () => {
     // used to produce before the digit-run-breaking transform was applied.
     const unreformatted = `agent-${Date.now()}-1`;
     expect(mask(unreformatted)).not.toBe(unreformatted);
+  });
+});
+
+describe('Standing regression: every non-ingestion log line survives masking unchanged (AUTH-03, D-17)', () => {
+  // D-16/WINDOWS ledger item 4: every store here is opened through the
+  // constructor(dbPath?) seam, never the getStore() singleton, and closed in
+  // afterEach. The path is unique per test run so parallel vitest workers
+  // never share one file (same convention as test/display-access-control.test.ts).
+  let storeCounter = 0;
+  function uniqueStorePath(): string {
+    storeCounter += 1;
+    return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-authregress-')), `t${storeCounter}.sqlite`);
+  }
+
+  const EMAIL = 'auth03-regression@example.com';
+  const PHONE = '0912345678'; // 10 digits — genuinely matches PHONE_RE's \d{7,}
+
+  // A plain Date.now()-based job id would itself embed a 13-digit run and
+  // get masked by PHONE_RE — the exact same test-fixture false positive
+  // documented at this file's safeId() helper above (line ~87), not a
+  // production defect. Real job ids are backend-minted UUIDs (F-04), which
+  // only occasionally collide with PHONE_RE by chance; breaking up digit
+  // runs here keeps this fixture deterministic without touching mask().
+  function safeJobId(label: string): string {
+    return `job-flow-${label}-${randomUUID().replace(/(\d)(?=\d)/g, '$1x')}`;
+  }
+
+  function registerAndEnqueue(s: LocalStore, id: string): void {
+    s.upsertRegistration({
+      id,
+      name: 'Nguyễn Văn A',
+      email: EMAIL,
+      phone: PHONE,
+      mode: 'print',
+      registered_at: new Date().toISOString(),
+    });
+    // LocalStore.enqueueJob() ties registration_id to the job's own id — the
+    // storage layer's "Queued job X at position Y of Z" line (localStore.ts,
+    // base logger) fires here.
+    s.enqueueJob({ id, queued_at: Date.now() });
+  }
+
+  // Spies on every level of a given logger-like object (base logger and the
+  // two labelled child loggers are each distinct winston Logger instances —
+  // spying on the base logger alone would silently miss anything logged
+  // through logger.child(), which is exactly the trap this test exists to
+  // catch: index.ts and localStore.ts log through the base logger, so their
+  // messages alone would satisfy a bare length>0 check even if the queue/
+  // notify child-logger surfaces were silently missed).
+  function spyAllLevels(target: { info: unknown; warn: unknown; error: unknown; debug: unknown }) {
+    return {
+      info: vi.spyOn(target as never, 'info'),
+      warn: vi.spyOn(target as never, 'warn'),
+      error: vi.spyOn(target as never, 'error'),
+      debug: vi.spyOn(target as never, 'debug'),
+    };
+  }
+  function collectFrom(spies: ReturnType<typeof spyAllLevels>): unknown[] {
+    return [...spies.info.mock.calls, ...spies.warn.mock.calls, ...spies.error.mock.calls, ...spies.debug.mock.calls].map(
+      (call) => call[0],
+    );
+  }
+
+  it('every message collected across a realistic queue/notify/display/status flow is a plain string that mask() leaves unchanged, and none carries the fixture email or phone', async () => {
+    const store = new LocalStore(uniqueStorePath());
+    // Mirrors index.ts's own `const log = labelLogger('server')` — index.ts
+    // itself cannot be imported (it runs a real server as a side effect of
+    // import), so its /display-screen route is reproduced verbatim below
+    // using the same exported clientIp/isWhitelisted/renderDisplayPage
+    // functions plus this identically-constructed child logger, the same
+    // technique test/display-access-control.test.ts already established for
+    // the access-control half of this same route.
+    const serverLogger = labelLogger('server');
+
+    const baseSpies = spyAllLevels(logger);
+    const queueSpies = spyAllLevels(queueLogger);
+    const notifySpies = spyAllLevels(notifyLogger);
+    const serverSpies = spyAllLevels(serverLogger);
+
+    try {
+      // --- Queue surface: enqueue -> dispatch -> ack -> complete ------------
+      const CONFIG = { SESSION_TIMEOUT_MS: 1000, NEXT_GUEST_COUNTDOWN_MS: 5000, SESSION_MAX_RETRIES: 1 };
+      const qs = new QueueService(store, CONFIG);
+      qs.bindIsAgentOnline(() => true);
+      qs.bindSendCommand(() => {});
+
+      vi.useFakeTimers();
+      try {
+        qs.start();
+
+        const job1 = safeJobId('1');
+        registerAndEnqueue(store, job1);
+        vi.advanceTimersByTime(250); // periodic tick picks up job1 -> announce
+        vi.advanceTimersByTime(CONFIG.NEXT_GUEST_COUNTDOWN_MS); // -> dispatch, "Dispatched job ... -> Agent"
+        qs.onAgentAck(job1, true); // acknowledge
+        qs.sessionEnded(); // complete -> booth IDLE again, "Completed job ... after session_end"
+
+        // --- Queue surface, second half: stall to exhaustion -----------------
+        // SESSION_MAX_RETRIES=1: the first stall requeues (retry line), the
+        // second exceeds the budget and fails the job (failure line) — both
+        // are the "retry and failure lines" the plan's <behavior> asks for.
+        const job2 = safeJobId('2');
+        registerAndEnqueue(store, job2);
+        vi.advanceTimersByTime(250); // tick picks up job2 -> announce
+        vi.advanceTimersByTime(CONFIG.NEXT_GUEST_COUNTDOWN_MS); // -> dispatch, busyTimer armed
+        vi.advanceTimersByTime(CONFIG.SESSION_TIMEOUT_MS); // stall #1 -> requeue (retries=1), immediate re-announce
+        vi.advanceTimersByTime(CONFIG.NEXT_GUEST_COUNTDOWN_MS); // -> re-dispatch, busyTimer armed
+        vi.advanceTimersByTime(CONFIG.SESSION_TIMEOUT_MS); // stall #2 -> retries=2 > 1 -> failJob, failure line
+
+        qs.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+
+      // --- Notification surface: enqueue + immediate exhaustion (maxRetries=0) ---
+      const notifyReceiver = http.createServer((req, res) => {
+        req.resume();
+        res.writeHead(503, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unavailable' }));
+      });
+      await new Promise<void>((resolve) => notifyReceiver.listen(0, '127.0.0.1', () => resolve()));
+      const notifyAddress = notifyReceiver.address();
+      if (!notifyAddress || typeof notifyAddress === 'string') throw new Error('missing server address');
+      const webhookUrl = `http://127.0.0.1:${notifyAddress.port}/webhook`;
+
+      const notifyJob = safeJobId('3');
+      registerAndEnqueue(store, notifyJob);
+      const notificationService = new NotificationService(0, store, webhookUrl, { fetchTimeoutMs: 2000 });
+      await notificationService.sendPhotoLink(notifyJob, 'https://cdn.example/photo.jpg');
+      await notificationService.sweep(); // maxRetries=0 -> terminal on first attempt -> exhaustion error line
+
+      await new Promise<void>((resolve) => notifyReceiver.close(() => resolve()));
+
+      // --- Phase 5 surface 1: blocked /display-screen (peer address logged) ---
+      const displayScreenApp = express();
+      displayScreenApp.get(
+        '/display-screen',
+        (req, res, next) => {
+          const ip = clientIp(req);
+          if (!isWhitelisted(ip, ['203.0.113.9'])) {
+            serverLogger.warn(`Blocked /display-screen from non-whitelisted IP: ${ip}`);
+            return res.status(403).json({ error: 'Forbidden' });
+          }
+          next();
+        },
+        (_req, res) => res.type('html').send(renderDisplayPage()),
+      );
+      const displayScreenRes = await request(displayScreenApp).get('/display-screen');
+      expect(displayScreenRes.status).toBe(403);
+
+      // --- Phase 5 surface 2: blocked WS /display upgrade (peer address logged) ---
+      const mockQueue: Pick<QueueService, 'getQueuePosition' | 'getQueueLength' | 'getAnnouncement'> = {
+        getQueuePosition: () => undefined,
+        getQueueLength: () => 0,
+        getAnnouncement: () => null,
+      };
+      const mockAgent: Pick<AgentServer, 'isAgentOnline'> = { isAgentOnline: () => true };
+      const displayHttpServer = http.createServer();
+      const display = new DisplayServer(mockQueue as QueueService, mockAgent as AgentServer, store, {
+        displayWhitelist: ['203.0.113.50'],
+        pollIntervalMs: 10_000,
+      });
+      display.start(displayHttpServer);
+      await new Promise<void>((resolve) => displayHttpServer.listen(0, '127.0.0.1', () => resolve()));
+      const displayAddress = displayHttpServer.address();
+      if (!displayAddress || typeof displayAddress === 'string') throw new Error('missing server address');
+
+      const wsResult = await new Promise<{ opened: boolean; statusCode?: number }>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${displayAddress.port}/display`);
+        ws.once('unexpected-response', (_req, res) => resolve({ opened: false, statusCode: res.statusCode }));
+        ws.once('open', () => resolve({ opened: true }));
+        ws.once('error', reject);
+      });
+      expect(wsResult.opened).toBe(false);
+      expect(wsResult.statusCode).toBe(403);
+
+      display.stop();
+      await new Promise<void>((resolve) => displayHttpServer.close(() => resolve()));
+
+      // --- Phase 5 surface 3: unmapped guest status (guestStatus.ts, base logger) ---
+      const unmapped = toGuestStatus({ jobStatus: 'weird_unmapped_status', announced: false, photoDelivery: 'pending' });
+      expect(unmapped).toBe('see_staff');
+
+      // --- Assertions -------------------------------------------------------
+      const messages = [
+        ...collectFrom(baseSpies),
+        ...collectFrom(queueSpies),
+        ...collectFrom(notifySpies),
+        ...collectFrom(serverSpies),
+      ];
+
+      // A future refactor that silences a whole surface must not make this
+      // test vacuously pass.
+      expect(messages.length).toBeGreaterThan(0);
+
+      // A bare length>0 check would pass even if the labelled child-logger
+      // surfaces (queue, notify) were never reached at all, since index.ts/
+      // localStore.ts/displayServer.ts/guestStatus.ts all log through the
+      // base logger alone. Assert each labelled surface actually produced a
+      // message, so a spy that captures nothing fails loudly.
+      const stringMessages = messages.filter((m): m is string => typeof m === 'string');
+      expect(stringMessages.some((m) => /requeued|Dispatched/.test(m))).toBe(true); // queue
+      expect(stringMessages.some((m) => /Notification/.test(m))).toBe(true); // notify
+
+      for (const msg of messages) {
+        expect(typeof msg).toBe('string'); // an object argument would bypass masking entirely
+        expect(mask(msg as string)).toBe(msg);
+      }
+      for (const msg of stringMessages) {
+        expect(msg).not.toContain(EMAIL);
+        expect(msg).not.toContain(PHONE);
+      }
+    } finally {
+      baseSpies.info.mockRestore();
+      baseSpies.warn.mockRestore();
+      baseSpies.error.mockRestore();
+      baseSpies.debug.mockRestore();
+      queueSpies.info.mockRestore();
+      queueSpies.warn.mockRestore();
+      queueSpies.error.mockRestore();
+      queueSpies.debug.mockRestore();
+      notifySpies.info.mockRestore();
+      notifySpies.warn.mockRestore();
+      notifySpies.error.mockRestore();
+      notifySpies.debug.mockRestore();
+      serverSpies.info.mockRestore();
+      serverSpies.warn.mockRestore();
+      serverSpies.error.mockRestore();
+      serverSpies.debug.mockRestore();
+      store.close();
+    }
   });
 });
