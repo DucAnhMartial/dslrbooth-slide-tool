@@ -56,12 +56,20 @@ export function loadConfig(): EnvConfig {
   const isProduction = nodeEnv === 'production';
   const webhookSecret = get('WEBHOOK_HMAC_SECRET') ?? '';
   const ipWhitelist = toCSV('PROXY_IP_WHITELIST', ['127.0.0.1']);
+  // D-09 (phase 5): deliberately NOT Phase 1's loopback default — the room
+  // screen's addresses are entirely site-specific and there is no sensible
+  // default, so an unset key defaults to empty (the same development escape
+  // hatch PROXY_IP_WHITELIST uses).
+  const displayIpWhitelist = toCSV('DISPLAY_IP_WHITELIST', []);
 
   if (isProduction && !webhookSecret) {
     errors.push('WEBHOOK_HMAC_SECRET must be configured in production (D-09)');
   }
   if (isProduction && (ipWhitelist.length === 0 || (ipWhitelist.length === 1 && ipWhitelist[0] === '127.0.0.1'))) {
     errors.push('PROXY_IP_WHITELIST must be configured in production with the real reverse-proxy IPs (D-09)');
+  }
+  if (isProduction && displayIpWhitelist.length === 0) {
+    errors.push('DISPLAY_IP_WHITELIST must be configured in production with the real display-machine addresses (D-09, Assumption A4)');
   }
 
   if (errors.length > 0) {
@@ -73,6 +81,7 @@ export function loadConfig(): EnvConfig {
     HOST: get('HOST') ?? '0.0.0.0',
     AGENT_WS_TOKEN: get('AGENT_WS_TOKEN') ?? '',
     PROXY_IP_WHITELIST: ipWhitelist,
+    DISPLAY_IP_WHITELIST: displayIpWhitelist,
     DB_HOST: get('DB_HOST') ?? 'localhost',
     // MySQL default port. Was previously 5432 (a Postgres-era leftover) —
     // the poller reads MySQL, not Postgres (RESEARCH.md Pitfall 4).

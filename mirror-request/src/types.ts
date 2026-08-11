@@ -83,6 +83,12 @@ export interface EnvConfig {
   HOST: string;
   AGENT_WS_TOKEN: string;
   PROXY_IP_WHITELIST: string[];
+  // D-09: the room's big screen is gated by its own separate allow-list, not
+  // by PROXY_IP_WHITELIST — the two surfaces (webhook ingestion vs. the
+  // display) sit behind different network topologies and must be
+  // independently configurable. Default is an empty array (dev escape
+  // hatch); production fails fast when it is left unset (config.ts).
+  DISPLAY_IP_WHITELIST: string[];
   DB_HOST: string;
   DB_PORT: number;
   DB_NAME: string;

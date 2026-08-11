@@ -13,6 +13,7 @@ import { mask } from './logging/logger';
 import { DisplayServer } from './display/displayServer';
 import { renderDisplayPage } from './display/displayPage';
 import { createStatusRouter } from './status/statusRoute';
+import { clientIp, isWhitelisted } from './security/ipAllowlist';
 
 const config = getConfig();
 const log = labelLogger('server');
@@ -27,7 +28,19 @@ const mirror = createMirrorReceiver(store, config.PROXY_IP_WHITELIST, {
   dedupWindowMs: config.REGISTRATION_DEDUP_WINDOW_MS,
 });
 app.use(mirror);
-app.get('/display-screen', (_req, res) => res.type('html').send(renderDisplayPage()));
+// D-09: gated by the same allow-list machinery the WS /display upgrade
+// handler uses (src/display/displayServer.ts), so the two surfaces can
+// never diverge on what counts as an allowed peer. A blocked peer gets the
+// identical generic 403 body Phase 1's blocked-IP response already uses
+// (D-08's "one indistinguishable refusal" posture, extended to this surface).
+app.get('/display-screen', (req, res, next) => {
+  const ip = clientIp(req);
+  if (!isWhitelisted(ip, config.DISPLAY_IP_WHITELIST)) {
+    log.warn(`Blocked /display-screen from non-whitelisted IP: ${ip}`);
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  next();
+}, (_req, res) => res.type('html').send(renderDisplayPage()));
 
 const agentServer = new AgentServer();
 const notifier = createNotificationService();

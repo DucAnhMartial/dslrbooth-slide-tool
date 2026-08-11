@@ -38,8 +38,32 @@ describe('loadConfig() — production-strict validation and Phase 1 defaults', (
     process.env.DB_PASSWORD = 'real-db-password';
     process.env.WEBHOOK_HMAC_SECRET = 'real-webhook-secret';
     process.env.PROXY_IP_WHITELIST = '10.0.0.5,10.0.0.6';
+    process.env.DISPLAY_IP_WHITELIST = '10.0.0.20';
 
     expect(() => loadConfig()).not.toThrow();
+  });
+
+  it('throws naming DISPLAY_IP_WHITELIST when NODE_ENV=production and it is unset (D-09, Assumption A4)', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.AGENT_WS_TOKEN = 'real-agent-token';
+    process.env.DB_PASSWORD = 'real-db-password';
+    process.env.WEBHOOK_HMAC_SECRET = 'real-webhook-secret';
+    process.env.PROXY_IP_WHITELIST = '10.0.0.5,10.0.0.6';
+    delete process.env.DISPLAY_IP_WHITELIST;
+
+    expect(() => loadConfig()).toThrowError(/DISPLAY_IP_WHITELIST/);
+  });
+
+  it('does not throw when NODE_ENV=production and DISPLAY_IP_WHITELIST is configured alongside the other two controls', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.AGENT_WS_TOKEN = 'real-agent-token';
+    process.env.DB_PASSWORD = 'real-db-password';
+    process.env.WEBHOOK_HMAC_SECRET = 'real-webhook-secret';
+    process.env.PROXY_IP_WHITELIST = '10.0.0.5,10.0.0.6';
+    process.env.DISPLAY_IP_WHITELIST = '10.0.0.20,10.0.0.21';
+
+    const config = loadConfig();
+    expect(config.DISPLAY_IP_WHITELIST).toEqual(['10.0.0.20', '10.0.0.21']);
   });
 
   it('does not throw when NODE_ENV=test and neither control is configured, using dev defaults', () => {
@@ -52,6 +76,7 @@ describe('loadConfig() — production-strict validation and Phase 1 defaults', (
     const config = loadConfig();
     expect(config.WEBHOOK_HMAC_SECRET).toBe('');
     expect(config.PROXY_IP_WHITELIST).toEqual(['127.0.0.1']);
+    expect(config.DISPLAY_IP_WHITELIST).toEqual([]);
   });
 
   it('defaults REGISTRATION_DEDUP_WINDOW_MS and WEBHOOK_TIMESTAMP_SKEW_MS to 300000 when unset', () => {
