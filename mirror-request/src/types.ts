@@ -67,7 +67,13 @@ export interface NotificationRecord {
 }
 
 export interface DisplaySnapshot {
-  currentJob: QueueJob | null;
+  // D-15: no `currentJob: QueueJob` field exists here, deliberately. The
+  // guarantee that no operator column (registration_id, stall_reason,
+  // retries, ack_error_message, ...) can reach the display wire lives in
+  // this type's SHAPE — in what it does not have — not in a null check or
+  // a delete-the-sensitive-fields step that a later edit could remove. Do
+  // not add a raw QueueJob (or any subset of its fields) back onto this
+  // type; add a purpose-built projection field instead.
   queuePosition: number;
   queueLength: number;
   boothState: BoothState;
