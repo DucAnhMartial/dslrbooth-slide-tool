@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
+import Database from 'better-sqlite3';
 import express from 'express';
 import request from 'supertest';
 import { LocalStore } from '../src/state/localStore';
@@ -13,6 +14,23 @@ import { createStatusRouter } from '../src/status/statusRoute';
 // so this file cannot join WINDOWS.md ledger item 4's shared-test-DB race
 // across parallel vitest workers.
 const DB_PATH = `./data/test-status-api-${process.pid}-${Date.now()}.sqlite`;
+const DB_PATH_404 = `./data/test-status-404-${process.pid}-${Date.now()}.sqlite`;
+
+/**
+ * D-08's single generic 404, asserted in exactly one place. Every 404 case in
+ * this file goes through this helper — the same shape `expectForbidden` gives
+ * Phase 1's generic 403 (test/on-register-auth.test.ts:73-77) — so a future
+ * `reason`, `code`, `hint` or `detail` field cannot be added to one branch
+ * without every other branch's assertion failing at the same moment.
+ *
+ * The exact-keys form is the load-bearing part. A status-code-only assertion
+ * would pass while the body grew an enumeration oracle.
+ */
+function expectGenericNotFound(res: request.Response): void {
+  expect(res.status).toBe(404);
+  expect(Object.keys(res.body)).toEqual(['error']);
+  expect(res.body.error).toBe('job not found');
+}
 
 const SESSION_MS = 240_000;
 const GUEST_NAME = 'Nguyễn Văn A';
@@ -176,5 +194,208 @@ describe('GET /status/:jobId — a queued guest sees their name, position and a 
     for (const word of OPERATOR_WORDS) {
       expect(serialized).not.toContain(word);
     }
+  });
+});
+
+const EIGHT_KEYS = [
+  'boothPaused',
+  'guestName',
+  'jobId',
+  'photoDelivery',
+  'queueLength',
+  'queuePosition',
+  'status',
+  'waitEstimate',
+];
+
+describe('GET /status/:jobId — every miss collapses into one indistinguishable 404 (D-08)', () => {
+  let store: LocalStore;
+  let app: express.Express;
+
+  const ownJobId = `job-404-own-${process.pid}`;
+  const foreignJobId = `job-404-foreign-${process.pid}`;
+  const purgedJobId = `job-404-purged-${process.pid}`;
+  const neverExistedId = `job-404-never-existed-${process.pid}`;
+
+  // Four-plus distinct malformed shapes, written as the literal request path so
+  // the encoding under test is the one actually sent on the wire.
+  const MALFORMED_PATHS: Array<[string, string]> = [
+    ['path traversal', `/status/${encodeURIComponent('../../etc/passwd')}`],
+    ['SQL injection payload', `/status/${encodeURIComponent("' OR '1'='1")}`],
+    ['1000-character id', `/status/${'a'.repeat(1000)}`],
+    ['percent-encoded slash', '/status/abc%2Fdef'],
+    ['single space', '/status/%20'],
+    ['percent-encoded null byte', '/status/job%00id'],
+  ];
+
+  function seedRegistration(id: string, name: string): void {
+    store.upsertRegistration({
+      id,
+      name,
+      email: `${id}@example.com`,
+      phone: '0900000000',
+      mode: 'print',
+      registered_at: new Date().toISOString(),
+    });
+  }
+
+  beforeAll(() => {
+    store = new LocalStore(DB_PATH_404);
+
+    const base = 1_700_000_000_000;
+    seedRegistration(ownJobId, 'Own Guest');
+    store.enqueueJob({ id: ownJobId, queued_at: base });
+
+    seedRegistration(foreignJobId, 'Foreign Guest');
+    store.enqueueJob({ id: foreignJobId, queued_at: base + 1000 });
+
+    // A job that really existed and was then removed from queue_job, so the
+    // "purged" case is a genuine purge rather than a second never-existed id.
+    // LocalStore exposes no delete, so the row is removed over an independent
+    // connection to the same ephemeral test file. This is the throwaway test
+    // SQLite, never the real backend database.
+    seedRegistration(purgedJobId, 'Purged Guest');
+    store.enqueueJob({ id: purgedJobId, queued_at: base + 2000 });
+
+    const queue = new QueueService(store, {
+      SESSION_TIMEOUT_MS: 300_000,
+      NEXT_GUEST_COUNTDOWN_MS: 7_000,
+      SESSION_MAX_RETRIES: 2,
+    });
+    const agent = { isAgentOnline: () => true };
+
+    app = express();
+    app.use(
+      createStatusRouter(store, queue, agent, {
+        WAIT_ESTIMATE_SAMPLE_SIZE: 20,
+        WAIT_ESTIMATE_MIN_SAMPLES: 5,
+        WAIT_ESTIMATE_DEFAULT_MS: 180_000,
+      }),
+    );
+
+    const side = new Database(DB_PATH_404);
+    side.prepare('DELETE FROM queue_job WHERE id = ?').run(purgedJobId);
+    side.close();
+
+    // The purge is verified rather than assumed: if this row were still
+    // present, the "purged" case below would silently degrade into a second
+    // copy of the happy path and prove nothing.
+    if (store.getJob(purgedJobId) !== undefined) {
+      throw new Error('fixture broken: purged job is still present in queue_job');
+    }
+  });
+
+  afterAll(() => {
+    store.close();
+    for (const suffix of ['', '-wal', '-shm']) {
+      fs.rmSync(`${DB_PATH_404}${suffix}`, { force: true });
+    }
+  });
+
+  it('returns the generic 404 for an id that never existed', async () => {
+    expectGenericNotFound(await request(app).get(`/status/${neverExistedId}`));
+  });
+
+  it('returns the generic 404 for an id that existed and was purged', async () => {
+    expectGenericNotFound(await request(app).get(`/status/${purgedJobId}`));
+  });
+
+  // The core D-08 assertion: not merely "both are 404", but "both are the same
+  // answer". A caller who can tell a purged id from a never-existed one has an
+  // oracle that confirms which guests were real.
+  it('answers the purged and never-existed ids byte-identically', async () => {
+    const purged = await request(app).get(`/status/${purgedJobId}`);
+    const never = await request(app).get(`/status/${neverExistedId}`);
+
+    expect(purged.status).toEqual(never.status);
+    expect(purged.body).toEqual(never.body);
+    expect(JSON.stringify(purged.body)).toEqual(JSON.stringify(never.body));
+  });
+
+  it.each(MALFORMED_PATHS)(
+    'returns the generic 404 — never 400, 422 or 500 — for a malformed id (%s)',
+    async (_label, path) => {
+      expectGenericNotFound(await request(app).get(path));
+    },
+  );
+
+  it('answers every malformed id identically to a well-formed-but-absent id', async () => {
+    const absent = await request(app).get(`/status/${neverExistedId}`);
+
+    for (const [label, path] of MALFORMED_PATHS) {
+      const res = await request(app).get(path);
+      expect(res.status, label).toEqual(absent.status);
+      expect(res.body, label).toEqual(absent.body);
+    }
+  });
+
+  // D-06 + D-08 read together. D-08 forbids distinguishing FAILURE cases from
+  // one another; it does not turn a valid id into a failure. Under the
+  // capability-URL model, holding the id IS the authorisation, so a real id
+  // must succeed no matter who is asking — there is no "other guest" concept
+  // for the route to enforce.
+  it('returns 200 with the full eight-key body for a valid id belonging to another guest', async () => {
+    const res = await request(app).get(`/status/${foreignJobId}`);
+
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body).sort()).toEqual(EIGHT_KEYS);
+    expect(res.body.jobId).toBe(foreignJobId);
+    expect(res.body.guestName).toBe('Foreign Guest');
+    expect(res.body.status).toBe('waiting');
+  });
+
+  it('still returns 200 for the requesting guest own id', async () => {
+    const res = await request(app).get(`/status/${ownJobId}`);
+
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body).sort()).toEqual(EIGHT_KEYS);
+  });
+
+  // Without a catch-all, an unexpected throw becomes Express's default 500 —
+  // and a 500 on some ids while others 404 is exactly the oracle D-08 exists
+  // to close, rebuilt by accident.
+  it('collapses an unexpected internal throw into the same generic 404, not a 500', async () => {
+    const throwingQueue = {
+      getQueuePosition(): number | undefined {
+        throw new Error('simulated internal failure');
+      },
+      getQueueLength: () => 0,
+      getAnnouncement: () => null,
+    };
+
+    const throwingApp = express();
+    throwingApp.use(
+      createStatusRouter(store, throwingQueue, { isAgentOnline: () => true }, {
+        WAIT_ESTIMATE_SAMPLE_SIZE: 20,
+        WAIT_ESTIMATE_MIN_SAMPLES: 5,
+        WAIT_ESTIMATE_DEFAULT_MS: 180_000,
+      }),
+    );
+
+    const res = await request(throwingApp).get(`/status/${ownJobId}`);
+
+    expectGenericNotFound(res);
+    expect(res.status).not.toBe(500);
+  });
+
+  it('never answers with 400, 410, 422 or 500 on any path exercised here', async () => {
+    const paths = [
+      `/status/${neverExistedId}`,
+      `/status/${purgedJobId}`,
+      `/status/${ownJobId}`,
+      `/status/${foreignJobId}`,
+      ...MALFORMED_PATHS.map(([, path]) => path),
+    ];
+
+    let checked = 0;
+    for (const path of paths) {
+      const res = await request(app).get(path);
+      expect([400, 410, 422, 500], `path ${path} returned ${res.status}`)
+        .not.toContain(res.status);
+      expect([200, 404]).toContain(res.status);
+      checked += 1;
+    }
+
+    expect(checked).toBe(10);
   });
 });
