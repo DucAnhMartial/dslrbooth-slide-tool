@@ -114,6 +114,7 @@ if either of these is missing or left as a placeholder:
 |---|---|---|
 | `WEBHOOK_HMAC_SECRET` | Must be set to a real, non-empty shared secret matching your sender's secret (see §1) | Startup throws: `WEBHOOK_HMAC_SECRET must be configured in production (D-09)` |
 | `PROXY_IP_WHITELIST` | Must be set to the real reverse-proxy source IP(s), comma-separated. **The default `127.0.0.1` alone is rejected as "not really configured"** in production. | Startup throws: `PROXY_IP_WHITELIST must be configured in production with the real reverse-proxy IPs (D-09)` |
+| `DISPLAY_IP_WHITELIST` | Must be set to the real display-machine address(es), comma-separated. Added in Phase 5 (see §9). Unlike `PROXY_IP_WHITELIST`, there is no loopback default that could be mistaken for "configured" — an empty list is rejected outright. | Startup throws: `DISPLAY_IP_WHITELIST must be configured in production with the real display-machine addresses (D-09, Assumption A4)` |
 
 This is a deliberate, hard fail-fast: there is no configuration flag to
 disable webhook authentication in production. If you see one of these
@@ -147,6 +148,17 @@ defaults — see §8 for the full delivery contract these govern):
 | `NOTIFY_FETCH_TIMEOUT_MS` | `10000` (10 s) | How long a single delivery attempt waits for the receiver to respond before the attempt is aborted and counted as a timeout (see §8) |
 | `NOTIFY_SWEEP_INTERVAL_MS` | `3000` (3 s) | How often the sweeper checks `notification_record` for rows that are due |
 | `NOTIFY_CLAIM_LEASE_MS` | `60000` (1 min) | How long a claimed row is held before it becomes eligible to be picked up again if the process claiming it dies mid-delivery. The effective value is always clamped to at least twice `NOTIFY_FETCH_TIMEOUT_MS`, so a misconfiguration can never expire a lease under a live in-flight request. |
+
+Client API and display feed variables added in Phase 5 (see §9 for the full
+contract these govern; `DISPLAY_IP_WHITELIST` itself is **required** in
+production and is listed in the fail-fast table above, not here):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `WAIT_ESTIMATE_SAMPLE_SIZE` | `20` | How many of the most recent completed sessions (`status = 'completed'`, ordered most-recent-first) feed the median wait-time calculation. |
+| `WAIT_ESTIMATE_MIN_SAMPLES` | `5` | Below this many real completed-session samples, the estimator does not compute a median at all — it serves `WAIT_ESTIMATE_DEFAULT_MS` instead (the cold-start fallback, D-04). |
+| `WAIT_ESTIMATE_DEFAULT_MS` | `180000` (3 min) | The cold-start fallback duration. Measured fact as of this writing: the production database holds exactly **1** usable completed session, so with the default `WAIT_ESTIMATE_MIN_SAMPLES` of `5` this value — rendered as "khoảng 2–3 phút" — is what production actually serves on day one, not an edge case. |
+| `DISPLAY_IP_WHITELIST` (dev default) | unset → `[]` (empty list) outside production | In any non-production `NODE_ENV`, an unset or empty value is an allow-everything development escape hatch — every request is treated as whitelisted (`isWhitelisted()` in `src/security/ipAllowlist.ts` returns `true` for an empty list). This branch is unreachable in production because of the fail-fast check above. |
 
 See `.env.example` for the full list of environment variables this service
 reads.
@@ -422,6 +434,46 @@ look at §6. If you see a job back in `queued` with `retries` unchanged and
 `stall_reason` empty, the fault was the link being down — look here
 instead.
 
+### Connection id format (WINDOWS ledger item 5, fixed in Phase 5)
+
+**Correction note:** an earlier revision of this section was expected to
+carry a paragraph describing a connection-id masking limitation and a stale
+id-shape description. On inspection at this writing, no such paragraph
+exists anywhere in this file — the passage above (§6, "Reading the logs vs.
+reading the database") describes **job-id** masking, a different value,
+and was never inaccurate about connection ids. This subsection is
+therefore new content, not a correction of existing text, and that
+discrepancy is called out rather than silently absorbed.
+
+Every connection id this service mints for an Agent WS connection has the
+shape `agent-<timestamp>-<sequence>`, e.g. `Agent connected: agent-...`
+(quoted from `src/agent/agentServer.ts`'s log line templates). Before this
+phase, the raw id was `` `agent-${Date.now()}-${++connSeq}` `` — a literal
+13-digit epoch timestamp, which §6's `mask()` filter (`PHONE_RE`, any run
+of 7 or more adjacent digits) partially asterisked in every log line,
+degrading the `Agent WS replaced: <old-id> displaced by <new-id>`
+diagnostic above to sequence-number-only. Ids also repeated across process
+restarts, since `connSeq` resets to its initial value on every boot.
+
+The fix, quoted from `src/agent/agentServer.ts`:
+
+```ts
+const id = `agent-${Date.now()}-${++this.connSeq}`.replace(/(\d)(?=\d)/g, '$1x');
+```
+
+Every adjacent pair of digits in the assembled id (timestamp and sequence
+number both) has an `x` inserted between them, so no run of two or more
+digits can ever occur — structurally, not merely "usually short enough."
+`PHONE_RE`'s 7-digit threshold can therefore never be reached by a
+connection id, regardless of how large the timestamp or the sequence
+number grows.
+
+**The fix was made at the id generator, not by relaxing `PHONE_RE`.**
+`src/logging/logger.ts`'s masking patterns are untouched — under-masking a
+real guest phone number is a strictly worse failure than over-masking an
+id, so the regex that protects phone numbers stays exactly as Phase 1
+locked it, and the id format bends around it instead.
+
 ## 8. Guest notification delivery
 
 This is the third published contract this service owns, alongside §1's
@@ -615,3 +667,229 @@ silent: the alternative was leaving those rows looking deliverable forever,
 never actually sending, and never telling anyone why. See Task 3's phase
 gate below for the human decision this triggers before a production
 deploy.
+
+## 9. Guest-facing read surfaces (`GET /status/:jobId`, `WS /display`, `GET /display-screen`)
+
+This is the fourth published contract this service owns, alongside §1's
+webhook signing contract, §7's Agent auth contract, and §8's notification
+payload contract. Unlike those three, these are the surfaces a **guest**
+and a **room full of people** see directly, not another service's
+integration point.
+
+### The guest status endpoint
+
+`GET /status/:jobId` (`src/status/statusRoute.ts`). The job id **is** the
+credential — a guest receives it by scanning their own QR code, and there
+is no additional authentication of any kind (no login, no PIN, no IP
+allow-list). The reason is a hard constraint, not a preference: a guest's
+phone is on a different network path than the room LAN, so an address
+allow-list would lock out every legitimate guest the endpoint exists to
+serve.
+
+**The exact response key set**, quoted from `GuestStatusResponse` in
+`src/status/guestStatus.ts`: `jobId`, `queuePosition`, `queueLength`,
+`guestName`, `status`, `photoDelivery`, `boothPaused`, and the optional
+`waitEstimate`.
+
+**The six guest-facing words**, quoted from `GUEST_STATUSES` in the same
+file, and which internal state from Phases 2-4 produces each one (via
+`STATUS_MAP` in `src/status/guestStatus.ts` and the `boothPaused`
+computation in `src/status/statusRoute.ts`):
+
+| Guest-facing `status` | Produced when |
+|---|---|
+| `waiting` | `queue_job.status = 'queued'` and this job is not the announced one |
+| `your_turn` | `queue_job.status = 'queued'` and this job **is** the announced one, or `status = 'dispatched'` |
+| `in_session` | `queue_job.status = 'in_progress'` |
+| `finished_photo_sent` | `queue_job.status = 'completed'` and the Phase 4 `notification_record` for this job is `'delivered'` |
+| `finished_photo_pending` | `queue_job.status = 'completed'` and the notification is anything other than `'delivered'` (including no record at all, or a terminally `'failed'` delivery — the guest's session is honestly finished either way; only the photo's arrival is still open) |
+| `see_staff` | `queue_job.status = 'failed'` — this job exhausted Phase 2's bounded retry budget (§6), or an internal state the router does not recognise reached the boundary (an operator-visible `logger.error`, never a guest-visible detail) |
+
+An operator reading a guest's screenshot of `see_staff` can work backwards
+to §6's `stall_reason`/`retries` columns for that job id to find out what
+actually happened — the guest is never shown that detail themselves
+(D-11's closed vocabulary: `dispatched`, `in_progress`, `stall_reason`,
+`retries`, `ack_error_message`, `TIMEOUT_RESET` never cross this boundary).
+
+**The separate `photoDelivery` field**, quoted from `PHOTO_DELIVERY_STATES`:
+`sent`, `pending`, `failed`. Stated separately from `status` rather than
+folded into it (D-12) — a guest whose session genuinely finished but whose
+photo notification is still retrying or has permanently failed is still
+honestly `finished_photo_pending` or `finished_photo_sent` on the status
+axis, with the photo's own state told straight rather than hidden inside a
+combined word.
+
+**`waitEstimate` is absent, never `null`, whenever the booth cannot serve.**
+The key only appears (`statusRoute.ts`'s conditional object spread) when
+`status === 'waiting'` **and** `boothPaused === false`. This is deliberate:
+a client rendering `waitEstimate: null` would show "0 phút" — no wait at
+all — to precisely the guest whose wait is indefinite. An absent key cannot
+be misread that way.
+
+**Every failed lookup returns one identical `404`, on purpose.** Quoted
+verbatim from `genericNotFound()` in `src/status/statusRoute.ts`:
+`{ "error": "job not found" }`. A job id that never existed, one that was
+purged, one belonging to another guest that happens to be malformed, and
+an unexpected internal error while looking it up all produce this exact
+same status and body (D-08). **This means an operator who is told "it 404s
+for this guest" has learned nothing about why** — never treat a 404 report
+as diagnostic on its own; go look up the job id directly in the database
+(§6) instead. Note also, deliberately: a **valid** id belonging to a
+different guest than the one asking still returns `200` with the full
+body, not a 404 — under the capability-URL model, holding the id **is**
+the authorisation, so D-08's "never distinguish among failures" rule does
+not turn a valid, working id into a manufactured failure.
+
+### The wait estimate
+
+Measures `completed_at - acknowledged_at` on rows where
+`queue_job.status = 'completed'` — restricting the sample to that status is
+itself the exclusion of stalled, requeued and failed sessions (D-02): a job
+that stalled or failed never reaches `'completed'`, so it cannot
+structurally enter the sample, with no separate application-level filter
+for a later edit to accidentally remove.
+
+**Median, not mean.** A single session that hit Phase 2's `SESSION_TIMEOUT_MS`
+before failing over would otherwise drag a mean upward for hours; a median
+is not moved by one outlier.
+
+**Whole-minute range, rounded up.** The guest sees a range like "khoảng
+3–5 phút", never a precise ticking number (D-03) — a number that counts
+down and then jumps back up when the queue shifts destroys trust faster
+than a vague answer ever will. The high end is `Math.ceil(ms / 60000)`; the
+low end is one minute below that. Rounding is always **up**: it is always
+better for a guest to be called earlier than the estimate suggested than
+later.
+
+**Cold-start fallback.** Below `WAIT_ESTIMATE_MIN_SAMPLES` (§3) real
+completed-session samples, the estimator does not compute a median from
+one or two sessions — it serves the configured `WAIT_ESTIMATE_DEFAULT_MS`
+(§3) instead (D-04). **Measured fact as of this writing: the production
+database holds exactly 1 completed `queue_job` row.** With the shipped
+default of 5 minimum samples, `1 < 5`, so the configured default —
+"khoảng 2–3 phút" — is what production will actually serve to every guest
+on day one, until the fifth real completed session lands. This is D-04
+working exactly as designed, not a bug to fix before deploy.
+
+### The display surfaces
+
+Both `WS /display` and `GET /display-screen` are gated by the same address
+allow-list (`DISPLAY_IP_WHITELIST`, §3), **not** by a token or a Bearer
+header — a deliberate divergence from §7's Agent auth contract, forced by
+a hard browser constraint rather than a preference: the browser
+`WebSocket` API cannot set request headers, so §7's
+`Authorization: Bearer` pattern cannot transfer to a page running in a
+browser (D-09).
+
+**The socket refusal happens before the handshake.** Quoted from
+`src/display/displayServer.ts`'s `upgrade` handler: an unauthorised peer's
+connection is refused with a raw `HTTP/1.1 403 Forbidden\r\nConnection:
+close\r\n\r\n` written directly to the socket, followed immediately by
+`socket.destroy()`, strictly before `wss.handleUpgrade(...)` is ever
+called — an unauthorised peer never holds an open WebSocket connection,
+even briefly.
+
+**The two refusal bodies are not literally identical**, and that is worth
+stating precisely rather than assumed: `GET /display-screen` is an Express
+route and returns a JSON body, `{"error":"Forbidden"}`, with status `403`
+(`src/index.ts`) — the same shape §1's blocked-webhook-IP response already
+uses. The `WS /display` refusal happens at the raw-socket layer, before
+any HTTP response object exists to attach a JSON body to, so it carries
+**no body at all** — only the raw status line quoted above. Both are a
+generic, non-distinguishing `403` with no detail about which check failed,
+which is the property D-09 actually needs; only the literal bytes on the
+wire differ between the two surfaces, and an operator comparing the two
+in a HAR file or `curl -v` capture should expect that difference rather
+than read it as a bug.
+
+**The matching rule**, quoted from `isWhitelisted()` in
+`src/security/ipAllowlist.ts`: an entry ending in `.*` matches by prefix
+(`ip.startsWith(prefix)`); every other entry matches by exact string
+equality. An empty whitelist matches everything — a development escape
+hatch only, unreachable in production because of §3's fail-fast check.
+
+**Warning: the allow-list matches the address form the runtime reports for
+the direct TCP peer, and that form depends on how the server binds.**
+Measured during Phase 5 (`05-03-PLAN.md`, confirmed against
+`test/display-access-control.test.ts`): a plain IPv4 bind
+(`server.listen(port, '127.0.0.1')`) yields the plain form, e.g.
+`127.0.0.1`; a bind with no explicit host (`server.listen(port)`, which
+binds `::` and is IPv6-capable) yields the IPv4-mapped form instead, e.g.
+`::ffff:127.0.0.1`. **The shipped `HOST` default is `0.0.0.0`**
+(`src/config.ts`), an IPv4 bind, so production sees the **plain** form —
+an allow-list entry written as `::ffff:192.168.1.50` would never match a
+production deployment running the default `HOST`, and the reverse is true
+if `HOST` is ever changed to bind IPv6. No address normalisation exists
+anywhere in this service (`src/security/ipAllowlist.ts` does not rewrite
+either form into the other, deliberately, matching §1's un-normalised
+`PROXY_IP_WHITELIST` matching so the two allow-list surfaces do not
+disagree) — write the allow-list entry in whichever form your actual
+deployment's bind produces, and verify it rather than assume it.
+
+**No proxy trust is enabled anywhere in this service.** Express's
+`app.set('trust proxy', ...)` is never called (confirmed:
+`grep -rn "trust proxy" src/` matches only the doc comments in
+`src/security/ipAllowlist.ts` and `src/ingestion/mirrorReceiver.ts`
+explaining its absence — zero live calls). Without it, the address the
+allow-list checks is always the direct TCP peer, never a
+client-controlled `X-Forwarded-For` header. Enabling proxy trust
+unscoped would let any client forge that header and impersonate an
+allow-listed address, defeating the control entirely — the same reasoning
+§1 already carries for `PROXY_IP_WHITELIST`.
+
+### The broadcast behaviour
+
+The feed sends only when something changed: every poll tick builds a fresh
+snapshot and compares its serialised form against the last one actually
+sent, sending (and updating the comparison baseline) only on a difference
+(`maybeBroadcast()` in `src/display/displayServer.ts`, D-13). In practice
+this produces one message per second while a countdown is running — the
+only field that changes on its own while nothing else moves is the
+remaining-seconds count, which the change detector catches once per
+second — and nothing at all while the room is idle and no state has
+moved. A newly-connected client always receives one unconditional snapshot
+on connect, independent of this comparison.
+
+The up-next list shows given names; the guest currently being called shows
+their full name on the hero line. The full name is being announced in the
+room anyway, so the called guest needs to recognise themselves instantly;
+a room full of strangers waiting behind them does not need everyone's full
+name on a shared screen. In Vietnamese naming the given name is the
+trailing element (`toGivenName()` in `src/display/displayServer.ts`:
+`"Nguyễn Văn A"` → `"A"`), which is also how a person would actually be
+addressed (D-14).
+
+### Accepted risks
+
+In the same register §3 uses for `NOTIFY_WEBHOOK_URL` reachability and §7
+uses for the undeployed Agent-auth cutover — stated plainly, never left
+silent.
+
+**The capability-URL's inherited entropy (D-06/D-07) — UNVERIFIED, a
+pre-production blocker.** `/status/:jobId`'s security model depends
+entirely on the job id being unguessable. This service does not mint that
+id — it is taken verbatim from the inbound registration payload
+(`src/ingestion/mirrorReceiver.ts`, `src/ingestion/dbPoller.ts`) — so its
+entropy is inherited from the upstream backend and was not verified during
+this phase. **The human's own resolution, quoted verbatim from
+`05-01-SUMMARY.md`:** *"Đây là môi trường dev nên bạn cứ làm"* — this is a
+dev environment, proceed — chosen option `not-confirmed-accept-risk`. This
+is explicit authorization to ship the design as-is **in dev**. It is
+explicitly **not** a resolution for production: before `/status/:jobId` is
+exposed outside dev, the backend's id-minting scheme must be confirmed
+CSPRNG-based (≥128 bits) — a human can settle this with one read-only
+`SELECT id FROM registrations ORDER BY <pk> DESC LIMIT 20` over the
+existing read-only `DB_POLL` credentials; a sequential or timestamp-shaped
+id is obvious at a glance. **Never write to that database.** If the scheme
+turns out to be guessable, this design is unsound and needs a separate,
+server-minted status token instead — a new column, a new lookup path, and
+a new value that must reach the guest's QR code, generated outside this
+service. This is tracked as WINDOWS ledger item 6 and is never to be
+silently closed.
+
+**No connection cap on `/display` — accepted, judged low risk.** Nothing
+in `src/display/displayServer.ts` limits how many WebSocket clients may
+hold an open `/display` connection simultaneously. Judged acceptable
+because, after D-09, the endpoint is now LAN-restricted by
+`DISPLAY_IP_WHITELIST` and in practice serves a handful of physical
+browsers in one room, not an internet-facing audience.
