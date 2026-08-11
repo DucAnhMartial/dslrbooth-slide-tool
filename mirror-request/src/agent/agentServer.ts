@@ -80,7 +80,22 @@ export class AgentServer {
     });
 
     this.wss.on('connection', (ws) => {
-      const id = `agent-${Date.now()}-${++this.connSeq}`;
+      // WINDOWS ledger item 5: mask()'s phone pattern (`PHONE_RE`,
+      // src/logging/logger.ts:8) matches any run of 7+ adjacent digits, and
+      // the raw id below embeds a 13-digit epoch timestamp — every id used
+      // to get partially asterisked in the logs, degrading the displaced-
+      // Agent diagnostic OPS-RUNBOOK §7 depends on. The fix is applied here,
+      // at the mint, not by loosening PHONE_RE: under-masking a real phone
+      // number is a strictly worse failure than over-masking an id, so the
+      // masking regexes stay exactly as Phase 1 (01-05) locked them. The
+      // guarantee this produces is structural — no two digits are ever
+      // adjacent in the id — not "the id is short enough", so it holds
+      // regardless of how large the timestamp or the sequence number grows.
+      // Same technique test/logging-mask.test.ts:87-89 already uses for
+      // synthetic test ids (safeId()), promoted from the test file into
+      // production. OPS-RUNBOOK.md §7 describes the old id format and needs
+      // updating for this change — done by plan 05-05.
+      const id = `agent-${Date.now()}-${++this.connSeq}`.replace(/(\d)(?=\d)/g, '$1x');
       if (this.agentConn) {
         const displacedId = this.agentConn.id;
         logger.warn(`Agent WS replaced: ${displacedId} displaced by ${id}`);

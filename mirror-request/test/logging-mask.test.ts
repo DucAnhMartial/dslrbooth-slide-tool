@@ -2,10 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID, createHmac } from 'crypto';
 import express from 'express';
 import request from 'supertest';
+import http from 'http';
+import { WebSocket } from 'ws';
 import { mask, debugRawPayload, logger } from '../src/logging/logger';
 import { createMirrorReceiver } from '../src/ingestion/mirrorReceiver';
 import { jsonWithRawBody } from '../src/ingestion/webhookAuth';
-import { getStore } from '../src/state/localStore';
+import { getStore, LocalStore } from '../src/state/localStore';
+import { AgentServer } from '../src/agent/agentServer';
+import { QueueService } from '../src/queue/queueService';
+import { NotificationService } from '../src/notifications/notificationService';
+import { toGuestStatus } from '../src/status/guestStatus';
+
+const VALID_AGENT_TOKEN = 'test-agent-token'; // injected by vitest.config.ts's env block
 
 describe('mask', () => {
   it('replaces an email address with [EMAIL REDACTED] and removes the original', () => {
@@ -221,5 +229,159 @@ describe('/on-register log surface', () => {
 
     expect(res.status).toBe(200);
     expect(getStore().getRegistration(id)?.raw_payload).toBe(bodyString);
+  });
+});
+
+describe('Connection id survives masking (WINDOWS ledger item 5)', () => {
+  // Real AgentServer instances over a real loopback http.Server + WS client,
+  // matching test/agent-replacement.test.ts's own pattern — the id is minted
+  // deep inside AgentServer's private 'connection' handler, so the only way
+  // to observe a real id without reaching into private state is to read it
+  // back off the log messages AgentServer itself produces.
+  let httpServer: http.Server | undefined;
+  let agentServer: AgentServer | undefined;
+  let port: number;
+  let openSockets: WebSocket[] = [];
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    for (const ws of openSockets) {
+      try { ws.terminate(); } catch { /* already closed */ }
+    }
+    openSockets = [];
+    agentServer?.stop();
+    if (httpServer?.listening) {
+      await new Promise<void>((resolve) => httpServer?.close(() => resolve()));
+    }
+    agentServer = undefined;
+    httpServer = undefined;
+  });
+
+  async function startServer(): Promise<AgentServer> {
+    httpServer = http.createServer();
+    const server = new AgentServer();
+    agentServer = server;
+    server.start(httpServer);
+    await new Promise<void>((resolve) => httpServer?.listen(0, '127.0.0.1', resolve));
+    const address = httpServer.address();
+    if (!address || typeof address === 'string') throw new Error('Missing server address');
+    port = address.port;
+    return server;
+  }
+
+  function connect(): Promise<WebSocket> {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/agent`, {
+        headers: { authorization: `Bearer ${VALID_AGENT_TOKEN}` },
+      });
+      openSockets.push(ws);
+      ws.once('open', () => resolve(ws));
+      ws.once('error', reject);
+    });
+  }
+
+  function waitClose(ws: WebSocket): Promise<void> {
+    return new Promise((resolve) => {
+      if (ws.readyState === WebSocket.CLOSED) return resolve();
+      ws.once('close', () => resolve());
+    });
+  }
+
+  function extractConnectedId(messages: unknown[]): string {
+    const match = messages
+      .map((m) => String(m))
+      .map((m) => m.match(/^Agent connected: (.+)$/))
+      .find((m): m is RegExpMatchArray => m !== null);
+    if (!match) throw new Error('No "Agent connected" message captured');
+    return match[1];
+  }
+
+  it('the exact log-line templates agentServer.ts builds from a connection id survive masking unchanged', async () => {
+    await startServer();
+    const infoSpy = vi.spyOn(logger, 'info');
+    const warnSpy = vi.spyOn(logger, 'warn');
+
+    const clientA = await connect();
+    const clientB = await connect(); // displaces clientA -> "Agent WS replaced: ... displaced by ..."
+    await waitClose(clientA);
+
+    const connectedMsgs = infoSpy.mock.calls.map((c) => String(c[0])).filter((m) => m.startsWith('Agent connected:'));
+    const replacedMsgs = warnSpy.mock.calls.map((c) => String(c[0])).filter((m) => m.startsWith('Agent WS replaced:'));
+
+    expect(connectedMsgs.length).toBeGreaterThan(0);
+    expect(replacedMsgs.length).toBe(1);
+    for (const msg of [...connectedMsgs, ...replacedMsgs]) {
+      expect(mask(msg)).toBe(msg);
+    }
+
+    clientB.terminate();
+  });
+
+  it('a generated connection id contains no run of two adjacent digits', async () => {
+    await startServer();
+    const infoSpy = vi.spyOn(logger, 'info');
+
+    const client = await connect();
+    const id = extractConnectedId(infoSpy.mock.calls.map((c) => c[0]));
+
+    // Strictly stronger than "no run of seven": if no two digits are ever
+    // adjacent, PHONE_RE's `\+?\d{7,}` threshold can never be reached no
+    // matter how large the timestamp or the sequence number grows.
+    expect(id).not.toMatch(/\d\d/);
+
+    client.terminate();
+  });
+
+  it('two ids generated in the same process are different from each other', async () => {
+    await startServer();
+    const infoSpy = vi.spyOn(logger, 'info');
+
+    const clientA = await connect();
+    const clientB = await connect();
+    await waitClose(clientA);
+
+    const connectedIds = infoSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.startsWith('Agent connected:'))
+      .map((m) => m.replace('Agent connected: ', ''));
+
+    expect(connectedIds.length).toBeGreaterThanOrEqual(2);
+    expect(connectedIds[0]).not.toBe(connectedIds[1]);
+
+    clientB.terminate();
+  });
+
+  it('two ids generated in two different simulated process lifetimes are different from each other', async () => {
+    // Simulates a restart: a fresh AgentServer instance has connSeq reset to
+    // its initial value (0), the same as a real process restart would. This
+    // is the second half of ledger item 5 — ids used to repeat across
+    // restarts once the timestamp was masked away, because the sequence
+    // number alone ("agent-*-1") is identical on every first connection.
+    const serverA = await startServer();
+    const infoSpyA = vi.spyOn(logger, 'info');
+    const clientA1 = await connect();
+    const idA = extractConnectedId(infoSpyA.mock.calls.map((c) => c[0]));
+    clientA1.terminate();
+    infoSpyA.mockRestore();
+    serverA.stop();
+    if (httpServer?.listening) {
+      await new Promise<void>((resolve) => httpServer?.close(() => resolve()));
+    }
+
+    const serverB = await startServer();
+    const infoSpyB = vi.spyOn(logger, 'info');
+    const clientB1 = await connect();
+    const idB = extractConnectedId(infoSpyB.mock.calls.map((c) => c[0]));
+
+    expect(idA).not.toBe(idB);
+
+    clientB1.terminate();
+  });
+
+  it('control case: an unreformatted id built from a 13-digit timestamp is NOT left unchanged by mask() — proving the fix is load-bearing', () => {
+    // Built locally, never via production code: this is what agentServer.ts
+    // used to produce before the digit-run-breaking transform was applied.
+    const unreformatted = `agent-${Date.now()}-1`;
+    expect(mask(unreformatted)).not.toBe(unreformatted);
   });
 });
