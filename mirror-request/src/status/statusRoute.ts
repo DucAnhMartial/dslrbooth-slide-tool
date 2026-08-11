@@ -4,6 +4,7 @@ import logger from '../logging/logger';
 import type { BoothState, EnvConfig } from '../types';
 import { estimateWaitMs, type WaitRange } from './estimateWaitMs';
 import { toGuestStatus, toPhotoDelivery, type GuestStatusResponse } from './guestStatus';
+import { createStatusRateLimiter } from '../security/rateLimiter';
 
 /**
  * D-08's single generic 404, produced in exactly one place so that every way
@@ -42,7 +43,12 @@ export interface StatusAgent {
 
 export type StatusConfig = Pick<
   EnvConfig,
-  'WAIT_ESTIMATE_SAMPLE_SIZE' | 'WAIT_ESTIMATE_MIN_SAMPLES' | 'WAIT_ESTIMATE_DEFAULT_MS'
+  | 'WAIT_ESTIMATE_SAMPLE_SIZE'
+  | 'WAIT_ESTIMATE_MIN_SAMPLES'
+  | 'WAIT_ESTIMATE_DEFAULT_MS'
+  | 'STATUS_RATE_LIMIT_WINDOW_MS'
+  | 'STATUS_RATE_LIMIT_MAX'
+  | 'STATUS_RATE_LIMIT_MAX_KEYS'
 >;
 
 export function createStatusRouter(
@@ -52,6 +58,16 @@ export function createStatusRouter(
   cfg: StatusConfig,
 ): ReturnType<typeof Router> {
   const router = Router();
+
+  // D-10: built inside the factory, not at module scope, so each router
+  // constructed by a fresh createStatusRouter() call gets independent
+  // limiter state — this is what lets a test build a router per case
+  // without one case's throttling leaking into the next.
+  const rateLimiter = createStatusRateLimiter({
+    windowMs: cfg.STATUS_RATE_LIMIT_WINDOW_MS,
+    max: cfg.STATUS_RATE_LIMIT_MAX,
+    maxKeys: cfg.STATUS_RATE_LIMIT_MAX_KEYS,
+  });
 
   /**
    * D-06: this is a capability URL. The jobId IS the credential — the guest
@@ -63,8 +79,18 @@ export function createStatusRouter(
    * from the upstream backend, which mints the id, and is NOT verified. That
    * is an accepted dev-environment risk with a pre-production gate, not a
    * closed question.
+   *
+   * D-10: `rateLimiter` is mounted as the FIRST handler, ahead of
+   * `store.getJob(jobId)` below. This is the guarantee, not an incidental
+   * ordering: a refused (429) request must never reach the store, or a real
+   * id does more work before refusal than a fabricated one — and that extra
+   * work is exactly the timing side-channel that would let an attacker
+   * confirm an id is real without ever seeing its contents. Moving this
+   * middleware after the handler, or inlining its check into the handler
+   * body after the lookup, reintroduces that side-channel. See
+   * rateLimiter.ts's header comment for the other half of this guarantee.
    */
-  router.get('/status/:jobId', (req: Request, res: Response) => {
+  router.get('/status/:jobId', rateLimiter, (req: Request, res: Response) => {
     const jobId = req.params.jobId;
 
     // D-08: the collapse below is the guarantee. Every unexpected throw becomes

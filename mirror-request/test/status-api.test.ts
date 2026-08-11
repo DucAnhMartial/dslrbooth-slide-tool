@@ -126,6 +126,13 @@ describe('GET /status/:jobId — a queued guest sees their name, position and a 
         WAIT_ESTIMATE_SAMPLE_SIZE: 20,
         WAIT_ESTIMATE_MIN_SAMPLES: 5,
         WAIT_ESTIMATE_DEFAULT_MS: 180_000,
+        // D-10: generous on purpose — this file exercises Phase 5's
+        // wait-estimate/404 behaviour, not the limiter (that is
+        // status-rate-limit.test.ts's job), so the threshold must stay well
+        // above anything this file's fixtures issue.
+        STATUS_RATE_LIMIT_WINDOW_MS: 60_000,
+        STATUS_RATE_LIMIT_MAX: 1000,
+        STATUS_RATE_LIMIT_MAX_KEYS: 10_000,
       }),
     );
   });
@@ -277,6 +284,13 @@ describe('GET /status/:jobId — every miss collapses into one indistinguishable
         WAIT_ESTIMATE_SAMPLE_SIZE: 20,
         WAIT_ESTIMATE_MIN_SAMPLES: 5,
         WAIT_ESTIMATE_DEFAULT_MS: 180_000,
+        // D-10: generous on purpose — this file exercises Phase 5's
+        // wait-estimate/404 behaviour, not the limiter (that is
+        // status-rate-limit.test.ts's job), so the threshold must stay well
+        // above anything this file's fixtures issue.
+        STATUS_RATE_LIMIT_WINDOW_MS: 60_000,
+        STATUS_RATE_LIMIT_MAX: 1000,
+        STATUS_RATE_LIMIT_MAX_KEYS: 10_000,
       }),
     );
 
@@ -376,6 +390,13 @@ describe('GET /status/:jobId — every miss collapses into one indistinguishable
         WAIT_ESTIMATE_SAMPLE_SIZE: 20,
         WAIT_ESTIMATE_MIN_SAMPLES: 5,
         WAIT_ESTIMATE_DEFAULT_MS: 180_000,
+        // D-10: generous on purpose — this file exercises Phase 5's
+        // wait-estimate/404 behaviour, not the limiter (that is
+        // status-rate-limit.test.ts's job), so the threshold must stay well
+        // above anything this file's fixtures issue.
+        STATUS_RATE_LIMIT_WINDOW_MS: 60_000,
+        STATUS_RATE_LIMIT_MAX: 1000,
+        STATUS_RATE_LIMIT_MAX_KEYS: 10_000,
       }),
     );
 
@@ -437,6 +458,13 @@ describe('GET /status/:jobId — the estimate is suppressed rather than fabricat
         WAIT_ESTIMATE_SAMPLE_SIZE: 20,
         WAIT_ESTIMATE_MIN_SAMPLES: 5,
         WAIT_ESTIMATE_DEFAULT_MS: 180_000,
+        // D-10: generous on purpose — this file exercises Phase 5's
+        // wait-estimate/404 behaviour, not the limiter (that is
+        // status-rate-limit.test.ts's job), so the threshold must stay well
+        // above anything this file's fixtures issue.
+        STATUS_RATE_LIMIT_WINDOW_MS: 60_000,
+        STATUS_RATE_LIMIT_MAX: 1000,
+        STATUS_RATE_LIMIT_MAX_KEYS: 10_000,
       }),
     );
     return app;

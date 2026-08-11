@@ -1,4 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import express from 'express';
+import request from 'supertest';
+import { LocalStore } from '../src/state/localStore';
+import { createStatusRouter, type StatusQueue, type StatusAgent } from '../src/status/statusRoute';
 import {
   createRateLimitState,
   checkRateLimit,
@@ -172,5 +177,155 @@ describe('createStatusRateLimiter — Express middleware factory, bounded memory
     expect(lastRes.statusCode).toBe(RATE_LIMITED_STATUS);
     expect(lastRes.body).toEqual(RATE_LIMITED_BODY);
     expect(lastCalledNext.value).toBe(false);
+  });
+});
+
+describe('GET /status/:jobId — the limiter mounted ahead of the lookup (D-10, T-06-01/T-06-02)', () => {
+  // Per `test/status-api.test.ts`'s own convention: a unique file directly
+  // under `./data/` so it matches the `data/*.sqlite` .gitignore rule, and
+  // the store is constructed/closed explicitly rather than via getStore(),
+  // so this file cannot join WINDOWS.md ledger item 4's shared-test-DB race.
+  const DB_PATH = `./data/test-status-rate-limit-${process.pid}-${Date.now()}.sqlite`;
+  let store: LocalStore;
+
+  const REAL_JOB_ID = `job-throttle-real-${process.pid}`;
+  const FAKE_JOB_ID = `job-throttle-fake-${process.pid}`; // never seeded, on purpose
+
+  const queueStub: StatusQueue = {
+    getQueuePosition: (jobId: string) => (jobId === REAL_JOB_ID ? 1 : undefined),
+    getQueueLength: () => 1,
+    getAnnouncement: () => null,
+  };
+  const agentStub: StatusAgent = { isAgentOnline: () => true };
+
+  // Built per-case, per the plan's "Building it inside the factory ... is
+  // what lets a test create a fresh router per case without leaking counts
+  // between them" — every test below calls this rather than sharing one app.
+  function buildApp(max: number): express.Express {
+    const app = express();
+    app.use(
+      createStatusRouter(store, queueStub, agentStub, {
+        WAIT_ESTIMATE_SAMPLE_SIZE: 20,
+        WAIT_ESTIMATE_MIN_SAMPLES: 5,
+        WAIT_ESTIMATE_DEFAULT_MS: 180_000,
+        STATUS_RATE_LIMIT_WINDOW_MS: 60_000,
+        STATUS_RATE_LIMIT_MAX: max,
+        STATUS_RATE_LIMIT_MAX_KEYS: 10_000,
+      }),
+    );
+    return app;
+  }
+
+  beforeAll(() => {
+    store = new LocalStore(DB_PATH);
+    store.upsertRegistration({
+      id: REAL_JOB_ID,
+      name: 'Throttle Test Guest',
+      email: `${REAL_JOB_ID}@example.com`,
+      phone: '0900000000',
+      mode: 'print',
+      registered_at: new Date().toISOString(),
+    });
+    store.enqueueJob({ id: REAL_JOB_ID, queued_at: Date.now() });
+  });
+
+  afterAll(() => {
+    store.close();
+    for (const suffix of ['', '-wal', '-shm']) {
+      try {
+        fs.unlinkSync(`${DB_PATH}${suffix}`);
+      } catch {
+        // Already gone — fine.
+      }
+    }
+  });
+
+  it('throttles the (max+1)th request from one client with the fixed 429 body', async () => {
+    const max = 3;
+    const app = buildApp(max);
+
+    for (let i = 0; i < max; i++) {
+      const allowed = await request(app).get(`/status/${REAL_JOB_ID}`);
+      expect(allowed.status).not.toBe(RATE_LIMITED_STATUS);
+    }
+
+    const throttled = await request(app).get(`/status/${REAL_JOB_ID}`);
+    expect(throttled.status).toBe(RATE_LIMITED_STATUS);
+    expect(Object.keys(throttled.body)).toEqual(['error']);
+    expect(throttled.body).toEqual(RATE_LIMITED_BODY);
+  });
+
+  it('produces the identical throttled response for a real id and a fabricated id — compared to each other, not to a literal', async () => {
+    const appReal = buildApp(1);
+    await request(appReal).get(`/status/${REAL_JOB_ID}`); // consumes the one allowed request
+    const throttledReal = await request(appReal).get(`/status/${REAL_JOB_ID}`);
+
+    const appFake = buildApp(1);
+    await request(appFake).get(`/status/${FAKE_JOB_ID}`); // consumes the one allowed request
+    const throttledFake = await request(appFake).get(`/status/${FAKE_JOB_ID}`);
+
+    expect({ status: throttledReal.status, body: throttledReal.body }).toEqual({
+      status: throttledFake.status,
+      body: throttledFake.body,
+    });
+  });
+
+  it('never reaches the store on a throttled request — a call-count spy on store.getJob, not a timing measurement', async () => {
+    const app = buildApp(1);
+    const spy = vi.spyOn(store, 'getJob');
+
+    await request(app).get(`/status/${REAL_JOB_ID}`); // allowed — must call store.getJob
+    const callsAfterAllowed = spy.mock.calls.length;
+    expect(callsAfterAllowed).toBeGreaterThan(0);
+
+    const throttled = await request(app).get(`/status/${REAL_JOB_ID}`); // throttled
+    expect(throttled.status).toBe(RATE_LIMITED_STATUS);
+    expect(spy.mock.calls.length).toBe(callsAfterAllowed); // zero additional calls
+
+    spy.mockRestore();
+  });
+
+  it('under the limit, an existing job still returns its unchanged 8-key body, byte-for-byte', async () => {
+    const app = buildApp(1000);
+    const res = await request(app).get(`/status/${REAL_JOB_ID}`);
+
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body).sort()).toEqual(
+      [
+        'boothPaused',
+        'guestName',
+        'jobId',
+        'photoDelivery',
+        'queueLength',
+        'queuePosition',
+        'status',
+        'waitEstimate',
+      ].sort(),
+    );
+    expect(res.body.jobId).toBe(REAL_JOB_ID);
+    expect(res.body.status).toBe('waiting');
+  });
+
+  it('under the limit, an unknown id still returns the generic 404, unchanged', async () => {
+    const app = buildApp(1000);
+    const res = await request(app).get(`/status/${FAKE_JOB_ID}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'job not found' });
+  });
+
+  it('a fresh router carries no rate-limit state from a prior, fully-throttled case', async () => {
+    const throttledApp = buildApp(1);
+    await request(throttledApp).get(`/status/${REAL_JOB_ID}`);
+    const throttled = await request(throttledApp).get(`/status/${REAL_JOB_ID}`);
+    expect(throttled.status).toBe(RATE_LIMITED_STATUS);
+
+    // A brand-new createStatusRouter() call builds a brand-new limiter Map
+    // (createStatusRateLimiter is constructed inside the factory, not at
+    // module scope) — this request must NOT still be throttled just because
+    // the previous app instance's budget was exhausted.
+    const freshApp = buildApp(1);
+    const res = await request(freshApp).get(`/status/${REAL_JOB_ID}`);
+    expect(res.status).not.toBe(RATE_LIMITED_STATUS);
   });
 });
