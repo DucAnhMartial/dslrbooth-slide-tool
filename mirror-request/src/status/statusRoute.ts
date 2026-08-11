@@ -1,8 +1,24 @@
 import { Router, Request, Response } from 'express';
 import { LocalStore } from '../state/localStore';
+import logger from '../logging/logger';
 import type { EnvConfig } from '../types';
 import { estimateWaitMs } from './estimateWaitMs';
 import { toGuestStatus, toPhotoDelivery, type GuestStatusResponse } from './guestStatus';
+
+/**
+ * D-08's single generic 404, produced in exactly one place so that every way
+ * of missing — never existed, purged, malformed, or an unexpected internal
+ * throw — is byte-identical. Two literals here would be two failure shapes
+ * waiting to drift apart, and any difference between them is an enumeration
+ * oracle: a caller who can tell "no such job" from "job you may not see" can
+ * confirm which guests are real.
+ *
+ * Do not add a `reason`, `code`, `hint` or `detail` field. Do not add a
+ * variant for malformed input.
+ */
+function genericNotFound(res: Response): Response {
+  return res.status(404).json({ error: 'job not found' });
+}
 
 /**
  * The narrowest possible views of QueueService and AgentServer — only the
@@ -50,14 +66,37 @@ export function createStatusRouter(
    */
   router.get('/status/:jobId', (req: Request, res: Response) => {
     const jobId = req.params.jobId;
-    const job = store.getJob(jobId);
 
-    // D-08: one generic 404, identical whether the job never existed, was
-    // purged, or belongs to someone else. Any branch that let a caller tell
-    // those apart would be an enumeration oracle. Carried forward from
-    // index.ts unchanged — do not add a second failure shape here.
-    if (!job) return res.status(404).json({ error: 'job not found' });
+    // D-08: the collapse below is the guarantee. Every unexpected throw becomes
+    // the SAME generic 404 the miss path returns, because an error that turned
+    // into a 500 on some ids while others 404'd would rebuild the enumeration
+    // oracle this decision exists to close — by accident, through a code path
+    // nobody meant to be security-relevant. Replacing this catch with a 500,
+    // or with a 500-for-real-errors/404-for-misses split, reintroduces it.
+    //
+    // No format validation, length cap or regex guard is applied to :jobId
+    // either, for the same reason: better-sqlite3 binds the value as a
+    // parameter so there is no injection surface, and any rejection firing
+    // before the lookup would tell a caller that their id is SHAPED wrong —
+    // a second oracle stacked on top of the one D-08 closes.
+    try {
+      const job = store.getJob(jobId);
 
+      // Identical whether the job never existed, was purged, or belongs to
+      // someone else. Carried forward from index.ts unchanged.
+      if (!job) return genericNotFound(res);
+
+      return respond(job, jobId, res);
+    } catch (err) {
+      logger.error(`Status lookup failed, returning the generic 404: ${(err as Error).message}`);
+      // If the failure happened after the body started going out there is
+      // nothing left to collapse into — sending again would throw.
+      if (res.headersSent) return res;
+      return genericNotFound(res);
+    }
+  });
+
+  function respond(job: { status: string }, jobId: string, res: Response): Response {
     const queuePosition = queue.getQueuePosition(jobId) ?? null;
     const queueLength = queue.getQueueLength();
 
@@ -120,8 +159,8 @@ export function createStatusRouter(
     // No booth-state string, agent-online boolean, stall reason, retry count
     // or ack error appears anywhere in `body` — see the GuestStatusResponse
     // contract, which has no field capable of carrying one.
-    res.json(body);
-  });
+    return res.json(body);
+  }
 
   return router;
 }
