@@ -6,6 +6,7 @@ import { labelLogger } from './logging/logger';
 import { createMirrorReceiver } from './ingestion/mirrorReceiver';
 import { jsonWithRawBody } from './ingestion/webhookAuth';
 import { DBPoller } from './ingestion/dbPoller';
+import { createViewHealthProbe } from './ops/viewHealthProbe';
 import { createQueueService } from './queue/queueService';
 import { AgentServer } from './agent/agentServer';
 import { createNotificationService } from './notifications/notificationService';
@@ -61,10 +62,15 @@ const poller = new DBPoller(
     password: config.DB_PASSWORD,
   },
 );
+// D-09: a broken registrations VIEW never blocks startup or the process —
+// probe.start() runs its first cycle detached, inside the app.listen
+// callback below, same as poller.start().
+const probe = createViewHealthProbe(store);
 
 const server = app.listen(config.PORT, config.HOST, () => {
   log.info(`Extension Service ready on ${config.HOST}:${config.PORT}`);
   poller.start();
+  probe.start();
   try {
     queue.recover();
   } catch (err) {
@@ -79,6 +85,7 @@ const server = app.listen(config.PORT, config.HOST, () => {
 function shutdown(code: number): void {
   log.info('Shutting down');
   poller.stop();
+  probe.stop();
   queue.stop();
   notifier.stop();
   agentServer.stop();

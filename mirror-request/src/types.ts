@@ -127,6 +127,11 @@ export interface EnvConfig {
   NOTIFY_FETCH_TIMEOUT_MS: number;
   NOTIFY_SWEEP_INTERVAL_MS: number;
   NOTIFY_CLAIM_LEASE_MS: number;
+  // D-09 (phase 6): the VIEW health probe's own cadence. Deliberately has no
+  // enable/disable toggle, matching config.ts:46-54's reasoning for
+  // PROXY_IP_WHITELIST — a toggle would create a supported way to switch off
+  // the only signal that ingestion is dead.
+  VIEW_PROBE_INTERVAL_MS: number;
   NOTIFY_WEBHOOK_URL: string;
   LOCAL_STORE_PATH: string;
   LOG_LEVEL: string;

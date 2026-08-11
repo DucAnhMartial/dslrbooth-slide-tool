@@ -123,6 +123,9 @@ export function loadConfig(): EnvConfig {
     NOTIFY_FETCH_TIMEOUT_MS: toNum('NOTIFY_FETCH_TIMEOUT_MS', 10_000),
     NOTIFY_SWEEP_INTERVAL_MS: toNum('NOTIFY_SWEEP_INTERVAL_MS', 3_000),
     NOTIFY_CLAIM_LEASE_MS: toNum('NOTIFY_CLAIM_LEASE_MS', 60_000),
+    // D-09 (phase 6): no production fail-fast check and no enable/disable
+    // toggle, deliberately — see the comment beside this key in types.ts.
+    VIEW_PROBE_INTERVAL_MS: toNum('VIEW_PROBE_INTERVAL_MS', 60_000),
     NOTIFY_WEBHOOK_URL: get('NOTIFY_WEBHOOK_URL') ?? '',
     LOCAL_STORE_PATH: get('LOCAL_STORE_PATH') ?? './data/extension-service.sqlite',
     LOG_LEVEL: get('LOG_LEVEL') ?? 'info',
