@@ -1,8 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { LocalStore } from '../state/localStore';
 import logger from '../logging/logger';
-import type { EnvConfig } from '../types';
-import { estimateWaitMs } from './estimateWaitMs';
+import type { BoothState, EnvConfig } from '../types';
+import { estimateWaitMs, type WaitRange } from './estimateWaitMs';
 import { toGuestStatus, toPhotoDelivery, type GuestStatusResponse } from './guestStatus';
 
 /**
@@ -121,6 +121,26 @@ export function createStatusRouter(
     const announced = queue.getAnnouncement()?.jobId === jobId;
     const status = toGuestStatus({ jobStatus: job.status, announced, photoDelivery });
 
+    /**
+     * D-05's guarantee lives in the KEY'S ABSENCE, and this is the one place
+     * that decides it. An estimate computed while nothing can be dispatched is
+     * a promise the system knows it cannot keep — so when the booth cannot
+     * serve, the honest answer is to say nothing, not to say a number.
+     *
+     * Returning `null` instead of omitting the key would be worse than useless:
+     * a client rendering `waitEstimate` would show "0 phút" — "no wait at all"
+     * — to precisely the guest whose wait is indefinite. That is why this is a
+     * conditional SPREAD of a partial object rather than an assignment of
+     * undefined or a post-hoc `delete`: those leave the key's existence as a
+     * property of serialisation rather than of the code, and a future change of
+     * serialiser would silently start emitting it.
+     *
+     * There is exactly ONE rule and one evaluation of it — `status` is the
+     * waiting word and `boothPaused` is false. Two code paths that could each
+     * suppress would be two rules free to drift apart.
+     */
+    const canServe = status === 'waiting' && !boothPaused;
+
     const body: GuestStatusResponse = {
       jobId,
       queuePosition,
@@ -129,37 +149,35 @@ export function createStatusRouter(
       status,
       photoDelivery,
       boothPaused,
+      ...(canServe ? { waitEstimate: computeEstimate(queuePosition, boothState) } : {}),
     };
-
-    // D-05 made structural: waitEstimate is ATTACHED only when the booth can
-    // actually serve this guest. In every other case the key is absent from
-    // the object entirely rather than present and null — an absent key cannot
-    // be misread as a zero-minute promise.
-    if (status === 'waiting' && !boothPaused) {
-      // status === 'waiting' implies job.status === 'queued', and
-      // getQueuePosition() returns a position for exactly the queued set, so
-      // queuePosition is non-null on this branch.
-      const ahead = Math.max(0, (queuePosition ?? 1) - 1);
-      // The +1 covers the session currently running or about to be dispatched.
-      // That guest is NOT in the queued set that getQueuePosition() and
-      // getQueueLength() count, so without this the estimate would omit the
-      // one session the guest is most certainly waiting on.
-      const inFlight = boothState === 'BUSY' || boothState === 'ANNOUNCING' ? 1 : 0;
-
-      body.waitEstimate = estimateWaitMs(
-        store.getRecentSessionDurationsMs(cfg.WAIT_ESTIMATE_SAMPLE_SIZE),
-        ahead + inFlight,
-        {
-          minSamples: cfg.WAIT_ESTIMATE_MIN_SAMPLES,
-          defaultMs: cfg.WAIT_ESTIMATE_DEFAULT_MS,
-        },
-      );
-    }
 
     // No booth-state string, agent-online boolean, stall reason, retry count
     // or ack error appears anywhere in `body` — see the GuestStatusResponse
     // contract, which has no field capable of carrying one.
     return res.json(body);
+  }
+
+  // Reached only on the canServe branch above, which is what makes the
+  // non-null assumption about queuePosition sound: `status === 'waiting'`
+  // implies `job.status === 'queued'`, and getQueuePosition() returns a
+  // position for exactly the queued set.
+  function computeEstimate(queuePosition: number | null, boothState: BoothState): WaitRange {
+    const ahead = Math.max(0, (queuePosition ?? 1) - 1);
+    // The +1 covers the session currently running or about to be dispatched.
+    // That guest is NOT in the queued set that getQueuePosition() and
+    // getQueueLength() count, so without this the estimate would omit the one
+    // session the guest is most certainly waiting on.
+    const inFlight = boothState === 'BUSY' || boothState === 'ANNOUNCING' ? 1 : 0;
+
+    return estimateWaitMs(
+      store.getRecentSessionDurationsMs(cfg.WAIT_ESTIMATE_SAMPLE_SIZE),
+      ahead + inFlight,
+      {
+        minSamples: cfg.WAIT_ESTIMATE_MIN_SAMPLES,
+        defaultMs: cfg.WAIT_ESTIMATE_DEFAULT_MS,
+      },
+    );
   }
 
   return router;
