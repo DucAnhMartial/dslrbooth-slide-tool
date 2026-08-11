@@ -27,8 +27,14 @@ export type GuestStatus = typeof GUEST_STATUSES[number];
  * into the status word. A guest whose session finished but whose photo is
  * still being retried has genuinely finished; conflating the two would either
  * hide a real failure or invent one.
+ *
+ * Exported as an array for the same reason GUEST_STATUSES is: the vocabulary
+ * test iterates the real runtime list rather than a copy of it, so the two
+ * cannot drift apart.
  */
-export type PhotoDelivery = 'sent' | 'pending' | 'failed';
+export const PHOTO_DELIVERY_STATES = ['sent', 'pending', 'failed'] as const;
+
+export type PhotoDelivery = typeof PHOTO_DELIVERY_STATES[number];
 
 /**
  * The complete `/status/:jobId` response contract. Exactly eight keys, with
@@ -49,10 +55,28 @@ export interface GuestStatusResponse {
 
 /**
  * The five real internal job statuses, transcribed from the comment at
- * types.ts:16. `QueueJob.status` is typed as a bare `string`, so this union is
- * what gives the mapping below something exhaustive to be checked against.
+ * types.ts:16 and confirmed against their only writers in localStore.ts
+ * (`completeInProgressJob` writes 'completed', `failJob` writes 'failed',
+ * `requeueWithRetry`/`requeueNoRetry` write 'queued', `updateJobStatus` writes
+ * 'dispatched' and 'in_progress'). `QueueJob.status` is typed as a bare
+ * `string`, so this list is what gives the mapping below something exhaustive
+ * to be checked against.
+ *
+ * The type is DERIVED from the array rather than declared beside it, which
+ * makes the array the vocabulary test iterates and the type STATUS_MAP is
+ * keyed by one single source. Adding a sixth member here without adding a
+ * mapping below is a compile error — which is precisely the property D-12
+ * asks for, and precisely what a `default:` arm would destroy.
  */
-type InternalJobStatus = 'queued' | 'dispatched' | 'in_progress' | 'completed' | 'failed';
+export const KNOWN_JOB_STATUSES = [
+  'queued',
+  'dispatched',
+  'in_progress',
+  'completed',
+  'failed',
+] as const;
+
+export type InternalJobStatus = typeof KNOWN_JOB_STATUSES[number];
 
 export interface GuestStatusInput {
   jobStatus: string;
