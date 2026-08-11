@@ -132,6 +132,16 @@ export interface EnvConfig {
   // PROXY_IP_WHITELIST — a toggle would create a supported way to switch off
   // the only signal that ingestion is dead.
   VIEW_PROBE_INTERVAL_MS: number;
+  // D-10 (phase 6): the /status/:jobId rate limiter's window/threshold/memory
+  // cap. `registrations.id` is a CSPRNG-minted 40-bit value (ets_web's
+  // short_code.py), not a secret with unlimited entropy — this limiter is
+  // the compensating control that makes the capability-URL design sound at
+  // that width. No production fail-fast check, deliberately: unlike
+  // DISPLAY_IP_WHITELIST these have site-independent defaults that are
+  // correct out of the box (rateLimiter.ts has the full arithmetic).
+  STATUS_RATE_LIMIT_WINDOW_MS: number;
+  STATUS_RATE_LIMIT_MAX: number;
+  STATUS_RATE_LIMIT_MAX_KEYS: number;
   NOTIFY_WEBHOOK_URL: string;
   LOCAL_STORE_PATH: string;
   LOG_LEVEL: string;

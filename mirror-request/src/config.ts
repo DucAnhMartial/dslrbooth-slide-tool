@@ -126,6 +126,15 @@ export function loadConfig(): EnvConfig {
     // D-09 (phase 6): no production fail-fast check and no enable/disable
     // toggle, deliberately — see the comment beside this key in types.ts.
     VIEW_PROBE_INTERVAL_MS: toNum('VIEW_PROBE_INTERVAL_MS', 60_000),
+    // D-10 (phase 6): no production fail-fast check, deliberately — these
+    // three have site-independent defaults that are correct out of the box.
+    // 30 requests / 60s per client address turns a 2^40 id-guessing search
+    // from theoretically feasible into roughly 2^40 / 30 minutes from a
+    // single address, while a guest polling their own status page every few
+    // seconds stays far under 30/minute.
+    STATUS_RATE_LIMIT_WINDOW_MS: toNum('STATUS_RATE_LIMIT_WINDOW_MS', 60_000),
+    STATUS_RATE_LIMIT_MAX: toNum('STATUS_RATE_LIMIT_MAX', 30),
+    STATUS_RATE_LIMIT_MAX_KEYS: toNum('STATUS_RATE_LIMIT_MAX_KEYS', 10_000),
     NOTIFY_WEBHOOK_URL: get('NOTIFY_WEBHOOK_URL') ?? '',
     LOCAL_STORE_PATH: get('LOCAL_STORE_PATH') ?? './data/extension-service.sqlite',
     LOG_LEVEL: get('LOG_LEVEL') ?? 'info',
