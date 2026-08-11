@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import Database from 'better-sqlite3';
 import express from 'express';
@@ -208,6 +208,13 @@ const EIGHT_KEYS = [
   'waitEstimate',
 ];
 
+// The suppressed contract: the same body minus waitEstimate entirely. D-05's
+// guarantee lives in the KEY'S ABSENCE, so this list is one shorter rather
+// than the eight-key list with a null in it.
+const SEVEN_KEYS = EIGHT_KEYS.filter((k) => k !== 'waitEstimate');
+
+const DB_PATH_SUPPRESS = `./data/test-status-suppress-${process.pid}-${Date.now()}.sqlite`;
+
 describe('GET /status/:jobId — every miss collapses into one indistinguishable 404 (D-08)', () => {
   let store: LocalStore;
   let app: express.Express;
@@ -397,5 +404,195 @@ describe('GET /status/:jobId — every miss collapses into one indistinguishable
     }
 
     expect(checked).toBe(10);
+  });
+});
+
+describe('GET /status/:jobId — the estimate is suppressed rather than fabricated (D-05)', () => {
+  let store: LocalStore;
+  let queue: QueueService;
+
+  const queuedJobId = `job-sup-queued-${process.pid}`;
+  const inProgressJobId = `job-sup-in-progress-${process.pid}`;
+  const completedJobId = `job-sup-completed-${process.pid}`;
+  const failedJobId = `job-sup-failed-${process.pid}`;
+
+  function seedRegistration(id: string, name: string): void {
+    store.upsertRegistration({
+      id,
+      name,
+      email: `${id}@example.com`,
+      phone: '0900000000',
+      mode: 'print',
+      registered_at: new Date().toISOString(),
+    });
+  }
+
+  // Built per-test so the Agent verdict is an injected stub, never a poke at
+  // AgentServer's heartbeat internals: Phase 5 reads Phase 3's verdict, it does
+  // not reach into the watchdog that produces it.
+  function appWith(agentOnline: boolean): express.Express {
+    const app = express();
+    app.use(
+      createStatusRouter(store, queue, { isAgentOnline: () => agentOnline }, {
+        WAIT_ESTIMATE_SAMPLE_SIZE: 20,
+        WAIT_ESTIMATE_MIN_SAMPLES: 5,
+        WAIT_ESTIMATE_DEFAULT_MS: 180_000,
+      }),
+    );
+    return app;
+  }
+
+  function expectSuppressed(body: Record<string, unknown>): void {
+    expect(Object.keys(body).sort()).toEqual(SEVEN_KEYS);
+    // Asserted separately and deliberately: `in` is what distinguishes an
+    // ABSENT key from a key present with the value undefined or null. A
+    // toEqual on the key list alone would pass for `waitEstimate: null`,
+    // which is exactly the shape D-05 forbids — a client would render it as
+    // "0 phút", a promise of no wait at all.
+    expect('waitEstimate' in body).toBe(false);
+  }
+
+  beforeAll(() => {
+    store = new LocalStore(DB_PATH_SUPPRESS);
+
+    const base = 1_700_000_000_000;
+
+    // Completed first, while it is the only in_progress row, so
+    // completeInProgressJob() cannot pick up a different job.
+    seedRegistration(completedJobId, 'Completed Guest');
+    store.enqueueJob({ id: completedJobId, queued_at: base });
+    store.updateJobStatus(completedJobId, 'in_progress', 'acknowledged_at', base + 1000);
+    store.completeInProgressJob(base + 241_000);
+
+    seedRegistration(failedJobId, 'Failed Guest');
+    store.enqueueJob({ id: failedJobId, queued_at: base + 2000 });
+    store.updateJobStatus(failedJobId, 'in_progress', 'acknowledged_at', base + 3000);
+    store.failJob(failedJobId, 'session_ack_timeout');
+
+    seedRegistration(inProgressJobId, 'In Session Guest');
+    store.enqueueJob({ id: inProgressJobId, queued_at: base + 4000 });
+    store.updateJobStatus(inProgressJobId, 'in_progress', 'acknowledged_at', base + 5000);
+
+    seedRegistration(queuedJobId, 'Waiting Guest');
+    store.enqueueJob({ id: queuedJobId, queued_at: base + 6000 });
+
+    queue = new QueueService(store, {
+      SESSION_TIMEOUT_MS: 300_000,
+      NEXT_GUEST_COUNTDOWN_MS: 7_000,
+      SESSION_MAX_RETRIES: 2,
+    });
+
+    // The fixture really is in the states it claims to be in — otherwise a
+    // "suppressed" assertion could be passing for the wrong reason.
+    expect(store.getJob(queuedJobId)?.status).toBe('queued');
+    expect(store.getJob(inProgressJobId)?.status).toBe('in_progress');
+    expect(store.getJob(completedJobId)?.status).toBe('completed');
+    expect(store.getJob(failedJobId)?.status).toBe('failed');
+  });
+
+  beforeEach(() => {
+    store.setBoothIdle();
+  });
+
+  afterAll(() => {
+    store.close();
+    for (const suffix of ['', '-wal', '-shm']) {
+      fs.rmSync(`${DB_PATH_SUPPRESS}${suffix}`, { force: true });
+    }
+  });
+
+  // M3 success criterion 5 — "No heartbeat 30s → Agent offline in status API" —
+  // surviving the field rename from `agentOnline` to `boothPaused`. The status
+  // API still reflects an offline Agent; it now says so in guest vocabulary.
+  it('emits no waitEstimate key at all and reports the booth paused when the Agent is offline', async () => {
+    const res = await request(appWith(false)).get(`/status/${queuedJobId}`);
+
+    expect(res.status).toBe(200);
+    expectSuppressed(res.body);
+    expect(res.body.boothPaused).toBe(true);
+    expect(res.body.status).toBe('waiting');
+  });
+
+  // D-05's second trigger. NOTE: this state is currently unreachable in
+  // production — LocalStore.setBoothTimeout() writes 'IDLE', not
+  // 'TIMEOUT_RESET' — so the row is driven here through setBoothState()
+  // directly. The branch is implemented and pinned anyway, per D-05's wording;
+  // fixing setBoothTimeout() is a change to Phase 2's booth state machine and
+  // is out of Phase 5's bounds.
+  it('emits no waitEstimate key when the booth is persisted in the reset state', async () => {
+    store.setBoothState('TIMEOUT_RESET');
+
+    const res = await request(appWith(true)).get(`/status/${queuedJobId}`);
+
+    expect(res.status).toBe(200);
+    expectSuppressed(res.body);
+    expect(res.body.boothPaused).toBe(true);
+  });
+
+  it('still returns the full eight-key body when the Agent is online and the booth is normal', async () => {
+    const res = await request(appWith(true)).get(`/status/${queuedJobId}`);
+
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body).sort()).toEqual(EIGHT_KEYS);
+    expect('waitEstimate' in res.body).toBe(true);
+    expect(res.body.boothPaused).toBe(false);
+    expect(res.body.status).toBe('waiting');
+  });
+
+  // Only a guest who is actually waiting gets a wait estimate. A guest already
+  // in the booth, finished, or sent to staff has nothing left to wait for, and
+  // a number on their screen would be meaningless rather than merely wrong.
+  it.each([
+    ['in_progress', () => inProgressJobId, 'in_session'],
+    ['completed', () => completedJobId, 'finished_photo_pending'],
+    ['failed', () => failedJobId, 'see_staff'],
+  ])(
+    'emits no waitEstimate and a null queuePosition for a %s job even with the booth healthy',
+    async (_label, jobIdOf, expectedStatus) => {
+      const res = await request(appWith(true)).get(`/status/${jobIdOf()}`);
+
+      expect(res.status).toBe(200);
+      expectSuppressed(res.body);
+      expect(res.body.queuePosition).toBeNull();
+      expect(res.body.boothPaused).toBe(false);
+      expect(res.body.status).toBe(expectedStatus);
+    },
+  );
+
+  // D-12's headline consequence, asserted where a guest would actually meet it:
+  // a job that exhausted the retry budget hands back no position and no
+  // estimate, so there is nothing on screen inviting the guest to keep polling.
+  it('never hands a failed job a queue position or an estimate to keep polling', async () => {
+    const res = await request(appWith(true)).get(`/status/${failedJobId}`);
+
+    expect(res.body.status).toBe('see_staff');
+    expect(res.body.queuePosition).toBeNull();
+    expect('waitEstimate' in res.body).toBe(false);
+  });
+
+  it('leaks no operator vocabulary in any suppressed response', async () => {
+    const cases: Array<[string, express.Express, string]> = [
+      ['agent offline', appWith(false), queuedJobId],
+      ['booth reset', appWith(true), queuedJobId],
+      ['in_progress', appWith(true), inProgressJobId],
+      ['completed', appWith(true), completedJobId],
+      ['failed', appWith(true), failedJobId],
+    ];
+
+    let checked = 0;
+    for (const [label, theApp, jobId] of cases) {
+      if (label === 'booth reset') store.setBoothState('TIMEOUT_RESET');
+      else store.setBoothIdle();
+
+      const res = await request(theApp).get(`/status/${jobId}`);
+      const serialized = JSON.stringify(res.body);
+
+      for (const word of OPERATOR_WORDS) {
+        expect(serialized, `${label} leaked "${word}"`).not.toContain(word);
+      }
+      checked += 1;
+    }
+
+    expect(checked).toBe(5);
   });
 });
