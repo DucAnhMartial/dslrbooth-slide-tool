@@ -12,6 +12,7 @@ import { createNotificationService } from './notifications/notificationService';
 import { mask } from './logging/logger';
 import { DisplayServer } from './display/displayServer';
 import { renderDisplayPage } from './display/displayPage';
+import { createStatusRouter } from './status/statusRoute';
 
 const config = getConfig();
 const log = labelLogger('server');
@@ -33,21 +34,7 @@ const notifier = createNotificationService();
 const queue = createQueueService(agentServer, notifier);
 const displayServer = new DisplayServer(queue, agentServer);
 
-app.get('/status/:jobId', (req, res) => {
-  const job = store.getJob(req.params.jobId);
-  if (!job) return res.status(404).json({ error: 'job not found' });
-
-  const position = queue.getQueuePosition(req.params.jobId);
-  const snapshot = {
-    jobId: req.params.jobId,
-    queuePosition: position ?? null,
-    queueLength: queue.getQueueLength(),
-    boothState: store.getBoothState(),
-    agentOnline: agentServer.isAgentOnline(),
-    guestName: job.registration?.name ?? null,
-  };
-  res.json(snapshot);
-});
+app.use(createStatusRouter(store, queue, agentServer, config));
 
 const poller = new DBPoller(
   config.DB_POLL_INTERVAL_MS,

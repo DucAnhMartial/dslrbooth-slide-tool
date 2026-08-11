@@ -101,6 +101,13 @@ export interface EnvConfig {
   TWILIO_FROM_NUMBER: string;
   SESSION_TIMEOUT_MS: number;
   NEXT_GUEST_COUNTDOWN_MS: number;
+  // D-04: both the minimum sample count and the cold-start duration are
+  // configuration, not literals. No literal for either may appear outside
+  // config.ts — an estimator that hardcodes its own fallback cannot be tuned
+  // for a venue whose sessions are systematically longer or shorter.
+  WAIT_ESTIMATE_SAMPLE_SIZE: number;
+  WAIT_ESTIMATE_MIN_SAMPLES: number;
+  WAIT_ESTIMATE_DEFAULT_MS: number;
   SESSION_MAX_RETRIES: number;
   HEARTBEAT_TIMEOUT_MS: number;
   NOTIFY_MAX_RETRIES: number;

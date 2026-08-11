@@ -94,6 +94,15 @@ export function loadConfig(): EnvConfig {
     SESSION_TIMEOUT_MS:       toNum('SESSION_TIMEOUT_MS',  300_000),
     NEXT_GUEST_COUNTDOWN_MS:  toNum('NEXT_GUEST_COUNTDOWN_MS', 7000),
     SESSION_MAX_RETRIES:      toNum('SESSION_MAX_RETRIES', 2),
+    // D-04: the cold-start fallback. Below WAIT_ESTIMATE_MIN_SAMPLES real
+    // completed sessions the estimator uses WAIT_ESTIMATE_DEFAULT_MS rather
+    // than computing a median from one or two sessions. The production
+    // database holds exactly 1 usable completed session today (measured), so
+    // the default is what production actually serves on day one — that is
+    // D-04 working as designed, not a bug.
+    WAIT_ESTIMATE_SAMPLE_SIZE: toNum('WAIT_ESTIMATE_SAMPLE_SIZE', 20),
+    WAIT_ESTIMATE_MIN_SAMPLES: toNum('WAIT_ESTIMATE_MIN_SAMPLES', 5),
+    WAIT_ESTIMATE_DEFAULT_MS:  toNum('WAIT_ESTIMATE_DEFAULT_MS', 180_000),
     HEARTBEAT_TIMEOUT_MS:     toNum('HEARTBEAT_TIMEOUT_MS',  30_000),
     // D-15: default flipped from 3 to 2. D-08 changes the number's meaning
     // from "total attempts" to "retries after the first attempt" — holding

@@ -340,6 +340,38 @@ export class LocalStore {
     return this.getQueuedJobs().length;
   }
 
+  // D-02's poisoned-sample exclusion, expressed structurally. The
+  // `status = 'completed'` restriction in the WHERE clause below IS the
+  // exclusion — it is not one filter among several. A stalled, requeued or
+  // failed job cannot reach that status: completeInProgressJob() above is the
+  // only writer of 'completed', and it only ever fires against a row that is
+  // currently 'in_progress'. Every other terminal path (failJob,
+  // requeueWithRetry, requeueNoRetry) writes 'failed' or 'queued' instead.
+  //
+  // Do NOT add a separate stall-reason or retries filter in application code
+  // alongside this. Such a filter would be strictly weaker than the WHERE
+  // clause: the query cannot run without its WHERE, whereas a later edit can
+  // delete an `if`. Same omission-as-guarantee pattern as
+  // getDueNotifications() below and requeueWithRetry() above.
+  //
+  // The duration pair is `completed_at - acknowledged_at`, NOT anything
+  // involving session_started_at — that column is declared but never written
+  // anywhere in this codebase, so a query built on it would return zero
+  // samples forever, silently, and every test would still pass
+  // (D-01 as CORRECTED).
+  getRecentSessionDurationsMs(limit: number): number[] {
+    const rows = this.db.prepare(`
+      SELECT completed_at - acknowledged_at AS duration_ms
+      FROM queue_job
+      WHERE status = 'completed'
+        AND acknowledged_at IS NOT NULL
+        AND completed_at IS NOT NULL
+      ORDER BY completed_at DESC
+      LIMIT ?
+    `).all(limit) as Array<{ duration_ms: number }>;
+    return rows.map((row) => Number(row.duration_ms));
+  }
+
   getJobRegistration(jobId: string): { job: QueueJob; registration: Registration } | undefined {
     const jobRow = this.db.prepare('SELECT * FROM queue_job WHERE id = ?').get(jobId) as
       | (QueueJob & { registration_id?: string })
