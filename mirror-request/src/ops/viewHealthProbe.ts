@@ -2,6 +2,7 @@ import type { LocalStore } from '../state/localStore';
 import type { DBPollerDbConfig } from '../ingestion/dbPoller';
 import { getConfig } from '../config';
 import { labelLogger } from '../logging/logger';
+import { NAME_AUDIT_CURSOR_KEY, nameSourceWarnings, type NameAuditRow } from './nameSourceAudit';
 
 // D-09: a broken VIEW never blocks the service. This module deliberately
 // departs from config.ts's production fail-fast posture (config.ts:65-77) —
@@ -160,6 +161,11 @@ export class ViewHealthProbe {
       // Healthy, equal-count cycle: log nothing, matching
       // notificationService.ts's "no log noise on the success path"
       // convention.
+
+      // D-05: the audit runs only after a healthy cycle, in its own
+      // try/catch (inside runNameAudit()) so an audit failure can never
+      // affect the health verdict above.
+      await this.runNameAudit();
     } catch (err: any) {
       // Never logs `err` itself, `this.dbConfig`, or a connection string —
       // only `err.message` — so credentials never reach the log file,
@@ -177,6 +183,58 @@ export class ViewHealthProbe {
         // the operator to ignore alerts (Phase 1's D-05 lineage).
         opsLogger.warn(`View health probe: DB unreachable (${code ?? 'unknown'}), will retry`);
       }
+    }
+  }
+
+  /**
+   * D-05: every fall-through past first_name/last_name produces exactly one
+   * operator-visible warn naming the ticket code and the rung, exactly once
+   * per guest, surviving restart — the high-water mark is persisted through
+   * `store.setCursor(NAME_AUDIT_CURSOR_KEY, ...)`, the same `db_poll_cursor`
+   * table `dbPoller.ts` uses under a different poll key. Never touches the
+   * health verdict: any failure here is caught and only warned about.
+   */
+  private async runNameAudit(): Promise<void> {
+    try {
+      // Initialising from the 'registrations' ingestion cursor (D-06's
+      // seed-to-now lineage) is what keeps pre-cutover rows out of the log;
+      // '1970-01-01T00:00:00.000Z' mirrors dbPoller.ts:98's own default.
+      const cursor =
+        this.store.getCursor(NAME_AUDIT_CURSOR_KEY) ??
+        this.store.getCursor('registrations') ??
+        '1970-01-01T00:00:00.000Z';
+
+      const conn = await this.pool.getConnection();
+      let rows;
+      try {
+        [rows] = await conn.query(
+          'SELECT id, name_source, registered_at FROM registrations_name_audit WHERE registered_at > ? ORDER BY registered_at ASC LIMIT 200',
+          [cursor]
+        );
+      } finally {
+        conn.release();
+      }
+
+      const records = rows as NameAuditRow[];
+      if (records.length === 0) return;
+
+      for (const warning of nameSourceWarnings(records)) {
+        // The message carries a ticket code and a rung name and nothing
+        // else — never the resolved `name`, which this SELECT does not
+        // even fetch, and never an email or phone.
+        opsLogger.warn(`Guest name for ticket ${warning.ticketCode} came from ${warning.nameSource}, not first_name/last_name`);
+      }
+
+      // Advance on ALL returned rows, not only the warned ones, so a
+      // first-rung (personalinfo_name) row is never re-examined on the next
+      // cycle either.
+      const lastRow = records.at(-1);
+      if (lastRow) {
+        this.store.setCursor(NAME_AUDIT_CURSOR_KEY, lastRow.registered_at);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      opsLogger.warn(`Name-source audit cycle failed: ${message}`);
     }
   }
 
