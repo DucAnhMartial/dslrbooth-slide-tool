@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { LocalStore, getStore } from '../src/state/localStore';
+import { seedRegistrationsCursor, REGISTERED_AT_LEXICAL_PATTERN } from '../src/ops/seedRegistrationsCursor';
 
 describe('LocalStore persistence — webhook replay + poll cursor', () => {
   let dir: string;
@@ -265,6 +266,74 @@ describe('LocalStore persistence — webhook replay + poll cursor', () => {
       store.saveNotification({ jobId, status: 'pending', attempts: 0, dueAt: now });
 
       expect(store.getDueNotifications(now).some((r) => r.jobId === jobId)).toBe(false);
+    });
+  });
+
+  // D-06's cursor seed (06-04-PLAN.md). These cases drive the lexical-
+  // collision proof as plain string comparisons over literal constants —
+  // needing neither MySQL nor a clock — plus the seeded value's round trip
+  // and idempotency against a real, file-backed LocalStore.
+  describe('D-06 registrations cursor seed — lexical format is load-bearing', () => {
+    // Same instant T, two shapes: the VIEW's own DATE_FORMAT lexical form
+    // (space separator, 6-digit microseconds) vs. the ISO-8601 form anyone
+    // would write by reflex (new Date().toISOString()).
+    const ISO_SEED_AT_T = '2026-08-11T14:00:00.000Z';
+    const VIEW_SEED_AT_T = '2026-08-11 14:00:00.000000';
+    // A VIEW-format registered_at one second after T, same calendar day —
+    // the row a correctly-seeded cursor must still admit.
+    const VIEW_TIMESTAMP_ONE_SECOND_LATER = '2026-08-11 14:00:01.000000';
+    const SHIPPED_DEFAULT_CURSOR = '1970-01-01T00:00:00.000Z';
+
+    it('an ISO-8601 seed at T compares as NOT less than a VIEW-format timestamp one second later on the same day — the collision', () => {
+      // dbPoller.ts:101 filters `registered_at > ?` (cursor). Restated as
+      // that exact comparison: the VIEW-format row is NOT greater than the
+      // ISO-shaped seed, so it would be silently filtered out and never
+      // ingested — the entire failure mode this plan exists to prevent.
+      expect(VIEW_TIMESTAMP_ONE_SECOND_LATER > ISO_SEED_AT_T).toBe(false);
+      // Equivalently: the ISO seed is NOT less than the later VIEW value.
+      expect(ISO_SEED_AT_T < VIEW_TIMESTAMP_ONE_SECOND_LATER).toBe(false);
+    });
+
+    it('a VIEW-format seed at T IS less than a VIEW-format timestamp one second later — the same registration is ingested', () => {
+      expect(VIEW_SEED_AT_T < VIEW_TIMESTAMP_ONE_SECOND_LATER).toBe(true);
+      expect(VIEW_TIMESTAMP_ONE_SECOND_LATER > VIEW_SEED_AT_T).toBe(true);
+    });
+
+    it('a VIEW-format value is greater than the shipped 1970-01-01T00:00:00.000Z default under < and >', () => {
+      expect(VIEW_SEED_AT_T > SHIPPED_DEFAULT_CURSOR).toBe(true);
+      expect(SHIPPED_DEFAULT_CURSOR < VIEW_SEED_AT_T).toBe(true);
+    });
+
+    it('seeds a real LocalStore and getCursor(\'registrations\') returns exactly the seeded string, matching REGISTERED_AT_LEXICAL_PATTERN', () => {
+      store = new LocalStore(dbPath);
+      store.setCursor('registrations', VIEW_SEED_AT_T);
+
+      const readBack = store.getCursor('registrations');
+      expect(readBack).toBe(VIEW_SEED_AT_T);
+      expect(readBack).toMatch(REGISTERED_AT_LEXICAL_PATTERN);
+    });
+
+    it('seeding twice overwrites rather than appending — exactly one row exists for the registrations poll key', () => {
+      store = new LocalStore(dbPath);
+      store.setCursor('registrations', VIEW_SEED_AT_T);
+      store.setCursor('registrations', VIEW_TIMESTAMP_ONE_SECOND_LATER);
+
+      // Throwaway raw introspection handle — same pattern this file already
+      // uses for the notification_record migration's column check above;
+      // deliberately not a new LocalStore method.
+      const raw = new Database(dbPath);
+      const row = raw.prepare('SELECT COUNT(*) AS n FROM db_poll_cursor WHERE poll_key = ?').get('registrations') as { n: number };
+      raw.close();
+
+      expect(row.n).toBe(1);
+      expect(store.getCursor('registrations')).toBe(VIEW_TIMESTAMP_ONE_SECOND_LATER);
+    });
+
+    it('seedRegistrationsCursor contains no call to toISOString on any path that can produce the seed value', () => {
+      // Reads the function's own source text rather than trusting a file-
+      // level grep count — this project's house rule against
+      // comment-matching false positives applies to source scans too.
+      expect(seedRegistrationsCursor.toString()).not.toMatch(/toISOString/);
     });
   });
 });
