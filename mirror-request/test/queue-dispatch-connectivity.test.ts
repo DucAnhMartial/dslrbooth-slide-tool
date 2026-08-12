@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueueService, queueLogger } from '../src/queue/queueService';
 import type { LocalStore } from '../src/state/localStore';
 import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
+import { NO_PHOTO_SWEEP_STUB } from './helpers/noPhotoSweep';
 
 // D-02/D-03/D-04: when the Agent is not connected, the queue must not
 // dispatch, must not touch the retry budget, and must log once per outage —
@@ -45,6 +46,7 @@ function buildStore(queued: Array<{ id: string }>) {
     // used rather than an inline stub so the three-status semantics cannot
     // drift away from the SQL they stand in for (07-03).
     ...createPendingPrintRegistry().registry,
+    ...NO_PHOTO_SWEEP_STUB,
   } as unknown as LocalStore;
 
   return { store, updateJobStatus, requeueWithRetry, failJob, getBooth: () => booth };

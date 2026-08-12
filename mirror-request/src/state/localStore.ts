@@ -277,6 +277,117 @@ export class LocalStore {
     return result.changes === 1;
   }
 
+  // D-09/D-03: the session ended with no print composite ever seen, so no
+  // photo was ever produced. Shaped identically to completeJob() above and
+  // guarded by the same `AND status = 'in_progress'` predicate, which is what
+  // stops this writer from overwriting the outcome of a job that already
+  // completed or already failed (T-07-16).
+  //
+  // CALLED FROM THE TICK SWEEP, NEVER FROM session_end. This is a deviation
+  // from 07-04-PLAN.md Task 2, decided by the human after the plan's version
+  // was built and measured — see getJobsAwaitingNoPhotoClose() below for the
+  // full reasoning. In one sentence: dslrBooth's session_end carries an empty
+  // `{}` payload and fires repeatedly for one session, so closing on it let a
+  // stray duplicate from the previous guest write this terminal status onto
+  // the NEXT guest's live job.
+  //
+  // THREE COLUMNS ARE DELIBERATELY ABSENT FROM THE SET LIST, AND EACH OMISSION
+  // IS A GUARANTEE. Do not add any of them:
+  //
+  //   retries — a system-side fault never spends the guest's retry budget
+  //   (Phase 3 D-01/D-13, the same reasoning as requeueNoRetry() below). The
+  //   guest has already walked away from the booth; charging a retry would
+  //   call them back to a camera for a session that produced nothing.
+  //
+  //   stall_reason — this is not a stall. OPS-RUNBOOK §6 holds a closed,
+  //   server-authored stall_reason vocabulary, and an outcome that is nobody's
+  //   fault must not join it. Because this path and D-02's release fallback
+  //   both write none, an empty stall_reason on a terminal job is now
+  //   meaningful rather than a gap.
+  //
+  //   status = 'completed' — the status written is 'no_photo' precisely so
+  //   that getRecentSessionDurationsMs()'s `WHERE status = 'completed'`
+  //   excludes this row from the guests' wait estimate BY CONSTRUCTION rather
+  //   than by an application filter a later edit could delete. That exclusion
+  //   is D-09's second reason for choosing a status over a reason column and
+  //   is measured, not assumed, in local-store-persistence.test.ts.
+  //
+  // completed_at IS set, deliberately: the session's duration must stay
+  // available to the summary line plan 07-05 emits, even though the session
+  // produced no photo.
+  //
+  // No migration accompanies this value. `status` is TEXT NOT NULL DEFAULT
+  // 'queued' with no CHECK constraint, so a new member of the vocabulary needs
+  // no schema change and no backfill — no pre-existing row is a candidate for
+  // it.
+  closeJobNoPhoto(jobId: string, endedAt: number): boolean {
+    const result = this.db.prepare(
+      "UPDATE queue_job SET status = 'no_photo', session_ended_at = ?, completed_at = ? WHERE id = ? AND status = 'in_progress'"
+    ).run(endedAt, endedAt, jobId);
+    return result.changes === 1;
+  }
+
+  // The candidate query for the no-photo sweep (07-04, Option C). Every
+  // predicate below is an ATTRIBUTION rule derived from the row's own
+  // structure, and that is the entire point of this design.
+  //
+  // WHY THIS IS A SWEEP AND NOT A session_end HANDLER. 07-04-PLAN.md Task 2
+  // said to close the bound job as no-photo directly inside sessionEnded().
+  // That was built and measured, and it regressed the SC-2 tracer: dslrBooth's
+  // session_end carries an empty `{}` payload
+  // (07-EVIDENCE-dslrbooth-triggers.md:41-42 states outright that attributing
+  // it to a job is impossible) and fires on every exit from the sharing screen
+  // — three times in 20 seconds for one session in the measured trace. So a
+  // stray duplicate from guest A, arriving after guest B had been dispatched
+  // and acknowledged, closed GUEST B's live job as no_photo. This query
+  // replaces that guess with facts the row itself carries.
+  //
+  // The four predicates, each load-bearing:
+  //
+  //   status = 'in_progress' — the job never reached the print composite.
+  //   completeJob() is the only writer of 'completed' and fires at that
+  //   anchor, so a job that produced a photo is already excluded here.
+  //
+  //   id <> current_job_id — the booth is not serving this job right now.
+  //   This is what protects a guest who IS mid-session: while they hold the
+  //   booth they can never be a candidate, no matter what stray events
+  //   arrive. Passed in by the caller rather than joined, because
+  //   booth_state is a single-row table the service already reads.
+  //
+  //   no pending_print row — deliberately ANY row, not merely an 'awaiting'
+  //   one. The existence of a row proves a print composite WAS produced for
+  //   this job, which makes it by definition not a no-photo session; an
+  //   'expired' row means the composite existed but its upload never arrived,
+  //   which is a different outcome with a different warning (D-11, and the
+  //   reason expired rows are marked rather than deleted). Stricter than
+  //   necessary today, because a job with a slot is already 'completed', and
+  //   deliberately so: the guarantee should not depend on that coupling
+  //   holding in a future phase.
+  //
+  //   acknowledged_at <= cutoff — the grace period. See
+  //   NO_PHOTO_CLOSE_DELAY_MS in queueService.ts for the derivation of the
+  //   floor; it must exceed the pending-print expiry window or this sweep
+  //   could close a job whose composite is still legitimately in flight.
+  //
+  // acknowledged_at is used as the age anchor because it is the only
+  // timestamp an in_progress row actually carries: session_started_at is
+  // declared in the schema but written by nothing in this codebase (the same
+  // trap getRecentSessionDurationsMs() documents above), and session_ended_at
+  // is not written until a job closes.
+  getJobsAwaitingNoPhotoClose(cutoff: number, currentJobId?: string): string[] {
+    const rows = this.db.prepare(`
+      SELECT id
+      FROM queue_job
+      WHERE status = 'in_progress'
+        AND acknowledged_at IS NOT NULL
+        AND acknowledged_at <= ?
+        AND (? IS NULL OR id <> ?)
+        AND id NOT IN (SELECT jobId FROM pending_print)
+      ORDER BY acknowledged_at ASC
+    `).all(cutoff, currentJobId ?? null, currentJobId ?? null) as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  }
+
   getInFlightJobs(): QueueJob[] {
     return this.db.prepare(
       "SELECT * FROM queue_job WHERE status IN ('dispatched','in_progress') ORDER BY dispatched_at DESC"

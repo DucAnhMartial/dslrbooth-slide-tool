@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueueService } from '../src/queue/queueService';
 import type { LocalStore } from '../src/state/localStore';
 import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
+import { NO_PHOTO_SWEEP_STUB } from './helpers/noPhotoSweep';
 
 describe('Queue countdown with multiple registrations', () => {
   afterEach(() => vi.useRealTimers());
@@ -35,6 +36,7 @@ describe('Queue countdown with multiple registrations', () => {
       // cannot drift away from the SQL they stand in for (07-03).
       ...createPendingPrintRegistry().registry,
       getJobRegistration: () => undefined,
+      ...NO_PHOTO_SWEEP_STUB,
     } as unknown as LocalStore;
     const service = new QueueService(store);
     const dispatched: string[] = [];
@@ -134,6 +136,7 @@ describe('booth state transitions', () => {
       }),
       requeueWithRetry,
       failJob,
+      ...NO_PHOTO_SWEEP_STUB,
     } as unknown as LocalStore;
 
     return { store, boothSequence, jobStatus, requeueWithRetry, failJob };

@@ -80,6 +80,12 @@ function buildStore(currentJobId: string | undefined = JOB, pending: PendingSeed
     getQueueLength: () => 0,
     completeJob,
     failJob,
+    // 07-04: session_end reads the bound job, and every tick sweeps for
+    // no-photo candidates. This fixture tracks no job status of its own, so
+    // the job reads as in_progress and is never a sweep candidate.
+    getJob: (id: string) => ({ id, status: 'in_progress' }),
+    closeJobNoPhoto: vi.fn(() => false),
+    getJobsAwaitingNoPhotoClose: () => [],
     getQueuePosition: () => undefined,
     getJobRegistration: () => undefined,
     ...registry,

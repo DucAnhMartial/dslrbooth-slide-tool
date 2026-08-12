@@ -38,6 +38,13 @@ function buildStore() {
     return true;
   });
 
+  // Mirrors the real SQL's `AND status = 'in_progress'` predicate (07-04).
+  const closeJobNoPhoto = vi.fn((jobId: string) => {
+    if (jobStatus[jobId] !== 'in_progress') return false;
+    jobStatus[jobId] = 'no_photo';
+    return true;
+  });
+
   const store = {
     getBoothState: () => booth,
     getBoothStateDetailed: () => ({ state: booth, updated_at: new Date().toISOString() }),
@@ -60,6 +67,10 @@ function buildStore() {
         .map((j, index) => ({ jobId: j.id, name: j.name, position: index + 1 })),
     getQueueLength: () => queued.filter((j) => jobStatus[j.id] === 'queued').length,
     completeJob,
+    closeJobNoPhoto,
+    // The no-photo sweep runs on every tick (07-04). No job here is ever a
+    // candidate, but the mock must carry the surface the service calls.
+    getJobsAwaitingNoPhotoClose: () => [],
     getQueuePosition: () => 1,
     // tick() sweeps the pending-print registry on every interval and
     // onPrintComposite() opens a slot, so the mocked store must satisfy
@@ -75,7 +86,7 @@ function buildStore() {
     failJob: vi.fn(),
   } as unknown as LocalStore;
 
-  return { store, boothSequence, jobStatus, completeJob };
+  return { store, boothSequence, jobStatus, completeJob, closeJobNoPhoto };
 }
 
 describe('QueueService — a print composite completes exactly the job it is bound to (SC-2 tracer)', () => {

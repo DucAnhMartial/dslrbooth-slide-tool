@@ -5,6 +5,7 @@ import path from 'node:path';
 import { LocalStore } from '../src/state/localStore';
 import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
 import { QueueService } from '../src/queue/queueService';
+import { NO_PHOTO_SWEEP_STUB } from './helpers/noPhotoSweep';
 
 // D-12/D-13: a disconnect while the booth is BUSY must return the in-flight
 // job to `queued` without charging a retry, and must never double-fire with
@@ -71,6 +72,7 @@ function buildStore(jobs: MockJob[]) {
     // used rather than an inline stub so the three-status semantics cannot
     // drift away from the SQL they stand in for (07-03).
     ...createPendingPrintRegistry().registry,
+    ...NO_PHOTO_SWEEP_STUB,
   } as unknown as LocalStore;
 
   return { store, jobs, requeueWithRetry, requeueNoRetry, failJob, updateJobStatus, getBooth: () => booth };

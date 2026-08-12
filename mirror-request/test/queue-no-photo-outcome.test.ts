@@ -1,33 +1,42 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { QueueService, queueLogger } from '../src/queue/queueService';
+import { QueueService, queueLogger, NO_PHOTO_CLOSE_DELAY_MS } from '../src/queue/queueService';
 import { LocalStore } from '../src/state/localStore';
 import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
 
 /**
- * SC-3 / D-03 / D-09. A session that ends with no print composite ever seen
- * must resolve to its own outcome — not to 'completed' (which would make it
- * indistinguishable from a successful session and would poison the guests'
- * wait estimate), and not to a stall (which would charge the guest a retry and
- * call them back to a camera they have already walked away from).
+ * SC-3 / D-03 / D-09, built as a SWEEP rather than as a session_end handler.
  *
- * The store is mocked at the SQLite seam, the same seam
- * queue-dual-completion.test.ts uses, because what is under test here is the
- * SERVICE's branching: which store writers the session_end path calls, and
- * which it must never call. The SQL those writers stand for is proved
+ * The plan (07-04-PLAN.md Task 2) said to close the bound job as no-photo
+ * inside sessionEnded(). That version was built and measured first, and it
+ * regressed the SC-2 tracer in queue-dual-completion.test.ts: dslrBooth's
+ * session_end carries an empty `{}` payload and fires on every exit from the
+ * sharing screen (three times in 20s for one session in the measured trace),
+ * so a stray duplicate from guest A closed GUEST B's live job as no_photo.
+ * The human chose the swept deadline instead. The first test below is the
+ * direct regression pin for that, and the SC-2 tracer passing UNCHANGED is the
+ * other half of the evidence.
+ *
+ * The store is mocked at the SQLite seam; the candidate query's SQL is proved
  * separately against a real temp-file database in
  * test/local-store-persistence.test.ts. Neither file substitutes for the other.
  */
 
 const COMPOSITE_PATH = 'C:\\dslrBooth\\Test_event\\Prints\\20260812_143526_970.jpg';
 
-function buildStore() {
+/**
+ * `jobIds` defaults to a SINGLE job. Most cases here advance fake time past
+ * NO_PHOTO_CLOSE_DELAY_MS, and a second queued guest would be dispatched,
+ * time out on the busy timer at SESSION_TIMEOUT_MS, and churn through the
+ * retry policy for the rest of the run — noise that has nothing to do with the
+ * sweep and that would trip the call-count-zero spies. The two-guest ordering
+ * is requested explicitly by the one test that needs it.
+ */
+function buildStore(jobIds: string[] = ['job-1']) {
   const boothSequence: string[] = ['IDLE'];
   let booth = 'IDLE';
-  const queued = [
-    { id: 'job-1', name: 'Guest One' },
-    { id: 'job-2', name: 'Guest Two' },
-  ];
-  const jobStatus: Record<string, string> = { 'job-1': 'queued', 'job-2': 'queued' };
+  const queued = jobIds.map((id, i) => ({ id, name: `Guest ${i + 1}` }));
+  const jobStatus: Record<string, string> = Object.fromEntries(jobIds.map((id) => [id, 'queued']));
+  const acknowledgedAt: Record<string, number> = {};
   let currentJobId: string | undefined;
 
   const pushState = (state: string) => {
@@ -41,15 +50,29 @@ function buildStore() {
     return true;
   });
 
-  // Mirrors the real SQL's `AND status = 'in_progress'` predicate: a terminal
-  // row matches zero rows and the call reports false.
   const closeJobNoPhoto = vi.fn((jobId: string) => {
     if (jobStatus[jobId] !== 'in_progress') return false;
     jobStatus[jobId] = 'no_photo';
     return true;
   });
 
-  const requeueWithRetry = vi.fn();
+  const registry = createPendingPrintRegistry();
+
+  // Mirrors getJobsAwaitingNoPhotoClose()'s four predicates. The real SQL is
+  // pinned against a real database; this stands in for it at the service seam.
+  const getJobsAwaitingNoPhotoClose = vi.fn((cutoff: number, boundJobId?: string) =>
+    Object.keys(jobStatus).filter((id) =>
+      jobStatus[id] === 'in_progress'
+      && acknowledgedAt[id] !== undefined
+      && acknowledgedAt[id] <= cutoff
+      && id !== boundJobId
+      && !registry.rows.has(id),
+    ),
+  );
+
+  // Returns the real writer's shape so an unrelated busy-timer stall in a
+  // long-running case cannot fail a test by destructuring undefined.
+  const requeueWithRetry = vi.fn(() => ({ retries: 0 }));
   const requeueNoRetry = vi.fn();
   const failJob = vi.fn();
   const setBoothTimeout = vi.fn(() => { pushState('IDLE'); currentJobId = undefined; });
@@ -69,7 +92,10 @@ function buildStore() {
     getBoothCurrentJobId: () => currentJobId,
     setBoothCurrentJob: (jobId: string | null) => { currentJobId = jobId ?? undefined; },
     getJob: (id: string) => (id in jobStatus ? { id, status: jobStatus[id] } : undefined),
-    updateJobStatus: (id: string, status: string) => { jobStatus[id] = status; },
+    updateJobStatus: (id: string, status: string, column?: string, value?: number) => {
+      jobStatus[id] = status;
+      if (column === 'acknowledged_at' && typeof value === 'number') acknowledgedAt[id] = value;
+    },
     getQueuedGuestSummaries: () =>
       queued
         .filter((j) => jobStatus[j.id] === 'queued')
@@ -77,8 +103,9 @@ function buildStore() {
     getQueueLength: () => queued.filter((j) => jobStatus[j.id] === 'queued').length,
     completeJob,
     closeJobNoPhoto,
+    getJobsAwaitingNoPhotoClose,
     getQueuePosition: () => 1,
-    ...createPendingPrintRegistry().registry,
+    ...registry.registry,
     getJobRegistration: (jobId: string) => ({
       job: { id: jobId },
       registration: { id: 'reg-1', name: 'Guest', email: '', phone: '', mode: 'boomerang', registered_at: '' },
@@ -94,10 +121,12 @@ function buildStore() {
     jobStatus,
     completeJob,
     closeJobNoPhoto,
+    getJobsAwaitingNoPhotoClose,
     requeueWithRetry,
     requeueNoRetry,
     failJob,
     setBoothTimeout,
+    registryRows: registry.rows,
   };
 }
 
@@ -112,132 +141,179 @@ function startSession(store: LocalStore) {
   return service;
 }
 
-describe('QueueService — a session that produced no photo (SC-3, D-03/D-09)', () => {
+describe('QueueService — the no-photo sweep (SC-3, D-03/D-09)', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
-  it('closes the job as no_photo when session_end arrives with no print composite ever seen', () => {
+  it('leaves a live guest untouched when the PREVIOUS guest stray session_end arrives mid-session', () => {
+    vi.useFakeTimers();
+    const { store, jobStatus, closeJobNoPhoto } = buildStore(['job-1', 'job-2']);
+    const service = startSession(store);
+
+    // job-1 completes properly at the print composite, then its session_end
+    // releases the booth and job-2 is announced, dispatched and acknowledged.
+    service.onAgentEvent('processing_start', 'job-1', { param5: COMPOSITE_PATH });
+    service.onAgentEvent('session_end');
+    vi.advanceTimersByTime(7_000);
+    service.onAgentEvent('session_start', 'job-2');
+    expect(jobStatus['job-2']).toBe('in_progress');
+
+    // job-1's stray duplicate session_end, arriving while guest B holds the
+    // booth. This is the exact ordering that made the plan's session_end
+    // version write no_photo onto job-2.
+    service.onAgentEvent('session_end');
+    vi.advanceTimersByTime(250); // let a tick (and therefore a sweep) run
+
+    expect(closeJobNoPhoto).not.toHaveBeenCalled();
+    expect(jobStatus['job-2']).toBe('in_progress');
+
+    service.stop();
+  });
+
+  it('does not close a job while the booth is still serving it', () => {
     vi.useFakeTimers();
     const { store, jobStatus, closeJobNoPhoto } = buildStore();
     const service = startSession(store);
 
+    // Deliberately stops short of SESSION_TIMEOUT_MS. A job that still holds
+    // the booth cannot reach the no-photo deadline at all, because the busy
+    // timer stalls a session that never ends long before then — so the booth
+    // exclusion is a second, independent guarantee rather than the only one.
+    // Its controlled proof (same row, same age, only the binding differs) is
+    // the store-level case in local-store-persistence.test.ts.
+    vi.advanceTimersByTime(250_000);
+
+    expect(closeJobNoPhoto).not.toHaveBeenCalled();
     expect(jobStatus['job-1']).toBe('in_progress');
 
-    service.onAgentEvent('session_end');
-
-    expect(closeJobNoPhoto).toHaveBeenCalledTimes(1);
-    expect(closeJobNoPhoto).toHaveBeenCalledWith('job-1', expect.any(Number));
-    expect(jobStatus['job-1']).toBe('no_photo');
+    service.stop();
   });
 
-  it('still releases the booth and dispatches the next guest — the queue is not stalled by the outcome', () => {
+  it('does not close an unbound job before the deadline has passed', () => {
     vi.useFakeTimers();
-    const { store, boothSequence, jobStatus } = buildStore();
+    const { store, jobStatus, closeJobNoPhoto } = buildStore();
+    const service = startSession(store);
+
+    service.onAgentEvent('session_end'); // releases the booth; job-1 stays in_progress
+    vi.advanceTimersByTime(NO_PHOTO_CLOSE_DELAY_MS / 2);
+
+    expect(closeJobNoPhoto).not.toHaveBeenCalled();
+    expect(jobStatus['job-1']).toBe('in_progress');
+
+    service.stop();
+  });
+
+  it('closes a genuinely photo-less job once the deadline passes, and warns exactly once', () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(queueLogger, 'warn').mockImplementation(() => undefined as never);
+    const { store, jobStatus, closeJobNoPhoto } = buildStore();
+    const service = startSession(store);
+
+    // A session that produced nothing: no processing_start, no printing, no
+    // print composite of any kind. The booth is released and the row ages out.
+    service.onAgentEvent('session_end');
+    vi.advanceTimersByTime(NO_PHOTO_CLOSE_DELAY_MS + 1_000);
+
+    expect(jobStatus['job-1']).toBe('no_photo');
+    expect(closeJobNoPhoto).toHaveBeenCalledTimes(1);
+    expect(closeJobNoPhoto).toHaveBeenCalledWith('job-1', expect.any(Number));
+
+    const lines = warnSpy.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('job-1'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain('No print upload seen');
+    expect(lines[0].toLowerCase()).toContain('no print composite');
+
+    service.stop();
+  });
+
+  it('keeps sweeping on later ticks without closing the same job twice', () => {
+    vi.useFakeTimers();
+    const { store, closeJobNoPhoto } = buildStore();
     const service = startSession(store);
 
     service.onAgentEvent('session_end');
+    vi.advanceTimersByTime(NO_PHOTO_CLOSE_DELAY_MS + 1_000);
+    expect(closeJobNoPhoto).toHaveBeenCalledTimes(1);
 
-    // The booth went IDLE (the release), then straight into ANNOUNCING for the
-    // next guest via the tick that follows it.
-    expect(boothSequence).toContain('IDLE');
-    expect(store.getBoothState()).toBe('ANNOUNCING');
-    expect(service.getAnnouncement()?.jobId).toBe('job-2');
+    vi.advanceTimersByTime(60_000); // 240 more ticks
 
-    vi.advanceTimersByTime(7_000);
-    expect(store.getBoothState()).toBe('BUSY');
-    service.onAgentEvent('session_start', 'job-2');
-    expect(jobStatus['job-2']).toBe('in_progress');
+    // The row is no longer in_progress, so it stops being a candidate — the
+    // sweep is idempotent by the same predicate that makes it safe.
+    expect(closeJobNoPhoto).toHaveBeenCalledTimes(1);
+
+    service.stop();
   });
 
   it('charges no retry and writes no stall reason — no retry writer is called at all (D-03, T-07-18)', () => {
     vi.useFakeTimers();
-    const { store, requeueWithRetry, requeueNoRetry, failJob, setBoothTimeout } = buildStore();
+    const { store, requeueWithRetry, requeueNoRetry, failJob, setBoothTimeout, jobStatus } = buildStore();
     const service = startSession(store);
 
     service.onAgentEvent('session_end');
+    vi.advanceTimersByTime(NO_PHOTO_CLOSE_DELAY_MS + 1_000);
+    expect(jobStatus['job-1']).toBe('no_photo');
 
-    // The three call-count-zero spies ARE the guarantee. A guest whose session
-    // produced nothing is not called back to the camera, and the outcome is
-    // not recorded as a stall.
+    // The three call-count-zero spies ARE the guarantee: a guest whose session
+    // produced nothing is never called back to the camera.
     expect(requeueWithRetry).not.toHaveBeenCalled();
     expect(requeueNoRetry).not.toHaveBeenCalled();
     expect(failJob).not.toHaveBeenCalled();
-    // handleStall() is reachable only through the busy timer; setBoothTimeout
-    // is its booth-side effect, so its absence pins that handleStall() was
-    // never entered from this path either.
+    // handleStall()'s booth-side effect; its absence pins that the stall path
+    // was never entered either.
     expect(setBoothTimeout).not.toHaveBeenCalled();
+
+    service.stop();
   });
 
-  it('emits one warning that names the job and is distinguishable from the registry-expiry warning', () => {
-    vi.useFakeTimers();
-    const warnSpy = vi.spyOn(queueLogger, 'warn').mockImplementation(() => undefined as never);
-    const { store } = buildStore();
-    const service = startSession(store);
-
-    service.onAgentEvent('session_end');
-
-    const lines = warnSpy.mock.calls.map((call) => String(call[0]));
-    const noPhotoLines = lines.filter((line) => line.includes('job-1'));
-    expect(noPhotoLines).toHaveLength(1);
-    // 07-03's expiry warning means "a composite was produced but its upload
-    // never arrived". This one means "no composite was ever produced". An
-    // operator must be able to tell them apart at a glance, so this wording
-    // must not be the expiry warning's wording.
-    expect(noPhotoLines[0]).not.toContain('No print upload seen');
-    expect(noPhotoLines[0].toLowerCase()).toContain('no print composite');
-  });
-
-  it('does NOT close as no_photo when the print composite already completed the job', () => {
-    vi.useFakeTimers();
-    const { store, jobStatus, closeJobNoPhoto, completeJob } = buildStore();
-    const service = startSession(store);
-
-    service.onAgentEvent('processing_start', 'job-1', { param5: COMPOSITE_PATH });
-    expect(completeJob).toHaveBeenCalledTimes(1);
-    expect(jobStatus['job-1']).toBe('completed');
-
-    service.onAgentEvent('session_end');
-
-    // The contrasting case. The job is already terminal, so the no-photo
-    // branch must not be entered at all — not merely be absorbed by the SQL
-    // predicate afterwards.
-    expect(closeJobNoPhoto).not.toHaveBeenCalled();
-    expect(jobStatus['job-1']).toBe('completed');
-  });
-
-  it('a stray duplicate session_end after a no-photo close does not call the writer again', () => {
+  it('never closes a job that completed at the print composite', () => {
     vi.useFakeTimers();
     const { store, jobStatus, closeJobNoPhoto } = buildStore();
     const service = startSession(store);
 
-    service.onAgentEvent('session_end');
-    expect(closeJobNoPhoto).toHaveBeenCalledTimes(1);
-    closeJobNoPhoto.mockClear();
+    service.onAgentEvent('processing_start', 'job-1', { param5: COMPOSITE_PATH });
+    expect(jobStatus['job-1']).toBe('completed');
 
-    // dslrBooth fires session_end on every exit from the sharing screen —
-    // measured 3x in 52s for one session. By now the booth holds no job, so
-    // the stray must have no effect whatsoever.
     service.onAgentEvent('session_end');
+    vi.advanceTimersByTime(NO_PHOTO_CLOSE_DELAY_MS * 2);
 
     expect(closeJobNoPhoto).not.toHaveBeenCalled();
-    expect(jobStatus['job-1']).toBe('no_photo');
+    expect(jobStatus['job-1']).toBe('completed');
+
+    service.stop();
   });
 
-  it('a stray session_start cannot resurrect a job already closed as no_photo', () => {
+  it('passes the booth current job id into the candidate query, so the query can exclude it', () => {
+    vi.useFakeTimers();
+    const { store, getJobsAwaitingNoPhotoClose } = buildStore();
+    const service = startSession(store);
+
+    vi.advanceTimersByTime(250);
+
+    // The exclusion of the live guest is decided inside the query, from
+    // booth_state, not by a caller-side `if` a later edit could delete.
+    expect(getJobsAwaitingNoPhotoClose).toHaveBeenCalledWith(expect.any(Number), 'job-1');
+
+    service.stop();
+  });
+
+  it('a stray session_start cannot resurrect a job the sweep already closed', () => {
     vi.useFakeTimers();
     const { store, jobStatus } = buildStore();
     const service = startSession(store);
 
     service.onAgentEvent('session_end');
+    vi.advanceTimersByTime(NO_PHOTO_CLOSE_DELAY_MS + 1_000);
     expect(jobStatus['job-1']).toBe('no_photo');
 
     service.onAgentEvent('session_start', 'job-1');
 
-    // The terminal-state guard added in 07-01 must treat the sixth status as
-    // terminal too, or a stray session_start would write a closed job back to
-    // in_progress and it would hang there forever.
+    // Without the terminal-state guard this would write the row back to
+    // in_progress, where the next tick would make it a candidate all over
+    // again.
     expect(jobStatus['job-1']).toBe('no_photo');
+
+    service.stop();
   });
 });

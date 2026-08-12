@@ -31,6 +31,32 @@ export const PENDING_PRINT_EXPIRY_MS = 600_000;
 /** `SESSION_TIMEOUT_MS` + `NEXT_GUEST_COUNTDOWN_MS`, the derived floor above. */
 export const PENDING_PRINT_EXPIRY_FLOOR_MS = 307_000;
 
+/**
+ * D-03/D-09: how long an unbound `in_progress` job must sit before the tick
+ * sweep closes it as `no_photo`.
+ *
+ * THE FLOOR IS DERIVED, NOT CHOSEN. It is clamped at runtime to
+ * `pendingPrintExpiryMs + countdownMs` — computed from this instance's own
+ * values rather than from the module constants, so injecting a larger
+ * pending-print window cannot silently make this one unsafe. With the shipped
+ * defaults that floor is 600000 + 7000 = 607000 ms. It must exceed the
+ * pending-print expiry window because a job whose composite is still
+ * legitimately in flight has to stay closeable by the completion path; the
+ * `no pending_print row` predicate already excludes those rows structurally,
+ * and this clamp is the second, independent guarantee of the same thing.
+ *
+ * 900000 ms (15 min) sits at roughly 1.48x that floor. The asymmetry of the
+ * two failure directions is what sets it: closing LATE costs an operator a
+ * delayed diagnostic line, while closing EARLY writes a terminal, persisted,
+ * guest-visible outcome onto a session that was still alive. Being generous
+ * here is close to free; being tight is not.
+ *
+ * D-12: a module constant and a constructor seam, NOT a key in
+ * `src/config.ts`. No environment variable, no runtime toggle, and no test may
+ * reach it by mutating `process.env`.
+ */
+export const NO_PHOTO_CLOSE_DELAY_MS = 900_000;
+
 export class QueueService {
   private store: LocalStore;
   private running = false;
@@ -79,6 +105,7 @@ export class QueueService {
    */
   private jobIdMismatchWarnLogged = false;
   private pendingPrintExpiryMs: number;
+  private noPhotoCloseDelayMs: number;
   private sendCommandCb: ((payload: {
     type: 'command'; action: 'start_session'; jobId: string; mode?: string
   }) => void) | null = null;
@@ -99,7 +126,7 @@ export class QueueService {
     // constructor-injection pattern for every other timing value here — never
     // read from getConfig() inside a method body.
     config: Pick<EnvConfig, 'SESSION_TIMEOUT_MS' | 'NEXT_GUEST_COUNTDOWN_MS' | 'SESSION_MAX_RETRIES' | 'BOOTH_RELEASE_TIMEOUT_MS'>
-      & { PENDING_PRINT_EXPIRY_MS?: number } = getConfig(),
+      & { PENDING_PRINT_EXPIRY_MS?: number; NO_PHOTO_CLOSE_DELAY_MS?: number } = getConfig(),
   ) {
     this.store = store;
     this.sessionTimeoutMs = config.SESSION_TIMEOUT_MS;
@@ -118,6 +145,16 @@ export class QueueService {
     this.pendingPrintExpiryMs = Math.max(
       PENDING_PRINT_EXPIRY_FLOOR_MS,
       Number.isFinite(configuredExpiryMs) ? (configuredExpiryMs as number) : PENDING_PRINT_EXPIRY_MS,
+    );
+    // Clamped to THIS INSTANCE's pending-print window plus the countdown, not
+    // to the module constants: injecting a larger expiry must not be able to
+    // leave the no-photo sweep firing inside a window where a composite could
+    // still legitimately arrive. The interaction is enforced here rather than
+    // assumed to hold.
+    const configuredNoPhotoMs = config.NO_PHOTO_CLOSE_DELAY_MS;
+    this.noPhotoCloseDelayMs = Math.max(
+      this.pendingPrintExpiryMs + this.countdownMs,
+      Number.isFinite(configuredNoPhotoMs) ? (configuredNoPhotoMs as number) : NO_PHOTO_CLOSE_DELAY_MS,
     );
   }
 
@@ -266,7 +303,11 @@ export class QueueService {
    */
   sessionAcked(jobId: string): void {
     const job = this.store.getJob(jobId);
-    if (job && (job.status === 'completed' || job.status === 'failed')) {
+    // 'no_photo' is terminal too (D-09) and belongs in this guard for the same
+    // reason 'completed' and 'failed' do: a stray session_start naming a job
+    // the sweep already closed would write it back to in_progress, where it
+    // would become a fresh candidate for the same sweep on the next tick.
+    if (job && (job.status === 'completed' || job.status === 'failed' || job.status === 'no_photo')) {
       queueLogger.warn(`session_start ignored for ${jobId}: already ${job.status}`);
       return;
     }
@@ -440,6 +481,41 @@ export class QueueService {
     }
   }
 
+  /**
+   * D-03/D-09 (07-04, Option C): close jobs that were left in_progress by a
+   * session which produced no print composite.
+   *
+   * This exists as a sweep rather than as a session_end handler because
+   * session_end cannot be attributed to a job — see
+   * LocalStore.getJobsAwaitingNoPhotoClose() for the measurement that forced
+   * the change and for what each predicate guarantees. Attribution here comes
+   * entirely from the row's own structure, so no payload-based or
+   * ordering-based discriminator may be reintroduced into this path.
+   *
+   * Like sweepPendingPrints(), this must never call handleStall(),
+   * requeueWithRetry(), requeueNoRetry(), failJob() or setBoothTimeout(): the
+   * outcome is nobody's fault, so it charges no retry and writes no
+   * stall_reason (D-03, Phase 3 D-01/D-13).
+   */
+  private sweepNoPhotoJobs(): void {
+    const now = Date.now();
+    const candidates = this.store.getJobsAwaitingNoPhotoClose(
+      now - this.noPhotoCloseDelayMs,
+      this.store.getBoothCurrentJobId(),
+    );
+
+    for (const jobId of candidates) {
+      if (!this.store.closeJobNoPhoto(jobId, now)) continue;
+      // Worded apart from sweepPendingPrints()'s expiry warning above. That
+      // one means a composite WAS produced but its upload never arrived; this
+      // one means none was ever produced. An operator must be able to tell
+      // the two apart at a glance.
+      queueLogger.warn(
+        `Session for job ${jobId} ended with no print composite ever seen; closed as no_photo (no retry charged, guest not re-called)`,
+      );
+    }
+  }
+
   private tick(): void {
     // FIRST statement, deliberately above the `booth !== 'IDLE'` early return
     // below. A slot can only be open while a session is in progress, so a
@@ -447,6 +523,22 @@ export class QueueService {
     // that matters and the warning would never fire for a booth that never
     // sees session_end. The placement looks arbitrary and is not.
     this.sweepPendingPrints();
+
+    // SECOND, and also deliberately above the `booth !== 'IDLE'` guard, for a
+    // related but distinct reason. A no-photo candidate is by definition NOT
+    // the job the booth is serving, so the booth is usually BUSY with the
+    // NEXT guest while an abandoned row ages out behind it. Below the guard
+    // this sweep would only run while the booth sat idle — that is, never
+    // during a busy event, which is precisely when abandoned rows accumulate.
+    //
+    // It runs after sweepPendingPrints() rather than before so the registry
+    // is in its settled state when the candidate query reads it. That
+    // ordering is intentional but NOT load-bearing, and the honest reason is
+    // worth recording: expired rows are marked and never deleted, and the
+    // candidate query excludes a job carrying ANY pending_print row whatever
+    // its status, so neither order can change the answer. Do not rely on the
+    // ordering for correctness, and do not move sweepPendingPrints().
+    this.sweepNoPhotoJobs();
 
     const booth = this.store.getBoothState();
     if (booth !== 'IDLE') return;

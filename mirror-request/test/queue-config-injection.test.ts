@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueueService } from '../src/queue/queueService';
 import type { LocalStore } from '../src/state/localStore';
 import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
+import { NO_PHOTO_SWEEP_STUB } from './helpers/noPhotoSweep';
 
 // D-13: queueService.ts must read its timing and retry knobs from the
 // injected typed config object, never from process.env directly. Every case
@@ -62,6 +63,7 @@ function buildStore(opts: BuildStoreOptions = {}) {
     // used rather than an inline stub so the three-status semantics cannot
     // drift away from the SQL they stand in for (07-03).
     ...createPendingPrintRegistry().registry,
+    ...NO_PHOTO_SWEEP_STUB,
   } as unknown as LocalStore;
 
   return { store, requeueWithRetry, failJob, jobId: job.id };

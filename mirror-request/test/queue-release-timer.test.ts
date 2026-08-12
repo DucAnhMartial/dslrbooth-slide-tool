@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueueService } from '../src/queue/queueService';
 import type { LocalStore } from '../src/state/localStore';
 import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
+import { NO_PHOTO_SWEEP_STUB } from './helpers/noPhotoSweep';
 
 // D-02: a booth left BUSY after completion (guest walked away without
 // exiting the sharing screen) must return to service on its own, without
@@ -55,6 +56,7 @@ function buildStore() {
     requeueWithRetry,
     requeueNoRetry,
     failJob,
+    ...NO_PHOTO_SWEEP_STUB,
   } as unknown as LocalStore;
   return { store, jobStatus, requeueWithRetry, requeueNoRetry, failJob };
 }

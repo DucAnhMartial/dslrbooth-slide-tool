@@ -6,6 +6,7 @@ import Database from 'better-sqlite3';
 import { LocalStore } from '../src/state/localStore';
 import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
 import { QueueService } from '../src/queue/queueService';
+import { NO_PHOTO_SWEEP_STUB } from './helpers/noPhotoSweep';
 
 // `booth_state` is a single global row (`CHECK (id = 1)`), shared across every
 // test file that uses the shared store singleton under parallel Vitest
@@ -155,6 +156,10 @@ describe('QueueService.recover() — D-03 age-based BUSY survival, D-04 ANNOUNCI
       // used rather than an inline stub so the three-status semantics cannot
       // drift away from the SQL they stand in for (07-03).
       ...createPendingPrintRegistry().registry,
+      // tick()'s no-photo sweep reads the booth binding to exclude the job
+    // currently being served; these recovery fixtures bind none.
+    getBoothCurrentJobId: () => undefined,
+    ...NO_PHOTO_SWEEP_STUB,
     } as unknown as LocalStore;
 
     const queue = new QueueService(store, { SESSION_TIMEOUT_MS: 300_000, NEXT_GUEST_COUNTDOWN_MS: 7_000, SESSION_MAX_RETRIES: 2 });
@@ -197,6 +202,10 @@ describe('QueueService.recover() — D-03 age-based BUSY survival, D-04 ANNOUNCI
       // used rather than an inline stub so the three-status semantics cannot
       // drift away from the SQL they stand in for (07-03).
       ...createPendingPrintRegistry().registry,
+      // tick()'s no-photo sweep reads the booth binding to exclude the job
+    // currently being served; these recovery fixtures bind none.
+    getBoothCurrentJobId: () => undefined,
+    ...NO_PHOTO_SWEEP_STUB,
     } as unknown as LocalStore;
 
     const queue = new QueueService(store, { SESSION_TIMEOUT_MS: 300_000, NEXT_GUEST_COUNTDOWN_MS: 7_000, SESSION_MAX_RETRIES: 2 });
@@ -226,6 +235,10 @@ describe('QueueService.recover() — D-03 age-based BUSY survival, D-04 ANNOUNCI
       // used rather than an inline stub so the three-status semantics cannot
       // drift away from the SQL they stand in for (07-03).
       ...createPendingPrintRegistry().registry,
+      // tick()'s no-photo sweep reads the booth binding to exclude the job
+    // currently being served; these recovery fixtures bind none.
+    getBoothCurrentJobId: () => undefined,
+    ...NO_PHOTO_SWEEP_STUB,
     } as unknown as LocalStore;
 
     const queue = new QueueService(store, { SESSION_TIMEOUT_MS: 300_000, NEXT_GUEST_COUNTDOWN_MS: 7_000, SESSION_MAX_RETRIES: 2 });
@@ -256,6 +269,10 @@ describe('QueueService.recover() — D-03 age-based BUSY survival, D-04 ANNOUNCI
       // used rather than an inline stub so the three-status semantics cannot
       // drift away from the SQL they stand in for (07-03).
       ...createPendingPrintRegistry().registry,
+      // tick()'s no-photo sweep reads the booth binding to exclude the job
+    // currently being served; these recovery fixtures bind none.
+    getBoothCurrentJobId: () => undefined,
+    ...NO_PHOTO_SWEEP_STUB,
     } as unknown as LocalStore;
 
     const queue = new QueueService(store, { SESSION_TIMEOUT_MS: 300_000, NEXT_GUEST_COUNTDOWN_MS: 7_000, SESSION_MAX_RETRIES: 2 });
@@ -287,6 +304,10 @@ describe('QueueService.recover() — D-03 age-based BUSY survival, D-04 ANNOUNCI
       // used rather than an inline stub so the three-status semantics cannot
       // drift away from the SQL they stand in for (07-03).
       ...createPendingPrintRegistry().registry,
+      // tick()'s no-photo sweep reads the booth binding to exclude the job
+    // currently being served; these recovery fixtures bind none.
+    getBoothCurrentJobId: () => undefined,
+    ...NO_PHOTO_SWEEP_STUB,
     } as unknown as LocalStore;
 
     const queue = new QueueService(store, { SESSION_TIMEOUT_MS: 300_000, NEXT_GUEST_COUNTDOWN_MS: 7_000, SESSION_MAX_RETRIES: 2 });
@@ -338,6 +359,10 @@ describe('QueueService config injection (D-13)', () => {
         // used rather than an inline stub so the three-status semantics cannot
         // drift away from the SQL they stand in for (07-03).
         ...createPendingPrintRegistry().registry,
+        // tick()'s no-photo sweep reads the booth binding to exclude the job
+    // currently being served; these recovery fixtures bind none.
+    getBoothCurrentJobId: () => undefined,
+    ...NO_PHOTO_SWEEP_STUB,
       } as unknown as LocalStore;
 
       const queue = new QueueService(store, {

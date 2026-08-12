@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueueService, queueLogger } from '../src/queue/queueService';
 import type { LocalStore } from '../src/state/localStore';
 import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
+import { NO_PHOTO_SWEEP_STUB } from './helpers/noPhotoSweep';
 
 /**
  * SC-4 / WINDOWS item 9, in both directions.
@@ -88,6 +89,7 @@ function buildStore() {
     requeueNoRetry: vi.fn(),
     failJob: vi.fn(),
     ...registry,
+    ...NO_PHOTO_SWEEP_STUB,
   } as unknown as LocalStore;
   return { store, rows, jobStatus, getBooth: () => booth };
 }

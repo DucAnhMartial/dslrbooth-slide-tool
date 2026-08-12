@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueueService, queueLogger } from '../src/queue/queueService';
 import type { LocalStore } from '../src/state/localStore';
 import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
+import { NO_PHOTO_SWEEP_STUB } from './helpers/noPhotoSweep';
 
 // AGT-04/D-14: all ten named event types (plus anything the booth invents
 // later) must reach onAgentEvent() without throwing. Five keep their real
@@ -73,6 +74,7 @@ function buildStore() {
     // cannot drift away from the SQL they stand in for (07-03).
     ...createPendingPrintRegistry().registry,
     getJobRegistration: () => undefined,
+    ...NO_PHOTO_SWEEP_STUB,
   } as unknown as LocalStore;
   return { store, updateJobStatus, completeJob, getBooth: () => booth };
 }

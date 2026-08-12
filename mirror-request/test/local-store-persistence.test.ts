@@ -578,6 +578,107 @@ describe('LocalStore persistence — webhook replay + poll cursor', () => {
     });
   });
 
+  // The candidate query behind the no-photo sweep (07-04, Option C — a
+  // deviation from the plan's session_end version, see the method's comment).
+  // Proven against a real database because all four predicates live in the SQL
+  // and one of them is a NOT IN subquery against another table.
+  describe('D-03/D-09 getJobsAwaitingNoPhotoClose() — attribution from the row, not from an unattributable event', () => {
+    const COMPOSITE = 'C:\\dslrBooth\\Test_event\\Prints\\20260812_143526_970.jpg';
+    const CUTOFF = 900_000;
+
+    /** An in_progress job acknowledged `ageMs` ago. */
+    function seedInProgress(id: string, now: number, ageMs: number) {
+      store!.enqueueJob({ id, queued_at: now - ageMs - 1_000 });
+      store!.updateJobStatus(id, 'in_progress', 'acknowledged_at', now - ageMs);
+    }
+
+    it('returns an unbound in_progress job whose session is older than the cutoff', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      seedInProgress('job-S1', now, CUTOFF + 60_000);
+
+      expect(store.getJobsAwaitingNoPhotoClose(now - CUTOFF, undefined)).toEqual(['job-S1']);
+    });
+
+    it('excludes the job the booth is currently serving — this is what protects a live guest', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      seedInProgress('job-S2', now, CUTOFF + 60_000);
+
+      // Same row, same age, only the booth binding differs.
+      expect(store.getJobsAwaitingNoPhotoClose(now - CUTOFF, 'job-S2')).toEqual([]);
+    });
+
+    it('excludes a job whose session has not yet aged past the cutoff', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      seedInProgress('job-S3', now, CUTOFF - 60_000);
+
+      expect(store.getJobsAwaitingNoPhotoClose(now - CUTOFF, undefined)).toEqual([]);
+    });
+
+    it('excludes a job carrying an open pending_print row — its composite may still be in flight', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      seedInProgress('job-S4', now, CUTOFF + 60_000);
+      store.openPendingPrint({
+        jobId: 'job-S4', compositePath: COMPOSITE, openedAt: now, expiresAt: now + 600_000,
+      });
+
+      expect(store.getJobsAwaitingNoPhotoClose(now - CUTOFF, undefined)).toEqual([]);
+    });
+
+    it('excludes a job whose pending_print row already EXPIRED — a composite was produced, so it is not a no-photo session', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      seedInProgress('job-S5', now, CUTOFF + 60_000);
+      store.openPendingPrint({
+        jobId: 'job-S5', compositePath: COMPOSITE, openedAt: now - 700_000, expiresAt: now - 100_000,
+      });
+      store.expirePendingPrints(now); // marks it 'expired'; the row is NOT deleted
+      expect(store.getPendingPrint('job-S5')?.status).toBe('expired');
+
+      // "A composite was produced but its upload never arrived" is a different
+      // outcome from "no composite was ever produced", and it already has its
+      // own warning. Marked-not-deleted is what keeps the two distinguishable.
+      expect(store.getJobsAwaitingNoPhotoClose(now - CUTOFF, undefined)).toEqual([]);
+    });
+
+    it('excludes every terminal status, so a swept close cannot be repeated', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      seedInProgress('job-S6', now, CUTOFF + 60_000);
+      seedInProgress('job-S7', now, CUTOFF + 60_000);
+      seedInProgress('job-S8', now, CUTOFF + 60_000);
+      store.completeJob('job-S6', now);
+      store.failJob('job-S7', 'session_ack_timeout');
+      store.closeJobNoPhoto('job-S8', now);
+
+      expect(store.getJobsAwaitingNoPhotoClose(now - CUTOFF, undefined)).toEqual([]);
+    });
+
+    it('excludes a queued or dispatched job — only an acknowledged session can have produced nothing', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.enqueueJob({ id: 'job-S9', queued_at: now - 3_600_000 });
+      store.enqueueJob({ id: 'job-S10', queued_at: now - 3_600_000 });
+      store.updateJobStatus('job-S10', 'dispatched', 'dispatched_at', now - 3_600_000);
+
+      expect(store.getJobsAwaitingNoPhotoClose(now - CUTOFF, undefined)).toEqual([]);
+    });
+
+    it('returns several candidates oldest-first and leaves the bound one out', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      seedInProgress('job-old', now, CUTOFF + 300_000);
+      seedInProgress('job-newer', now, CUTOFF + 60_000);
+      seedInProgress('job-live', now, CUTOFF + 120_000);
+
+      expect(store.getJobsAwaitingNoPhotoClose(now - CUTOFF, 'job-live'))
+        .toEqual(['job-old', 'job-newer']);
+    });
+  });
+
   // D-07/D-08's pending-print registry (07-03-PLAN.md Task 1), proven against
   // a real temp-file database rather than a mock, because the two things this
   // block exists to pin — that the table's migration is idempotent, and that a
