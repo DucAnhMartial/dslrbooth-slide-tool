@@ -6,6 +6,8 @@ import {
   renderCmsEventListPage,
   renderCmsEventCreatePage,
   renderCmsEventFormPage,
+  renderCmsActivateConfirmPage,
+  renderCmsDeleteConfirmPage,
   FONT_CHOICES,
   LAYOUT_STYLES,
   FIELD_CAPS,
@@ -24,19 +26,30 @@ const log = labelLogger('cms');
  * `StatusAgent`. `LocalStore` satisfies this structurally, so `index.ts`
  * passes it unchanged, while a test can drive these routes against a fake.
  *
- * Note what is absent: no queue method, no booth-state method, no
+ * Note what is absent: no queue MUTATION, no booth-state method, no
  * registration method. D-01 puts the FIFO queue and the Agent routing built
  * in Phases 1-7 outside this phase's blast radius, and this interface is
  * where that boundary is enforced rather than merely intended — a CMS route
- * cannot reach the queue because it was never handed a way to.
+ * cannot enqueue, requeue, complete or fail a job because it was never handed
+ * a way to.
+ *
+ * `getQueueLength()` is the one queue-shaped member, and it is a READ. D-02
+ * requires the CMS to tell the operator how many guests are still waiting
+ * before it switches the live event, which cannot be done without asking. The
+ * boundary this interface enforces is "the CMS never writes to the queue", and
+ * a count satisfies it: there is no method here that could change a queue row
+ * even by accident.
  */
 export interface CmsEventStore {
   createEvent(input: { name: string }): EventSummary;
   updateEvent(id: string, patch: EventUpdatePatch): boolean;
+  deleteEvent(id: string): { deleted: boolean; photosDeleted: number; wasActive: boolean };
   listEvents(): EventSummary[];
   getEventConfig(id: string): EventConfig | undefined;
   getActiveEventId(): string | undefined;
   setActiveEvent(eventId: string | null): void;
+  countEventPhotos(eventId: string): number;
+  getQueueLength(): number;
 }
 
 /**
@@ -273,6 +286,41 @@ export function createCmsEventRoutes(
     res.status(200).json({ id, saved: true });
   });
 
+  /**
+   * D-02's confirmation view. Reads the LIVE queue length so the operator is
+   * told how many guests are still waiting before the screens change under
+   * them — the compensating control that replaces a block (T-08-18).
+   */
+  router.get('/events/:id/activate', (req: Request, res: Response) => {
+    const event = store.listEvents().find((candidate) => candidate.id === req.params.id);
+    if (!event) {
+      res.status(404).json({ error: 'Event not found' });
+      return;
+    }
+    res.type('html').send(
+      renderCmsActivateConfirmPage({
+        event,
+        queueLength: store.getQueueLength(),
+        alreadyActive: store.getActiveEventId() === event.id,
+      }),
+    );
+  });
+
+  router.get('/events/:id/delete', (req: Request, res: Response) => {
+    const event = store.listEvents().find((candidate) => candidate.id === req.params.id);
+    if (!event) {
+      res.status(404).json({ error: 'Event not found' });
+      return;
+    }
+    res.type('html').send(
+      renderCmsDeleteConfirmPage({
+        event,
+        photoCount: store.countEventPhotos(event.id),
+        isActive: store.getActiveEventId() === event.id,
+      }),
+    );
+  });
+
   router.post('/api/events/:id/activate', (req: Request, res: Response) => {
     const id = req.params.id;
     if (!store.getEventConfig(id)) {
@@ -280,12 +328,67 @@ export function createCmsEventRoutes(
       return;
     }
 
-    // D-01: replaces the pointer; never appends, never touches the queue.
-    // D-02's "N guests still waiting" confirmation is a CMS-side prompt
-    // (plan 08-03) — the server deliberately does not refuse the switch.
+    /**
+     * D-02, enforced HERE and not in a dialog.
+     *
+     * With guests still queued the switch needs an explicit confirmation, and
+     * the confirmation has to be carried in the request — a browser dialog is
+     * a suggestion, and the mid-event operator this protects is exactly the
+     * person most likely to be driving a second tab, a bookmarked URL, or a
+     * page restored from history.
+     *
+     * What it is NOT is a block. The refusal below is conditional on the
+     * caller not having confirmed, never on the queue being non-empty:
+     * `confirmed: true` always proceeds. Blocking until the queue drained was
+     * rejected on measured evidence — a ticket once sat queued with nobody to
+     * shoot it, and a CMS that refuses to switch until that clears is a CMS
+     * that is unusable exactly when the room is busiest.
+     */
+    const waitingGuests = store.getQueueLength();
+    const confirmed = ((req.body ?? {}) as { confirmed?: unknown }).confirmed === true;
+    if (waitingGuests > 0 && !confirmed) {
+      log.info(`Active-event switch to ${id} needs confirmation — ${waitingGuests} guests still waiting`);
+      res.status(409).json({ error: 'Confirmation required', waitingGuests });
+      return;
+    }
+
+    // D-01: replaces the pointer; never appends. Nothing below this line reads
+    // or writes queue_job or booth_state — the waiting guests are still served.
     store.setActiveEvent(id);
-    log.info(`Activated event ${id}`);
+    // One masked line per switch is the audit trail T-08-18 accepts in place
+    // of a block.
+    log.info(`Activated event ${id} with ${waitingGuests} guests still waiting`);
     res.status(200).json({ activeEventId: id });
+  });
+
+  /**
+   * D-11's one deletion path, behind the UI-SPEC's typed confirmation.
+   *
+   * The operator retypes the event's name, exactly, and the SERVER compares
+   * it. Typing the name rather than clicking "yes" is what makes deleting the
+   * wrong event require a mistake about the name rather than a mis-click, and
+   * checking it here rather than in the page is what makes it a control.
+   */
+  router.post('/api/events/:id/delete', (req: Request, res: Response) => {
+    const id = req.params.id;
+    const event = store.listEvents().find((candidate) => candidate.id === id);
+    if (!event) {
+      res.status(404).json({ error: 'Event not found' });
+      return;
+    }
+
+    const typed = ((req.body ?? {}) as { confirmName?: unknown }).confirmName;
+    if (typeof typed !== 'string' || typed.trim() !== event.name) {
+      res.status(400).json({ error: 'Confirmation does not match' });
+      return;
+    }
+
+    const result = store.deleteEvent(id);
+    log.info(
+      `Deleted event ${id} and ${result.photosDeleted} photo history rows` +
+        (result.wasActive ? ' — it was the active event, screens return to the shipped defaults' : ''),
+    );
+    res.status(200).json({ deleted: result.deleted, photosDeleted: result.photosDeleted });
   });
 
   return router;

@@ -1190,6 +1190,37 @@ export class LocalStore {
     return this.db.prepare('DELETE FROM event_photo WHERE event_id = ?').run(eventId).changes;
   }
 
+  /**
+   * Deletes one event, its photo history, and — when it was the live one —
+   * the active pointer, as a single transaction (plan 08-03, D-11).
+   *
+   * This is the ONLY caller of deleteEventPhotos() that is not the operator
+   * asking to clear a history directly, and it exists because the UI-SPEC's
+   * destructive confirmation promises exactly this: "Toàn bộ cấu hình và lịch
+   * sử ảnh sẽ mất." Deleting the row while leaving orphaned photo rows behind
+   * would make that sentence false, and D-11's "deleted only by hand" is about
+   * timers and row caps, not about an explicit typed confirmation.
+   *
+   * The pointer is cleared rather than left dangling. getActiveEventConfig()
+   * survives a dangling pointer by design (it warns and serves the shipped
+   * defaults), but leaving one would mean every subsequent read logs a warning
+   * about a decision the operator made deliberately.
+   *
+   * queue_job and booth_state are not named anywhere in here. Deleting an
+   * event is not a reason to touch a guest who is still waiting to be
+   * photographed.
+   */
+  deleteEvent(id: string): { deleted: boolean; photosDeleted: number; wasActive: boolean } {
+    const run = this.db.transaction((eventId: string) => {
+      const wasActive = this.getActiveEventId() === eventId;
+      const photosDeleted = this.deleteEventPhotos(eventId);
+      const deleted = this.db.prepare('DELETE FROM event WHERE id = ?').run(eventId).changes === 1;
+      if (deleted && wasActive) this.setActiveEvent(null);
+      return { deleted, photosDeleted, wasActive };
+    });
+    return run(id);
+  }
+
   // ---------------------------------------------------------------------
   // Phase 8 — Agent configuration with one step of history (D-18)
   // ---------------------------------------------------------------------
