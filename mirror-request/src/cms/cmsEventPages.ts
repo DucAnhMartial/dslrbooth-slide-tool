@@ -248,6 +248,7 @@ export function renderCmsEventListPage(data: {
         <span class="name" title="${name}">${name}</span>
         <span class="badge">${isActive ? 'Đang phát' : ''}</span>
         <a class="btn secondary" href="/cms/events/${id}">Sửa cấu hình</a>
+        <a class="btn secondary" href="/cms/photos?event=${id}">Lịch sử ảnh</a>
         ${
           isActive
             ? '<span class="muted">Đang hoạt động</span>'
@@ -290,7 +291,7 @@ export function renderCmsEventListPage(data: {
 
   const styles = `
     ul{list-style:none;padding:0;margin:0;max-height:60vh;overflow-y:auto}
-    .row{display:grid;grid-template-columns:1fr auto auto auto;gap:var(--sp-md);align-items:center;
+    .row{display:grid;grid-template-columns:1fr auto auto auto auto;gap:var(--sp-md);align-items:center;
       min-height:44px;padding:var(--sp-md) 0;border-top:1px solid var(--border)}
     .row:first-child{border-top:0}
     .name{font-size:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

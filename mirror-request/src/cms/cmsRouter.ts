@@ -14,6 +14,7 @@ import {
 import { renderCmsLoginPage } from './cmsPages';
 import { createCmsEventRoutes, type CmsEventStore } from './cmsEventRoutes';
 import { createCmsAgentRoutes, type CmsAgentStore, type CmsAgentLink } from './cmsAgentRoutes';
+import { createCmsPhotoRoutes, type CmsPhotoStore } from './cmsPhotoRoutes';
 
 const log = labelLogger('cms');
 
@@ -35,6 +36,8 @@ const LOGIN_ERROR = 'Sai tên đăng nhập hoặc mật khẩu. Vui lòng thử
  *   2. requireSession()                  — everything below needs one
  *   3. createCmsEventRoutes(store)       — the dashboard and mutations
  *   4. createCmsAgentRoutes(store,agent) — UI-02's Agent configuration
+ *   5. createCmsPhotoRoutes(store)       — CMS-03's photo history, and the
+ *                                          system's only deletion path for it
  * Moving requireSession() above the login routes would lock the operator out
  * of the only page that can create a session.
  *
@@ -48,7 +51,7 @@ const LOGIN_ERROR = 'Sai tên đăng nhập hoặc mật khẩu. Vui lòng thử
  * `cmsIpGate.ts` for why that separation is the point.
  */
 export function createCmsRouter(
-  store: CmsEventStore & CmsAgentStore,
+  store: CmsEventStore & CmsAgentStore & CmsPhotoStore,
   cfg: CmsConfig,
   agent: CmsAgentLink,
 ): ReturnType<typeof Router> {
@@ -108,6 +111,7 @@ export function createCmsRouter(
   router.use(createRequireSession(sessions, cookieName));
   router.use(createCmsEventRoutes(store));
   router.use(createCmsAgentRoutes(store, agent));
+  router.use(createCmsPhotoRoutes(store));
 
   return router;
 }
