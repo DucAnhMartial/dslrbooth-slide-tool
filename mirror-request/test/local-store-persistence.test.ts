@@ -451,6 +451,133 @@ describe('LocalStore persistence — webhook replay + poll cursor', () => {
     });
   });
 
+  // D-09's sixth status at the SQL layer (07-04-PLAN.md Task 2). Proven against
+  // a real temp-file database rather than a mock because all three guarantees
+  // this block exists to pin are properties of the SQL itself: the terminal
+  // predicate lives in a WHERE clause, the no-retry promise lives in what the
+  // SET list OMITS, and the wait-estimate exclusion lives in a different
+  // query's WHERE clause entirely.
+  //
+  // No migration accompanies this status. queue_job.status is `TEXT NOT NULL
+  // DEFAULT 'queued'` with no CHECK constraint and no enum, so a new value
+  // needs no schema change, and no existing row is a candidate for it — there
+  // is nothing to backfill.
+  describe('D-09 closeJobNoPhoto() — a session that produced nothing, recorded as exactly that', () => {
+    it('closes an in_progress job as no_photo and stamps both session_ended_at and completed_at', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.enqueueJob({ id: 'job-N1', queued_at: now - 2000 });
+      store.updateJobStatus('job-N1', 'in_progress', 'acknowledged_at', now - 1000);
+
+      const closed = store.closeJobNoPhoto('job-N1', now);
+
+      expect(closed).toBe(true);
+      const job = store.getJob('job-N1');
+      expect(job?.status).toBe('no_photo');
+      expect(job?.session_ended_at).toBe(now);
+      // completed_at IS set deliberately: the session's duration must stay
+      // available to plan 07-05's summary line even though the session
+      // produced no photo.
+      expect(job?.completed_at).toBe(now);
+    });
+
+    it('charges no retry and writes no stall_reason — the two omissions that ARE the guarantee (D-03)', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.enqueueJob({ id: 'job-N2', queued_at: now - 2000 });
+      store.updateJobStatus('job-N2', 'in_progress', 'acknowledged_at', now - 1000);
+
+      store.closeJobNoPhoto('job-N2', now);
+
+      const job = store.getJob('job-N2');
+      // Phase 3 D-01/D-13: a system-side fault never spends the guest's retry
+      // budget. A guest whose session produced nothing is not called back to a
+      // camera they have already walked away from.
+      expect(job?.retries).toBe(0);
+      // This is not a stall, and OPS-RUNBOOK §6's stall_reason vocabulary is a
+      // closed server-authored list this outcome must not join.
+      expect(job?.stall_reason ?? null).toBeNull();
+    });
+
+    it('cannot close a job that is already completed — the terminal predicate holds', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.enqueueJob({ id: 'job-N3', queued_at: now - 2000 });
+      store.updateJobStatus('job-N3', 'in_progress', 'acknowledged_at', now - 1000);
+      store.completeJob('job-N3', now);
+
+      const closed = store.closeJobNoPhoto('job-N3', now + 5000);
+
+      // T-07-16: the writer must not be able to overwrite a completed job's
+      // outcome. A guest who got their photo is never retold they got nothing.
+      expect(closed).toBe(false);
+      expect(store.getJob('job-N3')?.status).toBe('completed');
+      expect(store.getJob('job-N3')?.completed_at).toBe(now);
+    });
+
+    it('cannot close a job that already failed — the same predicate in the other terminal direction', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.enqueueJob({ id: 'job-N4', queued_at: now - 2000 });
+      store.updateJobStatus('job-N4', 'in_progress', 'acknowledged_at', now - 1000);
+      store.failJob('job-N4', 'session_ack_timeout');
+
+      const closed = store.closeJobNoPhoto('job-N4', now);
+
+      expect(closed).toBe(false);
+      expect(store.getJob('job-N4')?.status).toBe('failed');
+      expect(store.getJob('job-N4')?.stall_reason).toBe('session_ack_timeout');
+    });
+
+    it('a second closeJobNoPhoto on an already-closed row matches zero rows and changes nothing', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.enqueueJob({ id: 'job-N5', queued_at: now - 2000 });
+      store.updateJobStatus('job-N5', 'in_progress', 'acknowledged_at', now - 1000);
+
+      expect(store.closeJobNoPhoto('job-N5', now)).toBe(true);
+      expect(store.closeJobNoPhoto('job-N5', now + 9000)).toBe(false);
+      expect(store.getJob('job-N5')?.completed_at).toBe(now);
+    });
+
+    it('the no_photo status survives a close/reopen cycle of the real database file', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.enqueueJob({ id: 'job-N6', queued_at: now - 2000 });
+      store.updateJobStatus('job-N6', 'in_progress', 'acknowledged_at', now - 1000);
+      store.closeJobNoPhoto('job-N6', now);
+      store.close();
+
+      store = new LocalStore(dbPath);
+      // The outcome is a persisted fact rather than an inference (T-07-17), so
+      // it stays diagnosable after a restart and after a log rotation.
+      expect(store.getJob('job-N6')?.status).toBe('no_photo');
+    });
+
+    // D-09's SECOND stated reason for choosing a status over a reason column,
+    // measured rather than argued. Both rows below carry a valid
+    // acknowledged_at/completed_at pair, so the ONLY thing that can exclude the
+    // no-photo row from the sample is the query's own `WHERE status =
+    // 'completed'` — not an application-level filter a later edit could delete.
+    it('excludes a no_photo row from the wait-estimate sample even with a valid duration pair', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+
+      store.enqueueJob({ id: 'job-W1', queued_at: now - 60_000 });
+      store.updateJobStatus('job-W1', 'in_progress', 'acknowledged_at', now - 50_000);
+      store.completeJob('job-W1', now - 20_000); // duration 30_000
+
+      store.enqueueJob({ id: 'job-W2', queued_at: now - 60_000 });
+      store.updateJobStatus('job-W2', 'in_progress', 'acknowledged_at', now - 50_000);
+      store.closeJobNoPhoto('job-W2', now - 20_000); // an IDENTICAL duration pair
+
+      const samples = store.getRecentSessionDurationsMs(10);
+
+      expect(samples).toHaveLength(1);
+      expect(samples[0]).toBe(30_000);
+    });
+  });
+
   // D-07/D-08's pending-print registry (07-03-PLAN.md Task 1), proven against
   // a real temp-file database rather than a mock, because the two things this
   // block exists to pin — that the table's migration is idempotent, and that a
