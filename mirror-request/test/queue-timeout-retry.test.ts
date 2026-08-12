@@ -31,7 +31,9 @@ function buildStore(queued: Array<{ id: string }>) {
     getQueuedGuestSummaries: () =>
       queued.map((job, index) => ({ jobId: job.id, name: `Guest ${job.id}`, position: index + 1 })),
     getQueueLength: () => queued.length,
-    completeInProgressJob: () => undefined,
+    completeJob: () => false,
+    getBoothCurrentJobId: () => undefined,
+    setBoothCurrentJob: () => {},
     getJobRegistration: () => undefined,
     requeueWithRetry,
     failJob,

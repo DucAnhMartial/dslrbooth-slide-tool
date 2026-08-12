@@ -336,4 +336,118 @@ describe('LocalStore persistence — webhook replay + poll cursor', () => {
       expect(seedRegistrationsCursor.toString()).not.toMatch(/toISOString/);
     });
   });
+
+  // SC-2's other half (07-01-PLAN.md <sc2_reconciliation>). The mocked-store
+  // proof in test/queue-dual-completion.test.ts shows the RIGHT job id
+  // reaches the store under a genuinely queued second guest; this block
+  // proves that id is the ONLY row the SQL can touch, against a real
+  // temp-file database with two real rows. Each case names the guarantee it
+  // pins, matching the register of the 'persisted-queue SQL contract' block
+  // above.
+  describe('D-06 booth_state.current_job_id and jobId-scoped completeJob() — SC-2 proven at the SQL layer', () => {
+    it('the booth_state.current_job_id migration is idempotent: two constructions add the column once and touch no row (D-06)', () => {
+      store = new LocalStore(dbPath);
+      const jobId = `job-migration-idempotency-${Date.now()}`;
+      store.enqueueJob({ id: jobId, queued_at: Date.now() });
+      store.close();
+
+      // Throwaway raw introspection handle after the first construction —
+      // same pattern this file already uses for notification_record.
+      let introspect = new Database(dbPath);
+      let columns = introspect.prepare('PRAGMA table_info(booth_state)').all() as Array<{ name: string }>;
+      introspect.close();
+      expect(columns.map((c) => c.name)).toContain('current_job_id');
+
+      expect(() => {
+        store = new LocalStore(dbPath);
+      }).not.toThrow();
+
+      introspect = new Database(dbPath);
+      columns = introspect.prepare('PRAGMA table_info(booth_state)').all() as Array<{ name: string }>;
+      introspect.close();
+      expect(columns.map((c) => c.name)).toContain('current_job_id');
+
+      // The migration adds a column and touches no row — the pre-existing
+      // job seeded before the second construction is still readable,
+      // unchanged in status.
+      const job = store!.getJob(jobId);
+      expect(job).toBeDefined();
+      expect(job?.status).toBe('queued');
+    });
+
+    it('the booth binding round-trips through the real column and survives a reopen', () => {
+      store = new LocalStore(dbPath);
+      store.setBoothBusy('job-A');
+      expect(store.getBoothCurrentJobId()).toBe('job-A');
+
+      store.setBoothIdle();
+      expect(store.getBoothCurrentJobId()).toBeUndefined();
+
+      store.setBoothCurrentJob('job-B');
+      expect(store.getBoothCurrentJobId()).toBe('job-B');
+      store.close();
+
+      store = new LocalStore(dbPath);
+      expect(store.getBoothCurrentJobId()).toBe('job-B');
+    });
+
+    // THE SC-2 SQL-LAYER CASE, the load-bearing one. Guest A's
+    // acknowledged_at is deliberately EARLIER than guest B's — exactly the
+    // ordering the removed positional selection (`ORDER BY acknowledged_at
+    // DESC LIMIT 1`) would have used to pick the WRONG row (guest B, the
+    // most recently acknowledged) instead of the one actually named by
+    // jobId (guest A).
+    it('completeJob(jobId) reaches only the named row, proven against a real database with two in_progress rows (SC-2)', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.enqueueJob({ id: 'job-A', queued_at: now - 2000 });
+      store.enqueueJob({ id: 'job-B', queued_at: now - 1000 });
+      // job-A acknowledged FIRST (earlier timestamp) — this is the ordering
+      // the removed positional selection would have inverted.
+      store.updateJobStatus('job-A', 'in_progress', 'acknowledged_at', now - 500);
+      store.updateJobStatus('job-B', 'in_progress', 'acknowledged_at', now);
+
+      const completed = store.completeJob('job-A', now + 1000);
+
+      expect(completed).toBe(true);
+      expect(store.getJob('job-A')?.status).toBe('completed');
+      expect(store.getJob('job-B')?.status).toBe('in_progress');
+    });
+
+    it('a duplicate completeJob call on an already-completed row matches zero rows and leaves the other guest untouched', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.enqueueJob({ id: 'job-A', queued_at: now - 2000 });
+      store.enqueueJob({ id: 'job-B', queued_at: now - 1000 });
+      store.updateJobStatus('job-A', 'in_progress', 'acknowledged_at', now - 500);
+      store.updateJobStatus('job-B', 'in_progress', 'acknowledged_at', now);
+
+      const first = store.completeJob('job-A', now + 1000);
+      expect(first).toBe(true);
+      const completedAtAfterFirst = store.getJob('job-A')?.completed_at;
+
+      // The second delivery of the processing_start/printing double-fire —
+      // this is the `AND status = 'in_progress'` predicate reporting a
+      // zero-row match, absorbing the duplicate without an
+      // application-level flag.
+      const second = store.completeJob('job-A', now + 5000);
+
+      expect(second).toBe(false);
+      expect(store.getJob('job-A')?.completed_at).toBe(completedAtAfterFirst);
+      expect(store.getJob('job-B')?.status).toBe('in_progress');
+    });
+
+    it('a terminal (failed) row is not reachable by completeJob — the same predicate holds in the other terminal direction', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.enqueueJob({ id: 'job-C', queued_at: now - 1000 });
+      store.updateJobStatus('job-C', 'in_progress', 'acknowledged_at', now);
+      store.failJob('job-C', 'session_ack_timeout');
+
+      const result = store.completeJob('job-C', now + 1000);
+
+      expect(result).toBe(false);
+      expect(store.getJob('job-C')?.status).toBe('failed');
+    });
+  });
 });

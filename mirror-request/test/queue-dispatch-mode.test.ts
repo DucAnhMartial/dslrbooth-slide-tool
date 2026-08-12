@@ -28,7 +28,9 @@ function buildStore(queued: Array<{ id: string }>, getJobRegistration: (jobId: s
     getQueuedGuestSummaries: () =>
       queued.map((job, index) => ({ jobId: job.id, name: `Guest ${job.id}`, position: index + 1 })),
     getQueueLength: () => queued.length,
-    completeInProgressJob: () => undefined,
+    completeJob: () => false,
+    getBoothCurrentJobId: () => undefined,
+    setBoothCurrentJob: () => {},
     getQueuePosition: () => 1,
     getJobRegistration,
     requeueWithRetry: vi.fn().mockReturnValue({ retries: 1 }),

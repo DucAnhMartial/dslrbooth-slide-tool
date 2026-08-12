@@ -72,9 +72,9 @@ describe('GET /status/:jobId — a queued guest sees their name, position and a 
     seedRegistration(id, `Completed ${id}`);
     store.enqueueJob({ id, queued_at: acknowledgedAt - 1000 });
     store.updateJobStatus(id, 'in_progress', 'acknowledged_at', acknowledgedAt);
-    const completedId = store.completeInProgressJob(acknowledgedAt + durationMs);
-    if (completedId !== id) {
-      throw new Error(`fixture broken: completeInProgressJob() completed ${completedId}, expected ${id}`);
+    const completed = store.completeJob(id, acknowledgedAt + durationMs);
+    if (!completed) {
+      throw new Error(`fixture broken: completeJob(${id}) returned false`);
     }
   }
 
@@ -490,7 +490,10 @@ describe('GET /status/:jobId — the estimate is suppressed rather than fabricat
     seedRegistration(completedJobId, 'Completed Guest');
     store.enqueueJob({ id: completedJobId, queued_at: base });
     store.updateJobStatus(completedJobId, 'in_progress', 'acknowledged_at', base + 1000);
-    store.completeInProgressJob(base + 241_000);
+    const completed = store.completeJob(completedJobId, base + 241_000);
+    if (!completed) {
+      throw new Error(`fixture broken: completeJob(${completedJobId}) returned false`);
+    }
 
     seedRegistration(failedJobId, 'Failed Guest');
     store.enqueueJob({ id: failedJobId, queued_at: base + 2000 });

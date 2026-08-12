@@ -54,7 +54,9 @@ function buildStore(jobs: MockJob[]) {
     getQueuedGuestSummaries: () =>
       jobs.filter((j) => j.status === 'queued').map((j, i) => ({ jobId: j.id, name: `Guest ${j.id}`, position: i + 1 })),
     getQueueLength: () => jobs.filter((j) => j.status === 'queued').length,
-    completeInProgressJob: () => undefined,
+    completeJob: () => false,
+    getBoothCurrentJobId: () => undefined,
+    setBoothCurrentJob: () => {},
     getQueuePosition: () => 1,
     getJobRegistration: () => undefined,
     getInFlightJobs: () => jobs.filter((j) => j.status === 'dispatched' || j.status === 'in_progress'),

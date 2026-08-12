@@ -9,22 +9,20 @@ describe('Queue countdown with multiple registrations', () => {
     vi.useFakeTimers();
     const queued = [{ id: 'form-a' }, { id: 'form-b' }, { id: 'form-c' }];
     let booth = 'IDLE';
-    const completed: string[] = [];
+    let currentJobId: string | undefined;
     const store = {
       getBoothState: () => booth,
       getNextQueuedJob: () => queued[0],
-      setBoothState: (state: string) => { booth = state; },
-      setBoothBusy: () => { booth = 'BUSY'; },
-      setBoothIdle: () => { booth = 'IDLE'; },
-      setBoothTimeout: () => { booth = 'IDLE'; },
+      setBoothState: (state: string) => { booth = state; currentJobId = undefined; },
+      setBoothBusy: (jobId?: string | null) => { booth = 'BUSY'; currentJobId = jobId ?? undefined; },
+      setBoothIdle: () => { booth = 'IDLE'; currentJobId = undefined; },
+      setBoothTimeout: () => { booth = 'IDLE'; currentJobId = undefined; },
+      getBoothCurrentJobId: () => currentJobId,
+      setBoothCurrentJob: (jobId: string | null) => { currentJobId = jobId ?? undefined; },
       updateJobStatus: (id: string, status: string) => {
         if (status === 'dispatched') queued.splice(queued.findIndex(job => job.id === id), 1);
       },
-      completeInProgressJob: () => {
-        const id = completed.length === 0 ? 'form-a' : 'form-b';
-        completed.push(id);
-        return id;
-      },
+      completeJob: () => true,
       getQueuePosition: () => 1,
       getQueueLength: () => queued.length,
       getQueuedGuestSummaries: () => queued.map((job, index) => ({ jobId: job.id, name: `Guest ${job.id}`, position: index + 1 })),
@@ -75,7 +73,7 @@ describe('booth state transitions', () => {
       { id: 'job-2', name: 'Guest Two' },
     ];
     const jobStatus: Record<string, string> = { 'job-1': 'queued', 'job-2': 'queued' };
-    let inProgressJobId: string | null = null;
+    let currentJobId: string | undefined;
 
     const pushState = (state: string) => {
       booth = state;
@@ -95,24 +93,24 @@ describe('booth state transitions', () => {
         const next = queued.find((j) => jobStatus[j.id] === 'queued');
         return next ? { id: next.id } : undefined;
       },
-      setBoothState: (state: string) => pushState(state),
-      setBoothBusy: () => pushState('BUSY'),
-      setBoothIdle: () => pushState('IDLE'),
-      setBoothTimeout: () => pushState('IDLE'),
+      setBoothState: (state: string) => { pushState(state); currentJobId = undefined; },
+      setBoothBusy: (jobId?: string | null) => { pushState('BUSY'); currentJobId = jobId ?? undefined; },
+      setBoothIdle: () => { pushState('IDLE'); currentJobId = undefined; },
+      setBoothTimeout: () => { pushState('IDLE'); currentJobId = undefined; },
+      getBoothCurrentJobId: () => currentJobId,
+      setBoothCurrentJob: (jobId: string | null) => { currentJobId = jobId ?? undefined; },
       updateJobStatus: (id: string, status: string) => {
         jobStatus[id] = status;
-        if (status === 'in_progress') inProgressJobId = id;
       },
       getQueuedGuestSummaries: () =>
         queued
           .filter((j) => jobStatus[j.id] === 'queued')
           .map((j, index) => ({ jobId: j.id, name: j.name, position: index + 1 })),
       getQueueLength: () => queued.filter((j) => jobStatus[j.id] === 'queued').length,
-      completeInProgressJob: () => {
-        const id = inProgressJobId;
-        if (id) jobStatus[id] = 'completed';
-        inProgressJobId = null;
-        return id ?? undefined;
+      completeJob: (jobId: string) => {
+        if (jobStatus[jobId] !== 'in_progress') return false;
+        jobStatus[jobId] = 'completed';
+        return true;
       },
       getQueuePosition: () => 1,
       getJobRegistration: (jobId: string) => ({
@@ -203,7 +201,7 @@ describe('booth state transitions', () => {
     service.stop();
   });
 
-  it('session_end completes the in-flight job, returns the booth to IDLE, and announces the second guest without further external input (QUE-04)', () => {
+  it('a print composite completes the in-flight job, and session_end then releases the booth to announce the second guest without further external input (QUE-04, D-01/D-02)', () => {
     vi.useFakeTimers();
     const { store, boothSequence, jobStatus } = buildStore();
     const service = new QueueService(store);
@@ -213,10 +211,14 @@ describe('booth state transitions', () => {
     vi.advanceTimersByTime(250);
     vi.advanceTimersByTime(7_000);
     service.onAgentEvent('session_start', 'job-1');
+    service.onAgentEvent('processing_start', 'job-1', { param5: 'C:\\dslrBooth\\Test_event\\Prints\\composite.jpg' });
+
+    expect(jobStatus['job-1']).toBe('completed');
+    // Completion alone does not release the booth — that is D-02's split.
+    expect(boothSequence).toEqual(['IDLE', 'ANNOUNCING', 'BUSY']);
 
     service.onAgentEvent('session_end');
 
-    expect(jobStatus['job-1']).toBe('completed');
     expect(boothSequence).toEqual(['IDLE', 'ANNOUNCING', 'BUSY', 'IDLE', 'ANNOUNCING']);
     expect(service.getAnnouncement()?.jobId).toBe('job-2');
 

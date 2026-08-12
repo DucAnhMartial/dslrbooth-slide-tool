@@ -117,6 +117,19 @@ export class LocalStore {
          WHERE photoUrl IS NULL AND status NOT IN ('delivered','failed')`
       ).run();
     }
+
+    // booth_state.current_job_id — D-06's server-held attribution source of
+    // truth for which job currently owns the booth. No backfill: NULL means
+    // "no job owns the booth", which is the correct value for every
+    // pre-existing row. Re-running this on an already-migrated database is a
+    // no-op, proven against a real temp-file database in
+    // local-store-persistence.test.ts, the same way the pending_print table
+    // is proven in plan 07-03.
+    const boothColumns = this.db.prepare('PRAGMA table_info(booth_state)').all() as Array<{ name: string }>;
+    const hasCurrentJobId = boothColumns.some((c) => c.name === 'current_job_id');
+    if (!hasCurrentJobId) {
+      this.db.exec('ALTER TABLE booth_state ADD COLUMN current_job_id TEXT');
+    }
   }
 
   // registrations
@@ -217,15 +230,24 @@ export class LocalStore {
     return rows.map((row, index) => ({ ...row, position: index + 1 }));
   }
 
-  completeInProgressJob(endedAt: number): string | undefined {
-    const job = this.db.prepare(
-      "SELECT id FROM queue_job WHERE status = 'in_progress' ORDER BY acknowledged_at DESC LIMIT 1"
-    ).get() as { id: string } | undefined;
-    if (!job) return undefined;
-    this.db.prepare(
-      "UPDATE queue_job SET status = 'completed', session_ended_at = ?, completed_at = ? WHERE id = ?"
-    ).run(endedAt, endedAt, job.id);
-    return job.id;
+  // Replaces the removed completeInProgressJob(), which selected the job to
+  // complete by ORDER BY acknowledged_at DESC LIMIT 1 with no jobId
+  // parameter at all — the exact mechanism behind WINDOWS item 8: with a
+  // queue behind the booth, guest A's second session_end completed guest B.
+  // completeJob() is scoped by jobId the way failJob() above is, and reports
+  // whether it matched the way claimNotification() below does.
+  //
+  // The trailing `AND status = 'in_progress'` is not a defensive extra — it
+  // is what makes the double delivery of processing_start then printing
+  // idempotent without an application-level flag: the second UPDATE matches
+  // zero rows and this returns false. No completion path may ever again
+  // select a row by ordering or with LIMIT — doing so would re-arm the exact
+  // defect this method exists to remove.
+  completeJob(jobId: string, completedAt: number): boolean {
+    const result = this.db.prepare(
+      "UPDATE queue_job SET status = 'completed', session_ended_at = ?, completed_at = ? WHERE id = ? AND status = 'in_progress'"
+    ).run(completedAt, completedAt, jobId);
+    return result.changes === 1;
   }
 
   getInFlightJobs(): QueueJob[] {
@@ -305,21 +327,48 @@ export class LocalStore {
     return (row?.state ?? 'IDLE') as BoothState;
   }
 
+  // INSERT OR REPLACE deletes the row and inserts a new one, so any column
+  // left out of the column list silently reverts to its default. Every
+  // writer below names current_job_id explicitly rather than relying on
+  // that side effect.
   setBoothState(state: BoothState): void {
-    this.db.prepare("INSERT OR REPLACE INTO booth_state (id, state, updated_at) VALUES (1, ?, ?)").run(state, new Date().toISOString());
+    // Its only production caller is beginAnnouncement()'s 'ANNOUNCING'
+    // write, when no job owns the booth yet — current_job_id stays NULL.
+    this.db.prepare("INSERT OR REPLACE INTO booth_state (id, state, updated_at, current_job_id) VALUES (1, ?, ?, NULL)").run(state, new Date().toISOString());
   }
 
-  setBoothBusy(): void {
-    this.db.prepare("INSERT OR REPLACE INTO booth_state (id, state, updated_at) VALUES (1, 'BUSY', ?)").run(new Date().toISOString());
+  setBoothBusy(jobId: string | null = null): void {
+    this.db.prepare("INSERT OR REPLACE INTO booth_state (id, state, updated_at, current_job_id) VALUES (1, 'BUSY', ?, ?)").run(new Date().toISOString(), jobId);
   }
 
+  // The explicit NULL here IS D-06's "cleared when the booth is released"
+  // guarantee, the same discipline requeueNoRetry() applies to retries: it
+  // must not be replaced by an application-level clear that a later edit
+  // could delete. current_job_id's absence from the booth once it is IDLE is
+  // enforced by this write itself, not by a caller remembering to clear it.
   setBoothIdle(): void {
-    this.db.prepare("INSERT OR REPLACE INTO booth_state (id, state, updated_at) VALUES (1, 'IDLE', ?)").run(new Date().toISOString());
+    this.db.prepare("INSERT OR REPLACE INTO booth_state (id, state, updated_at, current_job_id) VALUES (1, 'IDLE', ?, NULL)").run(new Date().toISOString());
   }
 
   setBoothTimeout(reason: string): void {
-    this.db.prepare("INSERT OR REPLACE INTO booth_state (id, state, updated_at) VALUES (1, 'IDLE', ?)").run(new Date().toISOString());
+    this.db.prepare("INSERT OR REPLACE INTO booth_state (id, state, updated_at, current_job_id) VALUES (1, 'IDLE', ?, NULL)").run(new Date().toISOString());
     logger.warn(`Booth timeout reset: ${reason}`);
+  }
+
+  // D-06: the server-held attribution source of truth. A NULL column and a
+  // missing row are deliberately indistinguishable to the caller — both mean
+  // "no job owns the booth right now".
+  getBoothCurrentJobId(): string | undefined {
+    const row = this.db.prepare('SELECT current_job_id FROM booth_state WHERE id = 1').get() as
+      | { current_job_id: string | null }
+      | undefined;
+    return row?.current_job_id ?? undefined;
+  }
+
+  // Re-affirms the booth->job binding at ack (D-06), independent of
+  // setBoothBusy()'s own write at dispatch time.
+  setBoothCurrentJob(jobId: string | null): void {
+    this.db.prepare('UPDATE booth_state SET current_job_id = ?, updated_at = ? WHERE id = 1').run(jobId, new Date().toISOString());
   }
 
   getBoothStateDetailed(): { state: BoothState; updated_at: string } {
@@ -343,7 +392,7 @@ export class LocalStore {
   // D-02's poisoned-sample exclusion, expressed structurally. The
   // `status = 'completed'` restriction in the WHERE clause below IS the
   // exclusion — it is not one filter among several. A stalled, requeued or
-  // failed job cannot reach that status: completeInProgressJob() above is the
+  // failed job cannot reach that status: completeJob() above is the
   // only writer of 'completed', and it only ever fires against a row that is
   // currently 'in_progress'. Every other terminal path (failJob,
   // requeueWithRetry, requeueNoRetry) writes 'failed' or 'queued' instead.

@@ -161,32 +161,95 @@ export class QueueService {
 
   enqueueJob(_jobId: string): void { if (!this.running) this.tick(); }
 
+  /**
+   * D-02: booth-release logic only. Job completion moved to
+   * onPrintComposite() — this method no longer completes anything, so a
+   * stray duplicate session_end (measured 3x in 52s for one session) has
+   * nothing left to damage.
+   */
   sessionEnded(): void {
-    const completedJobId = this.store.completeInProgressJob(Date.now());
-    if (completedJobId) {
-      queueLogger.info(`Completed job ${completedJobId} after session_end`);
+    const currentJobId = this.store.getBoothCurrentJobId();
+    if (currentJobId === undefined) {
+      // The stray-duplicate path: no job is bound to the booth right now,
+      // either because it was already released or because none was ever
+      // dispatched. This must have no effect whatsoever, including on a
+      // booth that is mid-announcement for the next guest — no setBoothIdle,
+      // no clearBusyTimer, no tick.
+      queueLogger.info('session_end received with no job bound to the booth; ignored');
+      return;
+    }
+
+    // The printUploadSeen Set and this warn are rebound from the removed
+    // completion id to currentJobId so test/queue-file-upload-print.test.ts's
+    // existing assertions keep passing. Plan 07-03 deletes both when the
+    // durable pending-print registry lands; do not delete them here.
+    if (!this.printUploadSeen.has(currentJobId)) {
       // A session that ends without a print upload leaves the guest with
       // nothing on the slideshow. dslrBooth can emit `file_upload` AFTER
       // `session_end` (measured 2026-08-12: session_end at 06:16:01.819, a
-      // further upload at 06:16:04.959), so this is a warning, not a verdict —
-      // a late print is still accepted and delivered. It exists so the
-      // no-print case is visible instead of silent.
-      if (!this.printUploadSeen.has(completedJobId)) {
-        queueLogger.warn(
-          `No print upload seen for ${completedJobId} at session_end; slideshow will stay empty unless one arrives late`,
-        );
-      }
-      this.printUploadSeen.delete(completedJobId);
+      // further upload at 06:16:04.959), so this is a warning, not a
+      // verdict — a late print is still accepted and delivered.
+      queueLogger.warn(
+        `No print upload seen for ${currentJobId} at session_end; slideshow will stay empty unless one arrives late`,
+      );
     }
-    this.store.setBoothIdle();
+    this.printUploadSeen.delete(currentJobId);
+
+    this.store.setBoothIdle(); // clears current_job_id in the same write
     this.clearBusyTimer();
+    queueLogger.info(`Released booth held by job ${currentJobId}`);
     this.tick();
   }
 
   sessionAcked(jobId: string): void {
     this.store.updateJobStatus(jobId, 'in_progress', 'acknowledged_at', Date.now());
+    this.store.setBoothCurrentJob(jobId);
     this.clearBusyTimer();
     this.startBusyTimer(jobId);
+  }
+
+  /**
+   * D-01/D-02/D-06: the completion anchor. dslrBooth's print-composite
+   * events (`processing_start`, `printing`) both carry the same completed
+   * file in the measured evidence, so either one completes the job — the
+   * event's own jobId is a cross-check only, never the source of truth,
+   * because the Agent stamps a stale activeJobId on every forwarded event
+   * and never clears it.
+   */
+  private onPrintComposite(eventType: string, jobId: string | undefined, payload: Record<string, unknown>): void {
+    const paramField = eventType === 'processing_start' ? 'param5' : 'param1';
+    const rawPath = payload[paramField];
+    const compositePath = typeof rawPath === 'string' ? rawPath.trim() : '';
+    if (!compositePath) {
+      queueLogger.warn(`${eventType} carried no usable composite path in ${paramField}`);
+      return;
+    }
+
+    const currentJobId = this.store.getBoothCurrentJobId();
+    if (currentJobId === undefined) {
+      // D-04: a composite produced while the service has no dispatched
+      // session. Nothing is completed.
+      queueLogger.warn(`${eventType} for job ${jobId ?? 'unknown'} arrived with no job bound to the booth`);
+      return;
+    }
+
+    if (jobId !== undefined && jobId !== currentJobId) {
+      // D-06's cross-check: the event's own jobId is never trusted as the
+      // source of truth.
+      queueLogger.warn(`${eventType} jobId ${jobId} does not match booth_state.current_job_id ${currentJobId}`);
+      return;
+    }
+
+    const completed = this.store.completeJob(currentJobId, Date.now());
+    if (!completed) {
+      // The second of the processing_start/printing pair — the job was
+      // already closed. No further side effect.
+      queueLogger.info(`${eventType} composite for ${currentJobId} arrived after the job was already closed`);
+      return;
+    }
+
+    queueLogger.info(`Completed job ${currentJobId} via ${eventType} composite ${compositePath}`);
+    this.clearBusyTimer(); // the completed job can no longer be stalled and requeued by BTH-02's session timer
   }
 
   onAgentAck(jobId: string, ok: boolean, errorMessage?: string): void {
@@ -243,6 +306,10 @@ export class QueueService {
       this.sessionAcked(jobId);
     } else if (eventType === 'file_upload' && jobId && payload) {
       this.onFileUpload(jobId, payload);
+    } else if (eventType === 'processing_start' && payload) {
+      this.onPrintComposite(eventType, jobId, payload);
+    } else if (eventType === 'printing' && payload) {
+      this.onPrintComposite(eventType, jobId, payload);
     } else {
       queueLogger.debug(`Unhandled Agent event: ${eventType}${jobId ? ` (job ${jobId})` : ''}`);
     }
@@ -298,7 +365,7 @@ export class QueueService {
     const now = Date.now();
     const registration = this.store.getJobRegistration(job.id)?.registration;
     this.store.updateJobStatus(job.id, 'dispatched', 'dispatched_at', now);
-    this.store.setBoothBusy();
+    this.store.setBoothBusy(job.id);
     this.startBusyTimer(job.id);
     this.sendCommandCb?.({ type: 'command', action: 'start_session', jobId: job.id, mode: registration?.mode });
     queueLogger.info(`Dispatched job ${job.id} → Agent`);

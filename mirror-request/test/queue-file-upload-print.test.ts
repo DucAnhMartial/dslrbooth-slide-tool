@@ -41,18 +41,21 @@ const REAL_SESSION_UPLOADS = [
 
 const PRINT_URL = 'https://fotoshare.co/i/4kmtdhm';
 
-function buildStore(completedJobId: string | undefined = JOB) {
+function buildStore(currentJobId: string | undefined = JOB) {
   let booth = 'BUSY';
+  let boundJobId: string | undefined = currentJobId;
   return {
     getBoothState: () => booth,
     getNextQueuedJob: () => undefined,
-    setBoothBusy: () => { booth = 'BUSY'; },
-    setBoothIdle: () => { booth = 'IDLE'; },
-    setBoothTimeout: () => { booth = 'IDLE'; },
+    setBoothBusy: (jobId?: string | null) => { booth = 'BUSY'; boundJobId = jobId ?? undefined; },
+    setBoothIdle: () => { booth = 'IDLE'; boundJobId = undefined; },
+    setBoothTimeout: () => { booth = 'IDLE'; boundJobId = undefined; },
+    getBoothCurrentJobId: () => boundJobId,
+    setBoothCurrentJob: (jobId: string | null) => { boundJobId = jobId ?? undefined; },
     updateJobStatus: vi.fn(),
     getQueuedGuestSummaries: () => [],
     getQueueLength: () => 0,
-    completeInProgressJob: vi.fn(() => completedJobId),
+    completeJob: vi.fn(() => true),
     getQueuePosition: () => undefined,
     getJobRegistration: () => undefined,
   } as unknown as LocalStore;
