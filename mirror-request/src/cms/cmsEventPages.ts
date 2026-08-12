@@ -221,8 +221,13 @@ export const LOGOUT_FORM = `<form method="post" action="/cms/logout">
 /** Upload icon — never shipped alone; see the accessibility note in UI-SPEC. */
 const UPLOAD_ICON = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 11V3m0 0L5 6m3-3 3 3"/><path d="M2 11v2a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-2"/></svg>`;
 
-/** Warning icon, used on the two confirmation pages, always beside its label. */
-const WARNING_ICON = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 2 1.5 13.5h13L8 2Z"/><path d="M8 6.5v3.2M8 11.6v.1"/></svg>`;
+/**
+ * Warning icon, used on the confirmation pages and on the photo-history
+ * placeholder tile, ALWAYS beside its label. Exported for `cmsPhotoPages.ts`
+ * for the same reason `page()` and `LOGOUT_FORM` are: one destructive language
+ * across the console, and one copy of the glyph to keep it that way.
+ */
+export const WARNING_ICON =`<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 2 1.5 13.5h13L8 2Z"/><path d="M8 6.5v3.2M8 11.6v.1"/></svg>`;
 
 // ---------------------------------------------------------------------------
 // The event list

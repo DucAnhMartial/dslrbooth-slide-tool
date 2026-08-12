@@ -1,6 +1,10 @@
 import { Router, Request, Response } from 'express';
 import { labelLogger } from '../logging/logger';
-import { PHOTOS_PER_PAGE, renderCmsPhotoHistoryPage } from './cmsPhotoPages';
+import {
+  PHOTOS_PER_PAGE,
+  renderCmsPhotoHistoryPage,
+  renderCmsClearHistoryConfirmPage,
+} from './cmsPhotoPages';
 import type { EventSummary } from '../state/localStore';
 
 /**
@@ -118,6 +122,80 @@ export function createCmsPhotoRoutes(store: CmsPhotoStore): ReturnType<typeof Ro
     res.type('html').send(
       renderCmsPhotoHistoryPage({ events, event, rows, total, page, totalPages }),
     );
+  });
+
+  /**
+   * The confirmation view. A GET, and it changes nothing — the operator has to
+   * arrive here, read the count, and type the event's name before anything is
+   * destroyed.
+   */
+  router.get('/photos/clear', (req: Request, res: Response) => {
+    const requested = typeof req.query.event === 'string' ? req.query.event : '';
+    const event = store.listEvents().find((candidate) => candidate.id === requested);
+    if (!event) {
+      res.status(404).json({ error: 'Event not found' });
+      return;
+    }
+    res.type('html').send(
+      renderCmsClearHistoryConfirmPage({ event, photoCount: store.countEventPhotos(event.id) }),
+    );
+  });
+
+  /**
+   * D-11's ONLY deletion path for photo history, and the only one that may
+   * ever exist.
+   *
+   * Photo history is kept per event and removed by HAND. There is no expiry,
+   * no row cap, no scheduled cleanup and no delete-on-event-switch anywhere in
+   * this service, and none may be added — here or elsewhere. These rows are a
+   * guest-facing record of a real person's photograph, and the operator, not a
+   * timer, owns when a wedding's photos stop existing. Because D-10 stores
+   * URLs rather than image bytes, the table does not grow expensively, so
+   * there is no operational argument for a cap either. `pending_print`'s
+   * header states the same rule for its own rows and for the same reason; a
+   * later change that adds a sweep here is reversing a locked decision, not
+   * tidying up.
+   *
+   * The confirmation is enforced HERE and not in a dialog. The operator
+   * retypes the event's name and the server compares it, so clearing the wrong
+   * wedding's history requires a mistake about its name rather than a
+   * mis-click — and a request that skips the page entirely (a second tab, a
+   * replayed fetch, a forged cross-site post) has nothing to piggyback on.
+   */
+  router.post('/api/photos/clear', (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as { eventId?: unknown; confirmName?: unknown };
+    const eventId = typeof body.eventId === 'string' ? body.eventId : '';
+    const event = store.listEvents().find((candidate) => candidate.id === eventId);
+    if (!event) {
+      res.status(404).json({ error: 'Event not found' });
+      return;
+    }
+
+    const typed = body.confirmName;
+    if (typeof typed !== 'string' || typed.trim() !== event.name) {
+      // Unconfirmed is not an error to apologise for — it is the confirmation
+      // view again, with the mismatch stated. Nothing is deleted on this path.
+      res
+        .status(400)
+        .type('html')
+        .send(
+          renderCmsClearHistoryConfirmPage({
+            event,
+            photoCount: store.countEventPhotos(event.id),
+            error: true,
+          }),
+        );
+      return;
+    }
+
+    const deleted = store.deleteEventPhotos(event.id);
+    // One line per clear: the event id and the count, and no guest name. A
+    // template string so the winston masking formatters run (T-08-25) — the
+    // audit trail for an irreversible act, not a record of who was in it.
+    cmsPhotoLogger.info(
+      `Cleared photo history for event ${event.id} — ${deleted} rows deleted by a confirmed operator action`,
+    );
+    res.status(200).json({ cleared: true, deleted });
   });
 
   return router;
