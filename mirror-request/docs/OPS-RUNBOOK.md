@@ -266,6 +266,44 @@ guest in the log. What matters is that a stray one now has nothing to
 damage: it completes no job, and if no job is bound to the booth it is
 ignored outright (`session_end received with no job bound to the booth`).
 
+### A stray `session_start` is refused, and it says so (Phase 7 code review, CR-01)
+
+`session_end` is not the only event that arrives stray. The Agent stamps its
+`activeJobId` onto **every** event it forwards and never clears it, so a
+`session_start` can arrive carrying the id of a job that is not the one at the
+booth. When that happens you will see, at `warn`:
+
+```
+session_start ignored for <jobId>: booth is bound to <otherJobId>
+```
+
+**This line means the server refused to move the booth, and the guest who was
+actually standing at it was protected.** Nothing is broken at the moment you
+read it — the refusal is the fix working.
+
+It is still worth looking at, because it tells you the Agent is emitting a
+stale job id. Grep it:
+
+```bash
+grep "session_start ignored for" logs/extension-service-*.log
+```
+
+| What you see | What it means |
+|---|---|
+| Nothing | Normal. Most events are healthy. |
+| One line around a session boundary | Ordinary late/duplicate event. No action. |
+| A run of them naming the same `<otherJobId>` | The Agent is stuck on one stale id. The current session is safe, but restart the Agent between guests when convenient. |
+
+**Why this matters historically.** Before this guard the rebind was
+unconditional: a stray `session_start` took the booth from a live guest, who
+then stayed `in_progress` but unbound — which made them eligible for the
+no-photo sweep (§6), *and* made their own print composite fail its
+`current_job_id` cross-check. The result was a guest who was genuinely
+photographed being closed as `no_photo` and shown "see staff". That is the
+`outcome=no_photo` + `captures>0` signature below, reached by a mechanism that
+had nothing to do with the 15-minute residual window §6 describes — the theft
+was instant. Job `BZWCWFN6` is the recorded real-world instance.
+
 ### The session summary line — one grep per session (Phase 7, D-14)
 
 Every job that closes writes exactly one line, at `info`, with a fixed
