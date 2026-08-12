@@ -852,4 +852,236 @@ describe('LocalStore persistence — webhook replay + poll cursor', () => {
       }
     });
   });
+
+  // =========================================================================
+  // Phase 8 — the four new tables (CMS-03, D-10, D-11, D-18)
+  //
+  // Proved against the REAL temp-file database this file already opens, never
+  // a mock: an idempotency claim about SQLite DDL that is only ever exercised
+  // against a fake proves something about the fake.
+  // =========================================================================
+
+  describe('Phase 8 tables — event, active_event, event_photo, agent_config (CMS-03)', () => {
+    const PHASE_8_TABLES = ['event', 'active_event', 'event_photo', 'agent_config'];
+
+    function tableNames(path: string): string[] {
+      const introspect = new Database(path, { readonly: true });
+      const rows = introspect
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        .all() as Array<{ name: string }>;
+      introspect.close();
+      return rows.map((r) => r.name);
+    }
+
+    it('opening the same file three times creates the four tables once and throws on none of the opens', () => {
+      store = new LocalStore(dbPath);
+      const afterFirst = tableNames(dbPath);
+      store.close();
+
+      expect(() => {
+        store = new LocalStore(dbPath);
+      }).not.toThrow();
+      store!.close();
+
+      expect(() => {
+        store = new LocalStore(dbPath);
+      }).not.toThrow();
+
+      const afterThird = tableNames(dbPath);
+
+      // Same set, same cardinality — a CREATE that ran twice, or a table that
+      // was dropped and recreated, would show up as drift here.
+      expect(afterThird).toEqual(afterFirst);
+      for (const table of PHASE_8_TABLES) {
+        expect(afterThird.filter((n) => n === table)).toHaveLength(1);
+      }
+    });
+
+    it('leaves every pre-Phase-8 table byte-identical in shape (D-01 boundary)', () => {
+      store = new LocalStore(dbPath);
+      store.close();
+      store = undefined;
+
+      // The pre-phase baseline, pinned as literals. Phase 8 is additive-only:
+      // if any migration ever adds, drops, or renames a column on one of
+      // these five, this case fails and names the table.
+      const baseline: Record<string, string[]> = {
+        registration: ['id', 'name', 'email', 'phone', 'mode', 'registered_at', 'raw_payload', 'received_at'],
+        queue_job: [
+          'id', 'registration_id', 'status', 'queued_at', 'dispatched_at', 'acknowledged_at',
+          'session_started_at', 'session_ended_at', 'completed_at', 'ack_error_message',
+          'stall_reason', 'retries',
+        ],
+        booth_state: ['id', 'state', 'updated_at', 'current_job_id'],
+        notification_record: ['jobId', 'status', 'attempts', 'lastError', 'photoUrl', 'dueAt', 'updatedAt'],
+        pending_print: ['jobId', 'composite_path', 'status', 'opened_at', 'expires_at', 'resolved_at', 'updated_at'],
+      };
+
+      const introspect = new Database(dbPath, { readonly: true });
+      for (const [table, expected] of Object.entries(baseline)) {
+        const columns = (
+          introspect.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+        ).map((c) => c.name);
+        expect(columns, `${table} changed shape in Phase 8`).toEqual(expected);
+      }
+      introspect.close();
+    });
+
+    it('refuses a second active_event row — the CHECK (id = 1) constraint throws (D-01)', () => {
+      store = new LocalStore(dbPath);
+      store.setActiveEvent('some-event');
+      store.close();
+      store = undefined;
+
+      const raw = new Database(dbPath);
+      expect(() =>
+        raw.prepare('INSERT INTO active_event (id, event_id, updated_at) VALUES (2, ?, ?)').run('other', 'now'),
+      ).toThrow();
+      const count = raw.prepare('SELECT COUNT(*) AS n FROM active_event').get() as { n: number };
+      raw.close();
+      expect(count.n).toBe(1);
+    });
+
+    it('rows written to event, event_photo and agent_config survive a close and reopen (CMS-03)', () => {
+      store = new LocalStore(dbPath);
+      const created = store.createEvent({ name: 'Tiệc cưới B' });
+      store.setActiveEvent(created.id);
+      store.recordEventPhoto({
+        jobId: 'job-1',
+        eventId: created.id,
+        guestName: 'Nguyễn Văn A',
+        photoUrl: 'https://example.test/a.jpg',
+        capturedAt: 1_700_000_000_000,
+      });
+      store.saveAgentConfig({ logLevel: 'debug', autoOpenDisplay: true });
+      store.close();
+
+      store = new LocalStore(dbPath);
+      expect(store.getEventConfig(created.id)?.name).toBe('Tiệc cưới B');
+      expect(store.getActiveEventId()).toBe(created.id);
+      expect(store.getMostRecentEventPhoto(created.id)).toEqual({
+        photoUrl: 'https://example.test/a.jpg',
+        guestName: 'Nguyễn Văn A',
+        capturedAt: 1_700_000_000_000,
+      });
+      expect(store.getAgentConfig()).toEqual({ logLevel: 'debug', autoOpenDisplay: true });
+    });
+
+    it('recordEventPhoto is idempotent on jobId — one print composite per session, one row (D-10)', () => {
+      store = new LocalStore(dbPath);
+      const event = store.createEvent({ name: 'Sự kiện ảnh' });
+
+      expect(
+        store.recordEventPhoto({
+          jobId: 'job-dup', eventId: event.id, guestName: 'Khách A',
+          photoUrl: 'https://example.test/first.jpg', capturedAt: 1000,
+        }),
+      ).toBe(true);
+      // A replayed file_upload must not overwrite the original capture.
+      expect(
+        store.recordEventPhoto({
+          jobId: 'job-dup', eventId: event.id, guestName: 'Khách A',
+          photoUrl: 'https://example.test/second.jpg', capturedAt: 2000,
+        }),
+      ).toBe(false);
+
+      expect(store.countEventPhotos(event.id)).toBe(1);
+      expect(store.getMostRecentEventPhoto(event.id)?.photoUrl).toBe('https://example.test/first.jpg');
+    });
+
+    it('getMostRecentEventPhoto returns the newest row for that event only, and undefined when it has none', () => {
+      store = new LocalStore(dbPath);
+      const eventA = store.createEvent({ name: 'A' });
+      const eventB = store.createEvent({ name: 'B' });
+
+      store.recordEventPhoto({ jobId: 'a1', eventId: eventA.id, guestName: 'A1', photoUrl: 'a1.jpg', capturedAt: 100 });
+      store.recordEventPhoto({ jobId: 'a2', eventId: eventA.id, guestName: 'A2', photoUrl: 'a2.jpg', capturedAt: 300 });
+      store.recordEventPhoto({ jobId: 'a3', eventId: eventA.id, guestName: 'A3', photoUrl: 'a3.jpg', capturedAt: 200 });
+      // Newer than every eventA row, and must NOT be returned for eventA.
+      store.recordEventPhoto({ jobId: 'b1', eventId: eventB.id, guestName: 'B1', photoUrl: 'b1.jpg', capturedAt: 900 });
+
+      expect(store.getMostRecentEventPhoto(eventA.id)?.photoUrl).toBe('a2.jpg');
+      expect(store.getMostRecentEventPhoto(eventB.id)?.photoUrl).toBe('b1.jpg');
+      expect(store.getMostRecentEventPhoto('no-such-event')).toBeUndefined();
+
+      // The projection is narrow by construction — no event_id, no jobId.
+      expect(Object.keys(store.getMostRecentEventPhoto(eventA.id)!).sort()).toEqual([
+        'capturedAt', 'guestName', 'photoUrl',
+      ]);
+    });
+
+    it('listEventPhotos returns newest-first and honours both limit and offset', () => {
+      store = new LocalStore(dbPath);
+      const event = store.createEvent({ name: 'Phân trang' });
+      for (let i = 1; i <= 5; i += 1) {
+        store.recordEventPhoto({
+          jobId: `p${i}`, eventId: event.id, guestName: `Khách ${i}`,
+          photoUrl: `p${i}.jpg`, capturedAt: i * 100,
+        });
+      }
+
+      expect(store.listEventPhotos(event.id, { limit: 2, offset: 0 }).map((p) => p.photoUrl))
+        .toEqual(['p5.jpg', 'p4.jpg']);
+      expect(store.listEventPhotos(event.id, { limit: 2, offset: 2 }).map((p) => p.photoUrl))
+        .toEqual(['p3.jpg', 'p2.jpg']);
+      expect(store.listEventPhotos(event.id, { limit: 50, offset: 4 }).map((p) => p.photoUrl))
+        .toEqual(['p1.jpg']);
+      expect(store.countEventPhotos(event.id)).toBe(5);
+    });
+
+    it('deleteEventPhotos removes only that event rows and returns the deleted count (D-11)', () => {
+      store = new LocalStore(dbPath);
+      const eventA = store.createEvent({ name: 'A' });
+      const eventB = store.createEvent({ name: 'B' });
+      store.recordEventPhoto({ jobId: 'a1', eventId: eventA.id, guestName: 'A1', photoUrl: 'a1.jpg', capturedAt: 1 });
+      store.recordEventPhoto({ jobId: 'a2', eventId: eventA.id, guestName: 'A2', photoUrl: 'a2.jpg', capturedAt: 2 });
+      store.recordEventPhoto({ jobId: 'b1', eventId: eventB.id, guestName: 'B1', photoUrl: 'b1.jpg', capturedAt: 3 });
+
+      expect(store.deleteEventPhotos(eventA.id)).toBe(2);
+      expect(store.countEventPhotos(eventA.id)).toBe(0);
+      // D-11: deletion is per-event and explicit. B is untouched.
+      expect(store.countEventPhotos(eventB.id)).toBe(1);
+      expect(store.getMostRecentEventPhoto(eventB.id)?.photoUrl).toBe('b1.jpg');
+      // Deleting again is a no-op, not an error.
+      expect(store.deleteEventPhotos(eventA.id)).toBe(0);
+    });
+
+    it('saveAgentConfig rotates current into previous, and restore steps back exactly once (D-18)', () => {
+      store = new LocalStore(dbPath);
+
+      store.saveAgentConfig({ logLevel: 'info' });
+      expect(store.getAgentConfig()).toEqual({ logLevel: 'info' });
+      // Nothing to step back to yet.
+      expect(store.restorePreviousAgentConfig()).toBeUndefined();
+      expect(store.getAgentConfig()).toEqual({ logLevel: 'info' });
+
+      store.saveAgentConfig({ logLevel: 'debug' });
+      expect(store.getAgentConfig()).toEqual({ logLevel: 'debug' });
+
+      expect(store.restorePreviousAgentConfig()).toEqual({ logLevel: 'info' });
+      expect(store.getAgentConfig()).toEqual({ logLevel: 'info' });
+
+      // D-18 is ONE step back, not a history. A second restore must not
+      // silently rotate again and hand back the 'debug' config the operator
+      // just rejected.
+      expect(store.restorePreviousAgentConfig()).toBeUndefined();
+      expect(store.getAgentConfig()).toEqual({ logLevel: 'info' });
+    });
+
+    it('agent_config is a single row — a second insert is refused by CHECK (id = 1)', () => {
+      store = new LocalStore(dbPath);
+      store.saveAgentConfig({ logLevel: 'info' });
+      store.saveAgentConfig({ logLevel: 'warn' });
+      store.close();
+      store = undefined;
+
+      const raw = new Database(dbPath);
+      const count = raw.prepare('SELECT COUNT(*) AS n FROM agent_config').get() as { n: number };
+      expect(count.n).toBe(1);
+      expect(() =>
+        raw.prepare('INSERT INTO agent_config (id, current_json) VALUES (2, ?)').run('{}'),
+      ).toThrow();
+      raw.close();
+    });
+  });
 });
