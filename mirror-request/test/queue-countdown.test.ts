@@ -19,6 +19,7 @@ describe('Queue countdown with multiple registrations', () => {
       setBoothTimeout: () => { booth = 'IDLE'; currentJobId = undefined; },
       getBoothCurrentJobId: () => currentJobId,
       setBoothCurrentJob: (jobId: string | null) => { currentJobId = jobId ?? undefined; },
+      getJob: () => undefined,
       updateJobStatus: (id: string, status: string) => {
         if (status === 'dispatched') queued.splice(queued.findIndex(job => job.id === id), 1);
       },
@@ -99,6 +100,7 @@ describe('booth state transitions', () => {
       setBoothTimeout: () => { pushState('IDLE'); currentJobId = undefined; },
       getBoothCurrentJobId: () => currentJobId,
       setBoothCurrentJob: (jobId: string | null) => { currentJobId = jobId ?? undefined; },
+      getJob: (id: string) => (id in jobStatus ? { id, status: jobStatus[id] } : undefined),
       updateJobStatus: (id: string, status: string) => {
         jobStatus[id] = status;
       },

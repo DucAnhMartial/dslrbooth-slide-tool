@@ -51,6 +51,7 @@ function buildStore() {
     setBoothTimeout: () => { pushState('IDLE'); currentJobId = undefined; },
     getBoothCurrentJobId: () => currentJobId,
     setBoothCurrentJob: (jobId: string | null) => { currentJobId = jobId ?? undefined; },
+    getJob: (id: string) => (id in jobStatus ? { id, status: jobStatus[id] } : undefined),
     updateJobStatus: (id: string, status: string) => { jobStatus[id] = status; },
     getQueuedGuestSummaries: () =>
       queued

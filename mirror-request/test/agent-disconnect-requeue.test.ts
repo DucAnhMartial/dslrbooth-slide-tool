@@ -57,6 +57,7 @@ function buildStore(jobs: MockJob[]) {
     completeJob: () => false,
     getBoothCurrentJobId: () => undefined,
     setBoothCurrentJob: () => {},
+    getJob: (id: string) => jobs.find((j) => j.id === id),
     getQueuePosition: () => 1,
     getJobRegistration: () => undefined,
     getInFlightJobs: () => jobs.filter((j) => j.status === 'dispatched' || j.status === 'in_progress'),

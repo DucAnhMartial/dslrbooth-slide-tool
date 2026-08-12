@@ -38,6 +38,16 @@ export class QueueService {
    * the booth is allowed to leave IDLE again, so a long outage logs once.
    */
   private agentOfflineDispatchSkipLogged = false;
+  /**
+   * D-06: set the first time onPrintComposite() sees an event jobId that
+   * differs from booth_state.current_job_id, cleared the moment a matching
+   * event is seen, so a stuck Agent producing a steady stream of stale-id
+   * events logs once per episode rather than once per event — the project's
+   * only existing log-once shape, copied from agentOfflineDispatchSkipLogged
+   * above. No time-windowed rate limiter is built; none exists elsewhere in
+   * this codebase.
+   */
+  private jobIdMismatchWarnLogged = false;
   private sendCommandCb: ((payload: {
     type: 'command'; action: 'start_session'; jobId: string; mode?: string
   }) => void) | null = null;
@@ -201,7 +211,20 @@ export class QueueService {
     this.tick();
   }
 
+  /**
+   * WINDOWS-8's second, independently-closable half. Task 1 closed the
+   * completion path (session_end no longer completes anything); this closes
+   * the resurrection path — a stray session_start naming a job that already
+   * reached a terminal state must not write it back to in_progress. A job
+   * absent from the store (getJob returns undefined) is a different defect
+   * class and keeps today's behaviour — it is not blocked.
+   */
   sessionAcked(jobId: string): void {
+    const job = this.store.getJob(jobId);
+    if (job && (job.status === 'completed' || job.status === 'failed')) {
+      queueLogger.warn(`session_start ignored for ${jobId}: already ${job.status}`);
+      return;
+    }
     this.store.updateJobStatus(jobId, 'in_progress', 'acknowledged_at', Date.now());
     this.store.setBoothCurrentJob(jobId);
     this.clearBusyTimer();
@@ -217,6 +240,14 @@ export class QueueService {
    * and never clears it.
    */
   private onPrintComposite(eventType: string, jobId: string | undefined, payload: Record<string, unknown>): void {
+    const currentJobId = this.store.getBoothCurrentJobId();
+    if (jobId !== undefined && jobId === currentJobId) {
+      // D-06 throttle reset: any event whose jobId matches current_job_id
+      // means the Agent is no longer stuck on a stale id, so the next
+      // mismatch (a new episode) is allowed to warn again.
+      this.jobIdMismatchWarnLogged = false;
+    }
+
     const paramField = eventType === 'processing_start' ? 'param5' : 'param1';
     const rawPath = payload[paramField];
     const compositePath = typeof rawPath === 'string' ? rawPath.trim() : '';
@@ -225,7 +256,6 @@ export class QueueService {
       return;
     }
 
-    const currentJobId = this.store.getBoothCurrentJobId();
     if (currentJobId === undefined) {
       // D-04: a composite produced while the service has no dispatched
       // session. Nothing is completed.
@@ -235,8 +265,12 @@ export class QueueService {
 
     if (jobId !== undefined && jobId !== currentJobId) {
       // D-06's cross-check: the event's own jobId is never trusted as the
-      // source of truth.
-      queueLogger.warn(`${eventType} jobId ${jobId} does not match booth_state.current_job_id ${currentJobId}`);
+      // source of truth. Throttled — a stuck Agent producing a steady
+      // stream of stale-id events logs once per episode, not once per event.
+      if (!this.jobIdMismatchWarnLogged) {
+        queueLogger.warn(`${eventType} jobId ${jobId} does not match booth_state.current_job_id ${currentJobId}`);
+        this.jobIdMismatchWarnLogged = true;
+      }
       return;
     }
 

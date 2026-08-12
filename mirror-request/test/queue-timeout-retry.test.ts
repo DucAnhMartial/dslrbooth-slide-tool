@@ -34,6 +34,7 @@ function buildStore(queued: Array<{ id: string }>) {
     completeJob: () => false,
     getBoothCurrentJobId: () => undefined,
     setBoothCurrentJob: () => {},
+    getJob: () => undefined,
     getJobRegistration: () => undefined,
     requeueWithRetry,
     failJob,

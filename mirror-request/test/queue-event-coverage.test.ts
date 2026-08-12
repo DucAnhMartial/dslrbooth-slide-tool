@@ -59,6 +59,7 @@ function buildStore() {
     setBoothCurrentJob: (jobId: string | null) => {
       currentJobId = jobId ?? undefined;
     },
+    getJob: () => undefined,
     updateJobStatus,
     getQueuedGuestSummaries: () => [],
     getQueueLength: () => 0,
