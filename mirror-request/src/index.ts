@@ -125,7 +125,7 @@ app.use(createStatusRouter(store, queue, agentServer, config));
 // config.CMS_IP_WHITELIST, never config.DISPLAY_IP_WHITELIST: the operator's
 // laptop and the room's TVs are different audiences on different network
 // paths (RESEARCH Pitfall 2).
-app.use('/cms', createCmsIpGate(config.CMS_IP_WHITELIST), createCmsRouter(store, config));
+app.use('/cms', createCmsIpGate(config.CMS_IP_WHITELIST), createCmsRouter(store, config, agentServer));
 
 // D-15: uploaded branding assets. Gated by the UNION of the two allow-lists,
 // not by either alone — the room's TV has to fetch the event's logo and

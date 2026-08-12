@@ -47,6 +47,13 @@ const CMS_CFG = {
   CMS_SESSION_COOKIE_NAME: 'cms_session',
 };
 
+/**
+ * UI-02's Agent link, offline. These suites never reach `/cms/agent`; the stub
+ * exists so `createCmsRouter`'s third argument is explicit rather than
+ * accidentally `undefined` (plan 08-04).
+ */
+const OFFLINE_AGENT = { isAgentOnline: () => false, sendEvent: () => false };
+
 const WHITELISTED_IP = '10.0.0.5';
 const BLOCKED_IP = '1.2.3.4';
 const LOGIN_ERROR = 'Sai tên đăng nhập hoặc mật khẩu. Vui lòng thử lại.';
@@ -86,7 +93,7 @@ function buildCmsApp(
     next();
   });
   // The exact mount index.ts uses: IP gate FIRST, router second (D-13).
-  app.use('/cms', createCmsIpGate(opts.whitelist ?? [WHITELISTED_IP]), createCmsRouter(store, CMS_CFG));
+  app.use('/cms', createCmsIpGate(opts.whitelist ?? [WHITELISTED_IP]), createCmsRouter(store, CMS_CFG, OFFLINE_AGENT));
   return app;
 }
 

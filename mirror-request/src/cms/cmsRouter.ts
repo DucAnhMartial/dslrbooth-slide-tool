@@ -13,6 +13,7 @@ import {
 } from './cmsAuth';
 import { renderCmsLoginPage } from './cmsPages';
 import { createCmsEventRoutes, type CmsEventStore } from './cmsEventRoutes';
+import { createCmsAgentRoutes, type CmsAgentStore, type CmsAgentLink } from './cmsAgentRoutes';
 
 const log = labelLogger('cms');
 
@@ -33,6 +34,7 @@ const LOGIN_ERROR = 'Sai tên đăng nhập hoặc mật khẩu. Vui lòng thử
  *   1. GET/POST /login and POST /logout  — reachable WITHOUT a session
  *   2. requireSession()                  — everything below needs one
  *   3. createCmsEventRoutes(store)       — the dashboard and mutations
+ *   4. createCmsAgentRoutes(store,agent) — UI-02's Agent configuration
  * Moving requireSession() above the login routes would lock the operator out
  * of the only page that can create a session.
  *
@@ -45,7 +47,11 @@ const LOGIN_ERROR = 'Sai tên đăng nhập hoặc mật khẩu. Vui lòng thử
  * `index.ts`, so that a refused address never reaches any of this code — see
  * `cmsIpGate.ts` for why that separation is the point.
  */
-export function createCmsRouter(store: CmsEventStore, cfg: CmsConfig): ReturnType<typeof Router> {
+export function createCmsRouter(
+  store: CmsEventStore & CmsAgentStore,
+  cfg: CmsConfig,
+  agent: CmsAgentLink,
+): ReturnType<typeof Router> {
   const router = Router();
   const sessions = createSessionStore();
   const cookieName = cfg.CMS_SESSION_COOKIE_NAME || 'cms_session';
@@ -101,6 +107,7 @@ export function createCmsRouter(store: CmsEventStore, cfg: CmsConfig): ReturnTyp
 
   router.use(createRequireSession(sessions, cookieName));
   router.use(createCmsEventRoutes(store));
+  router.use(createCmsAgentRoutes(store, agent));
 
   return router;
 }

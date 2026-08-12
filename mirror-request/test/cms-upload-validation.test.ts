@@ -49,6 +49,13 @@ const CMS_CFG = {
   CMS_SESSION_COOKIE_NAME: 'cms_session',
 };
 
+/**
+ * UI-02's Agent link, offline. These suites never reach `/cms/agent`; the stub
+ * exists so `createCmsRouter`'s third argument is explicit rather than
+ * accidentally `undefined` (plan 08-04).
+ */
+const OFFLINE_AGENT = { isAgentOnline: () => false, sendEvent: () => false };
+
 /** The four accepted signatures, each with a body that is NOT a real image —
  *  the sniffer must look at the leading bytes and nothing else. */
 const PNG = Buffer.concat([
@@ -241,7 +248,7 @@ describe('D-15: the upload route is authenticated, and an anonymous post writes 
       Object.defineProperty(req, 'ip', { value: WHITELISTED_IP, configurable: true });
       next();
     });
-    app.use('/cms', createCmsIpGate([WHITELISTED_IP]), createCmsRouter(makeStore(), CMS_CFG));
+    app.use('/cms', createCmsIpGate([WHITELISTED_IP]), createCmsRouter(makeStore(), CMS_CFG, OFFLINE_AGENT));
 
     const res = await request(app).post('/cms/api/assets').send({ data: b64(PNG) });
     expect(res.status).toBe(401);

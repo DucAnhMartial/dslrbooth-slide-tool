@@ -32,6 +32,13 @@ const CMS_CFG = {
   CMS_SESSION_COOKIE_NAME: 'cms_session',
 };
 
+/**
+ * UI-02's Agent link, offline. These suites never reach `/cms/agent`; the stub
+ * exists so `createCmsRouter`'s third argument is explicit rather than
+ * accidentally `undefined` (plan 08-04).
+ */
+const OFFLINE_AGENT = { isAgentOnline: () => false, sendEvent: () => false };
+
 const tmpDirs: string[] = [];
 const openStores: LocalStore[] = [];
 
@@ -120,7 +127,7 @@ describe('CMS-04: the IP layer and the session layer refuse independently (D-13)
 
   it('refuses a whitelisted IP with no cookie, and with a forged token, identically (layer two is live)', async () => {
     const app = withFakeIp(express(), WHITELISTED_IP);
-    app.use('/cms', createCmsIpGate([WHITELISTED_IP]), createCmsRouter(makeStore(), CMS_CFG));
+    app.use('/cms', createCmsIpGate([WHITELISTED_IP]), createCmsRouter(makeStore(), CMS_CFG, OFFLINE_AGENT));
 
     const noCookie = await request(app).get('/cms/');
     const forged = await request(app).get('/cms/').set('Cookie', 'cms_session=deadbeefdeadbeef');
@@ -137,7 +144,7 @@ describe('CMS-04: the IP layer and the session layer refuse independently (D-13)
     // silently disable the password layer too — the two are independent, and
     // config.ts's production fail-fast is what stops this state shipping.
     const app = withFakeIp(express(), BLOCKED_IP);
-    app.use('/cms', createCmsIpGate([]), createCmsRouter(makeStore(), CMS_CFG));
+    app.use('/cms', createCmsIpGate([]), createCmsRouter(makeStore(), CMS_CFG, OFFLINE_AGENT));
 
     expect((await request(app).get('/cms/login')).status).toBe(200);
     expect((await request(app).get('/cms/')).status).toBe(401);

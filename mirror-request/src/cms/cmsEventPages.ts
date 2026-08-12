@@ -187,7 +187,15 @@ const INFLIGHT_SCRIPT = `
   function cmsFail(){ alert(${JSON.stringify(SAVE_ERROR)}); }
 `;
 
-function page(title: string, extraStyles: string, body: string, script: string): string {
+/**
+ * Exported for `cmsAgentPages.ts` (plan 08-04). This is the follow-up the note
+ * at the top of this file recorded: the shared chrome and the ONE in-flight
+ * implementation are promoted to an export rather than duplicated a second
+ * time, now that no parallel plan owns this file. A second copy of
+ * INFLIGHT_SCRIPT would be a second place for "no mutating control can be
+ * double-submitted" to stop being true.
+ */
+export function page(title: string, extraStyles: string, body: string, script: string): string {
   return `<!doctype html>
 <html lang="vi">
 <head>
@@ -206,7 +214,7 @@ ${body}
  * The logout control, repeated on every page. A form post, and `data-mutating`
  * like every other mutating control — ending a session is a write.
  */
-const LOGOUT_FORM = `<form method="post" action="/cms/logout">
+export const LOGOUT_FORM = `<form method="post" action="/cms/logout">
       <button class="secondary" type="submit" data-mutating data-inflight-label="Đang đăng xuất…">Đăng xuất</button>
     </form>`;
 
