@@ -64,6 +64,53 @@ export function labelLogger(name: string) {
 }
 
 /**
+ * Winston's npm levels, in severity order (least to most verbose). The
+ * single source of truth for what `setLogLevel()` accepts — the derived
+ * `LogLevel` type is built from this array rather than hand-written a
+ * second time, the same array-derived-union idiom `guestStatus.ts` uses
+ * for `GUEST_STATUSES`/`PHOTO_DELIVERY_STATES`.
+ */
+export const LOG_LEVELS = ['error', 'warn', 'info', 'http', 'verbose', 'debug', 'silly'] as const;
+
+export type LogLevel = typeof LOG_LEVELS[number];
+
+/**
+ * Changes the running process's log level in place. Reused by both the
+ * SIGHUP reload path (src/ops/logLevelControl.ts) and any future caller —
+ * this function owns validation, `reloadLogLevelFromEnvFile` owns where the
+ * value comes from.
+ *
+ * Never throws: a signal handler is a trust boundary (Phase 1 D-05's "never
+ * crash on a boundary, log and continue"), and this is the function that
+ * boundary ultimately calls into.
+ *
+ * MEASURED (not merely assumed): winston's `logger.child()` returns an
+ * object whose prototype chain reaches the parent `Logger`, so a level
+ * assigned on `logger.level` here is visible to every `labelLogger()` child
+ * via `isLevelEnabled()` without any extra propagation step — proven by
+ * `test/log-level-runtime.test.ts`'s `labelLogger('queue').isLevelEnabled(...)`
+ * assertion. Winston also applies `logger.level` as the default level for
+ * every transport that does not set its own `level` option, which is the
+ * case for both transports in this file — so no `transport.level` fan-out
+ * was needed to make the reload observable end-to-end.
+ */
+export function setLogLevel(next: string): { previous: string; current: string; changed: boolean } {
+  const previous = logger.level;
+
+  if (!(LOG_LEVELS as readonly string[]).includes(next)) {
+    logger.warn(`Rejected log level "${next}" — accepted values are: ${LOG_LEVELS.join(', ')}`);
+    return { previous, current: previous, changed: false };
+  }
+
+  if (next === previous) {
+    return { previous, current: previous, changed: false };
+  }
+
+  logger.level = next;
+  return { previous, current: next, changed: true };
+}
+
+/**
  * The single sanctioned route from a raw Mirror Request payload to any log
  * sink (D-16). Returns immediately unless `NODE_ENV` is not `'production'`
  * AND `DEBUG` is set, so it can never fire in production and is silent by
