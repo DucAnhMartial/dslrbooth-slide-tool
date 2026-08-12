@@ -103,6 +103,12 @@ export function loadConfig(): EnvConfig {
     SESSION_TIMEOUT_MS:       toNum('SESSION_TIMEOUT_MS',  300_000),
     NEXT_GUEST_COUNTDOWN_MS:  toNum('NEXT_GUEST_COUNTDOWN_MS', 7000),
     SESSION_MAX_RETRIES:      toNum('SESSION_MAX_RETRIES', 2),
+    // D-02 (phase 7): the measured evidence shows the composite arrived at
+    // 07:35:26 and session_end at 07:35:57 — a 31-second real gap between a
+    // completed session and its release. 120000ms gives roughly four times
+    // that observed headroom before the queue is unblocked on the guest's
+    // behalf.
+    BOOTH_RELEASE_TIMEOUT_MS: toNum('BOOTH_RELEASE_TIMEOUT_MS', 120_000),
     // D-04: the cold-start fallback. Below WAIT_ESTIMATE_MIN_SAMPLES real
     // completed sessions the estimator uses WAIT_ESTIMATE_DEFAULT_MS rather
     // than computing a median from one or two sessions. The production

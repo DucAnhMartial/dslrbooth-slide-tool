@@ -12,6 +12,18 @@ export class QueueService {
   private running = false;
   private timer: NodeJS.Timeout | null = null;
   private busyTimer: NodeJS.Timeout | null = null;
+  /**
+   * D-02: a deliberate sibling of busyTimer, not a variant of it — the same
+   * discipline localStore.ts's requeueNoRetry() applies to SQL writers,
+   * applied here to timers. Routing a completed job's release timeout
+   * through handleStall() would requeue an already-photographed guest and
+   * call them back to the camera, so this timer must NEVER be collapsed
+   * into busyTimer or call handleStall()/requeueWithRetry()/
+   * requeueNoRetry()/failJob()/setBoothTimeout(), and must never write a
+   * stall_reason — stall_reason is a closed, server-authored vocabulary
+   * (OPS-RUNBOOK §6) that must not gain a value here.
+   */
+  private releaseTimer: NodeJS.Timeout | null = null;
   private announcementTimer: NodeJS.Timeout | null = null;
   private announcingJobId: string | null = null;
   private announcementEndsAt: number | null = null;
@@ -25,6 +37,7 @@ export class QueueService {
   private sessionTimeoutMs: number;
   private countdownMs: number;
   private sessionMaxRetries: number;
+  private boothReleaseTimeoutMs: number;
 
   private notificationService: { sendPhotoLink: (jid: string, url: string) => Promise<void> } | null = null;
   /**
@@ -61,13 +74,17 @@ export class QueueService {
 
   constructor(
     store: LocalStore = getStore(),
-    config: Pick<EnvConfig, 'SESSION_TIMEOUT_MS' | 'NEXT_GUEST_COUNTDOWN_MS' | 'SESSION_MAX_RETRIES'> = getConfig(),
+    config: Pick<EnvConfig, 'SESSION_TIMEOUT_MS' | 'NEXT_GUEST_COUNTDOWN_MS' | 'SESSION_MAX_RETRIES' | 'BOOTH_RELEASE_TIMEOUT_MS'> = getConfig(),
   ) {
     this.store = store;
     this.sessionTimeoutMs = config.SESSION_TIMEOUT_MS;
     const configuredMs = config.NEXT_GUEST_COUNTDOWN_MS;
     this.countdownMs = Math.min(10_000, Math.max(5_000, Number.isFinite(configuredMs) ? configuredMs : 7_000));
     this.sessionMaxRetries = config.SESSION_MAX_RETRIES;
+    const configuredReleaseMs = config.BOOTH_RELEASE_TIMEOUT_MS;
+    this.boothReleaseTimeoutMs = Number.isFinite(configuredReleaseMs) && configuredReleaseMs >= 30_000
+      ? configuredReleaseMs
+      : 120_000;
   }
 
   start(): void {
@@ -80,6 +97,7 @@ export class QueueService {
     this.running = false;
     if (this.timer) clearInterval(this.timer);
     if (this.busyTimer) clearTimeout(this.busyTimer);
+    this.clearReleaseTimer();
     if (this.announcementTimer) clearTimeout(this.announcementTimer);
     this.announcementTimer = null;
     this.announcingJobId = null;
@@ -207,6 +225,7 @@ export class QueueService {
 
     this.store.setBoothIdle(); // clears current_job_id in the same write
     this.clearBusyTimer();
+    this.clearReleaseTimer(); // this session_end IS the release the fallback exists to guard against missing
     queueLogger.info(`Released booth held by job ${currentJobId}`);
     this.tick();
   }
@@ -284,6 +303,7 @@ export class QueueService {
 
     queueLogger.info(`Completed job ${currentJobId} via ${eventType} composite ${compositePath}`);
     this.clearBusyTimer(); // the completed job can no longer be stalled and requeued by BTH-02's session timer
+    this.startReleaseTimer(currentJobId); // D-02: falls back to releasing the booth if session_end never arrives
   }
 
   onAgentAck(jobId: string, ok: boolean, errorMessage?: string): void {
@@ -325,6 +345,7 @@ export class QueueService {
   onAgentDisconnected(): void {
     if (this.store.getBoothState() !== 'BUSY') return;
     this.clearBusyTimer();
+    this.clearReleaseTimer();
     this.store.setBoothIdle();
     for (const job of this.store.getInFlightJobs()) {
       this.store.requeueNoRetry(job.id);
@@ -413,6 +434,32 @@ export class QueueService {
       this.handleStall(jobId, 'session_ack_timeout');
       this.tick();
     }, timeoutMs);
+  }
+
+  /**
+   * D-02's release-fallback timer. A deliberate sibling of startBusyTimer()
+   * above, shaped identically, but its callback does only three things: null
+   * the field, release the booth (setBoothIdle(), which also clears
+   * current_job_id), and tick() — plus one warn naming the job whose booth
+   * was released by the fallback. It must NEVER call handleStall(),
+   * requeueWithRetry(), requeueNoRetry(), failJob() or setBoothTimeout() —
+   * the job is already terminal, and routing its release through the same
+   * path as a genuine stall would requeue an already-photographed guest and
+   * call them back to the camera.
+   */
+  private startReleaseTimer(jobId: string): void {
+    this.clearReleaseTimer();
+    this.releaseTimer = setTimeout(() => {
+      this.releaseTimer = null;
+      this.store.setBoothIdle();
+      queueLogger.warn(`Booth released for job ${jobId} by the fallback timer — no session_end arrived within ${this.boothReleaseTimeoutMs}ms`);
+      this.tick();
+    }, this.boothReleaseTimeoutMs);
+  }
+
+  private clearReleaseTimer(): void {
+    if (this.releaseTimer) clearTimeout(this.releaseTimer);
+    this.releaseTimer = null;
   }
 
   /**

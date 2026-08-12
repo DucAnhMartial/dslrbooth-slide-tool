@@ -113,6 +113,13 @@ export interface EnvConfig {
   TWILIO_FROM_NUMBER: string;
   SESSION_TIMEOUT_MS: number;
   NEXT_GUEST_COUNTDOWN_MS: number;
+  // D-02 (phase 7): the booth-release fallback deadline — a guest who walks
+  // away without exiting dslrBooth's sharing screen (so no session_end ever
+  // arrives) returns the booth to service after this many ms once the job
+  // completes. Deliberately NOT SESSION_TIMEOUT_MS: that timer stalls a job
+  // that never got acknowledged and charges a retry through handleStall();
+  // this one releases an already-completed job and must never charge one.
+  BOOTH_RELEASE_TIMEOUT_MS: number;
   // D-04: both the minimum sample count and the cold-start duration are
   // configuration, not literals. No literal for either may appear outside
   // config.ts — an estimator that hardcodes its own fallback cannot be tuned
