@@ -248,9 +248,12 @@ describe('Room Screen — slideshow, zero / one / many (D-10, D-12)', () => {
 
     const snapshot = await firstSnapshot(store);
     expect(snapshot.photos).toHaveLength(1);
-    // The single-slide rule is a guard in the page, not an accident of timing:
-    // one photo must not start an interval or draw dots.
-    expect(HTML).toMatch(/photos\.length\s*(>|>=)\s*1/);
+    // The single-slide rule is a guard in the page, not an accident of timing.
+    // Both halves are asserted separately because they are separate mistakes:
+    // one photo must not start a rotation interval...
+    expect(HTML).toMatch(/if\s*\(\s*slides\.length\s*>\s*1\s*\)\s*\{[\s\S]{0,120}setInterval/);
+    // ...and must not draw rotation dots that promise a rotation never coming.
+    expect(HTML).toMatch(/if\s*\(\s*pipCount\s*>\s*1\s*\)/);
   });
 
   it('caps the wire at eventConfig.photoCount however large history grows (T-08-11)', async () => {
