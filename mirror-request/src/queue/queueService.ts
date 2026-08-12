@@ -104,6 +104,30 @@ export class QueueService {
    * this codebase.
    */
   private jobIdMismatchWarnLogged = false;
+  /**
+   * D-14: how many `capture_start` events each in-flight job has produced,
+   * keyed by the job the booth is bound to. Read once, at that job's close,
+   * and deleted in the same breath.
+   *
+   * IN MEMORY RATHER THAN IN THE REGISTRY TABLE, deliberately, and the reason
+   * is that this count is DIAGNOSTIC, not operational: nothing in this service
+   * reads it back, no decision branches on it, and no guest-facing surface
+   * shows it. It exists so an operator can see how many shots a session took —
+   * which is the first time this project can count a retake at all. Persisting
+   * it would add a write on the hottest event in the stream to support a number
+   * no code depends on.
+   *
+   * The cost of that choice is stated rather than hidden: a process that
+   * restarts mid-session loses the count, and the summary line then reports
+   * `captures=unknown`. That is the correct degradation — an explicit unknown
+   * is honest, whereas defaulting to 0 would report "this guest was never
+   * photographed" about a guest who was.
+   *
+   * Bounded by construction: logSessionSummary() deletes the entry it reads,
+   * and every job reaches exactly one of the two close paths, so a long-running
+   * process accumulates nothing.
+   */
+  private captureCounts = new Map<string, number>();
   private pendingPrintExpiryMs: number;
   private noPhotoCloseDelayMs: number;
   private sendCommandCb: ((payload: {
@@ -391,6 +415,18 @@ export class QueueService {
       // deadline and composite path intact.
       queueLogger.info(`Pending-print slot for ${currentJobId} was already open; ${eventType} did not reopen it`);
     }
+
+    // D-14, and this is the CLOSE path, not the release path. It sits after the
+    // registry slot is opened so the line is emitted once the job's close is
+    // fully settled. The double fire cannot reach here twice: the second event
+    // returns at the `!completed` branch above.
+    //
+    // It is deliberately NOT called from sessionEnded(). D-02 separates release
+    // from completion: a release can happen minutes after the job closed, or be
+    // driven by the fallback timer instead, or — on the stray-duplicate path
+    // dslrBooth produces three times in 52 seconds — correspond to no session
+    // at all. A summary attached there would report the wrong session or none.
+    this.logSessionSummary(currentJobId, 'completed', true);
   }
 
   onAgentAck(jobId: string, ok: boolean, errorMessage?: string): void {
@@ -520,6 +556,67 @@ export class QueueService {
     }
   }
 
+  /**
+   * D-14's capture counter. Keyed by the ATTRIBUTED job — the one
+   * booth_state.current_job_id says owns the booth — never by the event's own
+   * jobId, for the same reason onPrintComposite() never trusts the event's id:
+   * the Agent stamps a stale activeJobId on every forwarded event and never
+   * clears it.
+   *
+   * Two guards, and both are needed:
+   *   - no bound job at all means no session is running, so there is nothing to
+   *     attribute the shot to. A capture with the booth idle is a stranger
+   *     pressing start on the booth's own screen (D-04's shape); counting it
+   *     would charge the shot to whoever is dispatched next.
+   *   - a present-but-disagreeing event jobId is the stale-stamp shape, and it
+   *     belongs to some other session. Not counting it undercounts by at most
+   *     the strays; counting it would attribute another guest's shots to this
+   *     one, which is the worse error of the two.
+   */
+  private countCapture(jobId: string | undefined): void {
+    const attributedJobId = this.store.getBoothCurrentJobId();
+    if (attributedJobId === undefined) return;
+    if (jobId !== undefined && jobId !== attributedJobId) return;
+    this.captureCounts.set(attributedJobId, (this.captureCounts.get(attributedJobId) ?? 0) + 1);
+  }
+
+  /**
+   * D-14 / SC-3: ONE line per closed job, and the thing that actually
+   * discharges ROADMAP criterion 3. An operator greps one job id and gets the
+   * whole session, instead of reading fifteen interleaved event lines backwards
+   * in the middle of an event.
+   *
+   * The `key=value` shape and the FIELD ORDER are the contract, not a style —
+   * they are what makes the line greppable and diffable, and OPS-RUNBOOK §5
+   * publishes the grep. Do not reorder the fields, do not reword them into
+   * prose, and do not make any field conditional: an absent field is worse than
+   * an explicit `unknown`, because a grep for it then silently matches nothing.
+   *
+   * `compositeSeen` is passed rather than derived from `outcome`. Today the two
+   * are correlated by construction — the completion path always saw one, the
+   * no-photo path never did — but they answer different questions ("what did
+   * the server decide" versus "what did the booth actually produce"), and a
+   * future third close path is where deriving one from the other would quietly
+   * start lying.
+   *
+   * A template string, never an object: the masking formatters only run on
+   * strings (see logAgentEvent()). No guest name, email or phone is read here.
+   */
+  private logSessionSummary(jobId: string, outcome: 'completed' | 'no_photo', compositeSeen: boolean): void {
+    const job = this.store.getJob(jobId);
+    const acknowledgedAt = job?.acknowledged_at;
+    const durationMs = typeof acknowledgedAt === 'number' ? `${Date.now() - acknowledgedAt}` : 'unknown';
+
+    // Read and delete in the same place, so the map cannot outlive the job.
+    const captures = this.captureCounts.get(jobId);
+    this.captureCounts.delete(jobId);
+
+    queueLogger.info(
+      `SESSION_SUMMARY job=${jobId} outcome=${outcome} captures=${captures ?? 'unknown'}`
+      + ` print_composite=${compositeSeen ? 'yes' : 'no'} duration_ms=${durationMs}`,
+    );
+  }
+
   onAgentEvent(eventType: string, jobId?: string, payload?: Record<string, unknown>): void {
     // FIRST statement, above the branch chain, and that placement is what
     // makes D-12's "one line, unconditionally" true. A line emitted inside
@@ -538,6 +635,8 @@ export class QueueService {
       this.onPrintComposite(eventType, jobId, payload);
     } else if (eventType === 'printing' && payload) {
       this.onPrintComposite(eventType, jobId, payload);
+    } else if (eventType === 'capture_start') {
+      this.countCapture(jobId);
     } else {
       // Deliberately empty. An unrecognised event type — and every named type
       // that reaches here without the payload its handler needs — has ALREADY
@@ -604,6 +703,21 @@ export class QueueService {
       queueLogger.warn(
         `Session for job ${jobId} ended with no print composite ever seen; closed as no_photo (no retry charged, guest not re-called)`,
       );
+      // D-14's second close path. The plan for 07-05 said to emit this from a
+      // no-photo branch inside sessionEnded(); no such branch exists. 07-04
+      // shipped the no-photo close as this swept deadline instead, by human
+      // decision, after the session_end version was measured to close guest B's
+      // live job on guest A's stray duplicate. sessionEnded() is release-only,
+      // and D-14 asks for the CLOSE path — which is here.
+      //
+      // The capture count on this line is what makes Option C's residual
+      // visible. Option C narrows the wrongful-close window to fifteen minutes;
+      // it does not eliminate it. `outcome=no_photo` together with `captures`
+      // greater than zero is a session that photographed a guest and was closed
+      // anyway — the signature of that residual firing in production. Without
+      // the count on this line it would be indistinguishable from a guest who
+      // walked away before the first shot.
+      this.logSessionSummary(jobId, 'no_photo', false);
     }
   }
 
