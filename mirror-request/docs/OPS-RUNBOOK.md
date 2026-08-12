@@ -1294,20 +1294,51 @@ single largest standing risk this phase introduces, and the health probe
 is only a detector for the "broken loudly" half of it — not the "broken
 quietly" half described in "A VALID ticket with zero attendance rows."
 
-### Known gaps, honestly, as of this writing
+### Standing operator action required — a live test registration in the queue
 
-Two gaps recorded during this phase's own cutover (`06-05-SUMMARY.md`),
-carried forward here rather than left to go stale in a plan artefact:
+**`3X818VEJ` (guest name "Phase6 Cutover") is sitting in the booth queue
+right now (`queue_job.status = 'queued'`, `retries = 0`) and cannot be
+cancelled upstream.** It was created deliberately, with a clearly-marked
+synthetic identity (`phase6-cutover-20260812@example.com`, an RFC 2606
+reserved domain; phone `0000000006`), to perform this phase's D-07 proof —
+see "Known gaps" below for what that proof did and did not cover. Research
+established that `ets_web`'s `cancel_order()` requires the order to be
+`PENDING` (`ticketing/models.py:155-259`, `admin.py:794-836`); this order
+is `completed` and the ticket is `valid` and attended, so there is **no
+application path on the `ets_web` side to cancel it.**
+
+**Before a real event, and before an Agent is ever connected against this
+VIEW, an operator must mark this specific job `failed` by hand** using
+§6's documented mechanism ("Marking a job as 'do not re-dispatch'"):
+
+```bash
+sqlite3 ./data/extension-service.sqlite \
+  "UPDATE queue_job SET status = 'failed', stall_reason = 'manual_operator_stop' WHERE id = '3X818VEJ';"
+```
+
+**Take a backup first**, per §6's own instruction. If this is skipped, the
+first time an Agent connects and the booth goes live, this test guest will
+be dispatched for a real photo session with nobody present to run it.
+
+### Known gaps, honestly, as of this writing
 
 - **Production readiness fails today.** `WEBHOOK_HMAC_SECRET`,
   `PROXY_IP_WHITELIST` and `DISPLAY_IP_WHITELIST` are all unset in the
-  live `.env` — §4's readiness check exits non-zero. The service was run
-  during this phase's own verification in non-production mode
-  (`NODE_ENV` unset), not production, and was left stopped afterward. Set
+  live `.env` — §4's readiness check exits non-zero. The service has been
+  run, each time this phase needed live verification, in non-production
+  mode (`NODE_ENV` unset), not production, and left stopped afterward. Set
   all three real values before any production deploy; §3/§4 above already
   document the mechanism.
 - **The Phase 3 Agent-auth cutover (§7) has never been deployed.** No
-  Agent has ever connected against this live VIEW. This is why D-07's
-  full end-to-end proof — landing page through to the booth and
-  slideshow — could not be completed inside this phase: it is a
-  prerequisite for that proof, not a defect this phase introduced.
+  Agent has ever connected against this live VIEW. D-07's proof (plan
+  06-06) confirmed the landing page → `ets_web` → VIEW → poller → **queue**
+  leg end to end, live, with a real registration (`3X818VEJ`) reaching the
+  queue under the guest's own captured name and the top rung of D-04's
+  fallback chain (`personalinfo_name`) — see plan 06-06's SUMMARY for the
+  full hop-by-hop record. The **queue → Agent → booth → slideshow** legs
+  remain unproven: the log line `Skipping dispatch: Agent not connected
+  (job 3X818VEJ stays queued)` fired exactly as §7 documents, and the job
+  stayed queued at zero cost to it (`retries = 0`). This is a prerequisite
+  gap, not a defect this phase introduced — those legs were already
+  verified independently in Phases 2-4 against a connected Agent; they
+  have simply never been exercised together with this phase's live VIEW.
