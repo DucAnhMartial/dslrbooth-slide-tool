@@ -13,7 +13,13 @@ export interface Registration {
 export interface QueueJob {
   id: string;
   registration: Registration;
-  // status holds one of: queued, dispatched, in_progress, completed, failed
+  // status holds one of: queued, dispatched, in_progress, completed, failed,
+  // no_photo. The last is Phase 7 D-09's terminal outcome for a session that
+  // ended with no print composite ever seen — distinct from 'completed' (a
+  // session that produced a photo) and from 'failed' (a job that exhausted
+  // the retry budget). The authoritative list is KNOWN_JOB_STATUSES in
+  // src/status/guestStatus.ts, which is what the guest-facing mapping is
+  // compile-checked against; keep this comment in step with it.
   status: string;
   queued_at: number;
   dispatched_at?: number;
