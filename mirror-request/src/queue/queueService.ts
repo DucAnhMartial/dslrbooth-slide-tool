@@ -123,9 +123,19 @@ export class QueueService {
    * is honest, whereas defaulting to 0 would report "this guest was never
    * photographed" about a guest who was.
    *
-   * Bounded by construction: logSessionSummary() deletes the entry it reads,
-   * and every job reaches exactly one of the two close paths, so a long-running
-   * process accumulates nothing.
+   * Bounded by three exits, not two, and the third is the one that was missing
+   * (WR-01). logSessionSummary() deletes the entry it reads on each of the two
+   * CLOSE paths — `completed` and `no_photo` — but a job that stalls goes
+   * through handleStall() to requeueWithRetry() or failJob() and reaches
+   * neither. Its count used to survive, and because requeueWithRetry()
+   * deliberately preserves the jobId (D-06), the retry attempt then ADDED to
+   * the abandoned attempt's total: a one-shot retry reported captures=3.
+   *
+   * That is diagnostic-only — nothing branches on this number — but it feeds
+   * OPS-RUNBOOK §5's `outcome=no_photo` + `captures>0` alert, so a stale count
+   * turns a real alert into one an operator learns to distrust. handleStall()
+   * now drops the entry on both of its own exits, which is what makes the
+   * "bounded" claim true rather than merely intended.
    */
   private captureCounts = new Map<string, number>();
   private pendingPrintExpiryMs: number;
@@ -260,6 +270,11 @@ export class QueueService {
    * stall_reason strings — never guest-supplied text.
    */
   private handleStall(jobId: string, reason: string): void {
+    // WR-01: the third exit for captureCounts. A stalled job never reaches a
+    // close path, so without this its shot count survives to be added onto by
+    // the retry attempt (requeueWithRetry preserves the jobId, D-06) or leaks
+    // for the life of the process when the job is failed outright.
+    this.captureCounts.delete(jobId);
     const { retries } = this.store.requeueWithRetry(jobId);
     if (retries > this.sessionMaxRetries) {
       this.store.failJob(jobId, reason);
@@ -325,6 +340,41 @@ export class QueueService {
    * absent from the store (getJob returns undefined) is a different defect
    * class and keeps today's behaviour — it is not blocked.
    */
+  /**
+   * CR-01: the event-sourced entry to sessionAcked(), and the only one that
+   * needs a cross-check.
+   *
+   * The two callers are not equally trustworthy and must not share a door.
+   * onAgentAck()'s jobId is the id THIS service just dispatched, so it is
+   * correct by construction and is the call that legitimately establishes a new
+   * binding. A `session_start` event's jobId is Agent-supplied, and
+   * onPrintComposite()'s comment states the reason it cannot be trusted: "the
+   * Agent stamps a stale activeJobId on every forwarded event and never clears
+   * it." D-06 already applies exactly this discipline on the completion anchor;
+   * this brings the acknowledgement anchor into line with it.
+   *
+   * What went wrong without it: the booth rebind below was unconditional, so an
+   * event naming any non-terminal job took the booth from whoever held it. The
+   * displaced guest stayed `in_progress` but unbound — sweep-eligible (D-09),
+   * and with their own composite now failing D-06's check, so they were closed
+   * as `no_photo` despite having been photographed. 07-01's guard blocked only
+   * the terminal-resurrection half of WINDOWS-8; this closes the other half.
+   *
+   * An UNBOUND booth still accepts the event. That is the real first
+   * `session_start` of a dispatched session, and rejecting it would break every
+   * session rather than protect anyone.
+   */
+  private sessionAckedFromEvent(jobId: string): void {
+    const currentJobId = this.store.getBoothCurrentJobId();
+    if (currentJobId !== undefined && jobId !== currentJobId) {
+      queueLogger.warn(
+        `session_start ignored for ${jobId}: booth is bound to ${currentJobId}`,
+      );
+      return;
+    }
+    this.sessionAcked(jobId);
+  }
+
   sessionAcked(jobId: string): void {
     const job = this.store.getJob(jobId);
     // 'no_photo' is terminal too (D-09) and belongs in this guard for the same
@@ -628,7 +678,7 @@ export class QueueService {
     if (eventType === 'session_end') {
       this.sessionEnded();
     } else if (eventType === 'session_start' && jobId) {
-      this.sessionAcked(jobId);
+      this.sessionAckedFromEvent(jobId);
     } else if (eventType === 'file_upload' && jobId && payload) {
       this.onFileUpload(jobId, payload);
     } else if (eventType === 'processing_start' && payload) {
