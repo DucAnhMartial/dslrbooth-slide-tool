@@ -17,6 +17,7 @@ import { renderDisplayPage } from './display/displayPage';
 import { createStatusRouter } from './status/statusRoute';
 import { createCmsIpGate } from './cms/cmsIpGate';
 import { createCmsRouter } from './cms/cmsRouter';
+import { serveUploadedAsset } from './cms/uploadHandler';
 import { clientIp, isWhitelisted } from './security/ipAllowlist';
 
 const config = getConfig();
@@ -28,6 +29,26 @@ const log = labelLogger('server');
 registerLogLevelSignalHandler();
 
 const app = express();
+
+// D-15/T-08-07: the asset-upload body parser, mounted BEFORE the global one
+// below and scoped to exactly one path.
+//
+// Order is the whole mechanism. `jsonWithRawBody()` carries no explicit
+// `limit`, so body-parser's 100kb default applies to every route it handles.
+// A 5MB image arrives base64-encoded inside JSON (~4/3 inflation, plus the
+// envelope), so it must meet a parser with a larger limit FIRST. body-parser
+// marks a request once it has parsed a body and every later parser skips it,
+// which is what makes this work and what leaves the global 100kb default
+// fully in force for every other route — including /on-register, where a
+// generous limit would be a denial-of-service surface rather than a feature.
+//
+// MEASURED, not assumed: test/cms-access-control.test.ts posts a ~4MB body to
+// this path and asserts the response is not a 413. If that case ever goes
+// red, this mount has moved below the global parser.
+app.use(
+  '/cms/api/assets',
+  express.json({ limit: Math.ceil(config.CMS_UPLOAD_MAX_BYTES * (4 / 3)) + 65_536 }),
+);
 app.use(jsonWithRawBody());
 
 const store = getStore();
@@ -70,6 +91,29 @@ app.use(createStatusRouter(store, queue, agentServer, config));
 // laptop and the room's TVs are different audiences on different network
 // paths (RESEARCH Pitfall 2).
 app.use('/cms', createCmsIpGate(config.CMS_IP_WHITELIST), createCmsRouter(store, config));
+
+// D-15: uploaded branding assets. Gated by the UNION of the two allow-lists,
+// not by either alone — the room's TV has to fetch the event's logo and
+// background to render at all, and the operator has to preview what they just
+// uploaded. Both address sets are already trusted for their own surfaces, and
+// neither is a superset of the other.
+//
+// No session check here, deliberately: a TV has no session and cannot get
+// one (D-12 gives screens no identity). The network layer is the whole
+// control on this route, which is why the route can only ever emit one of
+// four image types from one directory — see src/cms/uploadHandler.ts.
+app.get(
+  '/uploads/:filename',
+  (req, res, next) => {
+    const ip = clientIp(req);
+    if (!isWhitelisted(ip, [...config.DISPLAY_IP_WHITELIST, ...config.CMS_IP_WHITELIST])) {
+      log.warn(`Blocked /uploads from non-whitelisted IP: ${ip}`);
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    next();
+  },
+  serveUploadedAsset(config.CMS_UPLOAD_DIR),
+);
 
 const poller = new DBPoller(
   config.DB_POLL_INTERVAL_MS,

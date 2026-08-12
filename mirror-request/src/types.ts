@@ -161,6 +161,13 @@ export interface EnvConfig {
   CMS_USERNAME: string;
   CMS_PASSWORD_HASH: string;
   CMS_SESSION_COOKIE_NAME: string;
+  // D-15: where uploaded branding assets are written and served from — one
+  // directory, deliberately outside the code tree. CMS_UPLOAD_MAX_BYTES caps
+  // a single asset; the route-scoped body parser in index.ts is sized from it
+  // with base64 headroom, so the global 100kb default stays in force for
+  // every other route including /on-register.
+  CMS_UPLOAD_DIR: string;
+  CMS_UPLOAD_MAX_BYTES: number;
   DB_HOST: string;
   DB_PORT: number;
   DB_NAME: string;

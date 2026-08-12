@@ -104,6 +104,13 @@ export function loadConfig(): EnvConfig {
     CMS_USERNAME: get('CMS_USERNAME') ?? '',
     CMS_PASSWORD_HASH: get('CMS_PASSWORD_HASH') ?? '',
     CMS_SESSION_COOKIE_NAME: get('CMS_SESSION_COOKIE_NAME') ?? 'cms_session',
+    // D-15 (phase 8): uploaded assets live OUTSIDE the code directory, so a
+    // written file can never land somewhere the process might later execute
+    // or serve as source. No production fail-fast for these two, matching
+    // VIEW_PROBE_INTERVAL_MS's precedent — both have site-independent
+    // defaults that are correct out of the box.
+    CMS_UPLOAD_DIR: get('CMS_UPLOAD_DIR') ?? './data/uploads',
+    CMS_UPLOAD_MAX_BYTES: toNum('CMS_UPLOAD_MAX_BYTES', 5_242_880),
     DB_HOST: get('DB_HOST') ?? 'localhost',
     // MySQL default port. Was previously 5432 (a Postgres-era leftover) —
     // the poller reads MySQL, not Postgres (RESEARCH.md Pitfall 4).
