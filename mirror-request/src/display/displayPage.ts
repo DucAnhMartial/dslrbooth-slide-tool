@@ -36,6 +36,31 @@ export function renderDisplayPage(): string {
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Photo Booth Queue</title>
   <style>
+    /* The three curated fonts (08-UI-SPEC Open Question 1, human-answered),
+       SELF-HOSTED and served by this service from /assets/fonts. There is no
+       <link> to a font CDN anywhere in this document and there must never be
+       one: a live event cannot depend on venue wifi reaching a third party to
+       render a guest's name (T-08-SC).
+
+       Weights 400 and 700 only — the two the Room Screen type scale uses.
+       Every file is the full-coverage build, not the "vietnamese" subset:
+       that subset carries ONLY the Vietnamese-specific codepoints, so a name
+       built from it would render its ordinary letters in a fallback face and
+       its diacritics in this one, mid-word. Coverage is verified against each
+       file's cmap table in test/display-room-screen.test.ts rather than
+       assumed (RESEARCH A4).
+
+       font-display:swap so text is legible immediately on a cold cache; the
+       screen never shows an invisible-text flash to a room. */
+    @font-face{font-family:"Be Vietnam Pro";font-style:normal;font-weight:400;font-display:swap;
+      src:url("/assets/fonts/be-vietnam-pro-400.woff2") format("woff2")}
+    @font-face{font-family:"Be Vietnam Pro";font-style:normal;font-weight:700;font-display:swap;
+      src:url("/assets/fonts/be-vietnam-pro-700.woff2") format("woff2")}
+    @font-face{font-family:"Lora";font-style:normal;font-weight:400;font-display:swap;
+      src:url("/assets/fonts/lora-400.woff2") format("woff2")}
+    @font-face{font-family:"Lora";font-style:normal;font-weight:700;font-display:swap;
+      src:url("/assets/fonts/lora-700.woff2") format("woff2")}
+
     /* CMS-01: the --event-* custom properties are the ONLY themeable surface.
        Their values here are the shipped defaults (DEFAULT_EVENT_CONFIG in
        localStore.ts, mirrored from 08-UI-SPEC's Room Screen default theme), so
@@ -180,7 +205,17 @@ export function renderDisplayPage(): string {
   // purpose: setProperty() with an attacker- or operator-supplied property
   // NAME would let a future config field write any custom property on the
   // document, including the ones holding the fixed operational colours.
-  var FONTS={'system-ui':'system-ui,-apple-system,"Segoe UI",sans-serif'};
+  /* The three curated font choices, and EXACTLY three. The keys match
+     FONT_CHOICES in the CMS (src/cms/cmsEventPages.ts), and the lookup below
+     falls back to the system stack for any other value — so a stored value
+     from a future schema change, a hand-edited database, or a rolled-back
+     deploy can never leave the screen unstyled. Each stack keeps a system
+     fallback behind the webfont for the same reason. */
+  var FONTS={
+    'system-ui':'system-ui,-apple-system,"Segoe UI",sans-serif',
+    'be-vietnam-pro':'"Be Vietnam Pro",system-ui,-apple-system,sans-serif',
+    'lora':'"Lora",Georgia,"Times New Roman",serif'
+  };
   function applyEventConfig(cfg){
     if(!cfg)return;
     var root=document.documentElement.style;

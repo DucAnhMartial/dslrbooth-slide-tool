@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import path from 'path';
 import { getConfig } from './config';
 import { getStore } from './state/localStore';
 import { labelLogger } from './logging/logger';
@@ -71,6 +72,31 @@ app.get('/display-screen', (req, res, next) => {
   }
   next();
 }, (_req, res) => res.type('html').send(renderDisplayPage()));
+
+// The three curated Room Screen fonts (UI-SPEC Open Question 1, human-answered):
+// self-hosted, weights 400 and 700 only, served from this host so a venue with
+// no internet — or a compromised third-party font CDN — both fail closed
+// (T-08-SC). There is no <link> to fonts.googleapis.com anywhere.
+//
+// This is the ONE place plain static-file middleware is correct, and the
+// contrast with /uploads below is the reason: these four files are immutable,
+// trusted, and committed to this repository at build time. /uploads serves
+// request-supplied bytes, which is exactly why it sniffs magic bytes against a
+// hard-coded allow-list instead of using express.static.
+//
+// Ungated deliberately: a font carries no event data and no guest data, and a
+// TV that could not fetch it would render the whole screen in a fallback face.
+app.use(
+  '/assets/fonts',
+  express.static(path.join(__dirname, '..', 'assets', 'fonts'), {
+    // Immutable by construction — the filename changes when the font does.
+    maxAge: '30d',
+    // No directory listing, and no fallthrough to a directory index.
+    index: false,
+    redirect: false,
+    dotfiles: 'deny',
+  }),
+);
 
 const agentServer = new AgentServer();
 const notifier = createNotificationService();

@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import http from 'http';
+import fs from 'fs';
+import path from 'path';
+import express from 'express';
+import request from 'supertest';
 import { WebSocket } from 'ws';
+import { missingCharacters } from './helpers/woff2Cmap';
 import { renderDisplayPage } from '../src/display/displayPage';
 import { DisplayServer } from '../src/display/displayServer';
 import { LocalStore } from '../src/state/localStore';
@@ -120,6 +125,7 @@ function seedGuest(store: LocalStore, id: string, name: string): void {
 }
 
 const HTML = renderDisplayPage();
+const FONT_DIR = path.join(__dirname, '..', 'assets', 'fonts');
 
 describe('Room Screen — layout and the one shipped layout_style', () => {
   it('declares the stage+sidebar grid and a single-column collapse breakpoint', () => {
@@ -344,6 +350,90 @@ describe('Room Screen — no network dependency at render time (T-08-SC)', () =>
     // No external <link rel=stylesheet> at all: a venue with no internet must
     // render identically to one with it.
     expect(HTML).not.toMatch(/<link[^>]+href=["']https?:/);
+  });
+});
+
+describe('Room Screen — the three self-hosted fonts (UI-SPEC Open Question 1)', () => {
+  const FILES = ['be-vietnam-pro-400', 'be-vietnam-pro-700', 'lora-400', 'lora-700'];
+
+  it('ships four woff2 binaries and an OFL licence for each family', () => {
+    const names = fs.readdirSync(FONT_DIR);
+    expect(names.filter((n) => n.endsWith('.woff2')).sort()).toEqual(
+      FILES.map((f) => `${f}.woff2`).sort(),
+    );
+    // The licence obligation is not optional and not a follow-up: both
+    // families are OFL, which requires the licence to travel with the binary.
+    expect(names).toContain('be-vietnam-pro-OFL.txt');
+    expect(names).toContain('lora-OFL.txt');
+    for (const licence of ['be-vietnam-pro-OFL.txt', 'lora-OFL.txt']) {
+      expect(fs.readFileSync(path.join(FONT_DIR, licence), 'utf8')).toContain(
+        'SIL Open Font License',
+      );
+    }
+  });
+
+  it('every binary is a real WOFF2 well above 1 KB, not a captured error page', () => {
+    for (const file of FILES) {
+      const buf = fs.readFileSync(path.join(FONT_DIR, `${file}.woff2`));
+      // A Google 404 or a captive-portal HTML page would sail past a
+      // file-exists check; the signature is what distinguishes a font from a
+      // web page that happens to have been saved with a .woff2 name.
+      expect(buf.subarray(0, 4).toString('latin1')).toBe('wOF2');
+      expect(buf.length).toBeGreaterThan(1024);
+    }
+  });
+
+  it('covers every Vietnamese letter and tone mark the screen renders (RESEARCH A4)', () => {
+    // Read out of the cmap table, not inferred from the file size — this is
+    // the claim RESEARCH said to verify rather than assume. The string mixes
+    // ordinary Latin with the Vietnamese-only forms (Đ ơ ư ă ê ô) and stacked
+    // tone marks, because the failure mode is a name rendering half in this
+    // face and half in a fallback.
+    const text =
+      'Sẵn sàng chụp ảnh cùng bạn — Nguyễn Thị Hồng Ánh, Đặng Vũ Khánh Ly. Đ ơ ư ă â ê ô ữ ự ỹ';
+    for (const file of FILES) {
+      const buf = fs.readFileSync(path.join(FONT_DIR, `${file}.woff2`));
+      expect({ file, missing: missingCharacters(buf, text) }).toEqual({ file, missing: [] });
+    }
+  });
+
+  it('declares a @font-face per family and weight, and never links a font CDN', () => {
+    const faces = HTML.match(/@font-face/g) ?? [];
+    expect(faces).toHaveLength(4);
+    for (const file of FILES) expect(HTML).toContain(`/assets/fonts/${file}.woff2`);
+    // Weights 400 and 700 only — no third weight sneaks in through a webfont.
+    expect(HTML).not.toMatch(/@font-face[\s\S]{0,200}font-weight:\s*(300|500|600|800)/);
+    expect(HTML).not.toMatch(/<link[^>]*fonts\./);
+  });
+
+  it('offers exactly three selectable families and falls back to the system stack', () => {
+    const applier = HTML.slice(HTML.indexOf('var FONTS='));
+    const map = applier.slice(0, applier.indexOf('function applyEventConfig'));
+    const keys = [...map.matchAll(/'([a-z-]+)':'/g)].map((m) => m[1]);
+    expect(keys.sort()).toEqual(['be-vietnam-pro', 'lora', 'system-ui']);
+    // An unknown stored value — a rolled-back deploy, a hand-edited row —
+    // resolves to the system stack rather than leaving the screen unstyled.
+    expect(HTML).toMatch(/FONTS\[cfg\.fontChoice\]\s*\|\|\s*FONTS\['system-ui'\]/);
+  });
+
+  it('serves each font file over HTTP as font/woff2', async () => {
+    const app = express();
+    app.use('/assets/fonts', express.static(FONT_DIR));
+    for (const file of FILES) {
+      const res = await request(app).get(`/assets/fonts/${file}.woff2`);
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toContain('font/woff2');
+    }
+  });
+
+  it('keeps the whole font payload inside the UI-SPEC size expectation', () => {
+    const total = FILES.reduce(
+      (sum, file) => sum + fs.statSync(path.join(FONT_DIR, `${file}.woff2`)).size,
+      0,
+    );
+    // UI-SPEC estimated "a few hundred KB total" for all three options.
+    expect(total).toBeLessThan(400 * 1024);
+    expect(total).toBeGreaterThan(50 * 1024);
   });
 });
 
