@@ -115,6 +115,18 @@ if either of these is missing or left as a placeholder:
 | `WEBHOOK_HMAC_SECRET` | Must be set to a real, non-empty shared secret matching your sender's secret (see §1) | Startup throws: `WEBHOOK_HMAC_SECRET must be configured in production (D-09)` |
 | `PROXY_IP_WHITELIST` | Must be set to the real reverse-proxy source IP(s), comma-separated. **The default `127.0.0.1` alone is rejected as "not really configured"** in production. | Startup throws: `PROXY_IP_WHITELIST must be configured in production with the real reverse-proxy IPs (D-09)` |
 | `DISPLAY_IP_WHITELIST` | Must be set to the real display-machine address(es), comma-separated. Added in Phase 5 (see §9). Unlike `PROXY_IP_WHITELIST`, there is no loopback default that could be mistaken for "configured" — an empty list is rejected outright. | Startup throws: `DISPLAY_IP_WHITELIST must be configured in production with the real display-machine addresses (D-09, Assumption A4)` |
+| `CMS_IP_WHITELIST` | Must be set to the real operator-laptop address(es), comma-separated. Added in Phase 8 (see §12). **It is NOT `DISPLAY_IP_WHITELIST`** — see the warning below the table. Empty is rejected outright, same as the display list. | Startup throws: `CMS_IP_WHITELIST must be configured in production with the real operator-laptop addresses (D-13) — it is NOT DISPLAY_IP_WHITELIST` |
+| `CMS_USERNAME` | Must be set and must not still read `replace-with-cms-username`. Required in **every** environment, not only production — the CMS has exactly one account (D-14) and there is no fallback login. | Startup throws: `CMS_USERNAME must be configured (not placeholder)` |
+| `CMS_PASSWORD_HASH` | Must be set to a salted scrypt digest in `salt:hash` hex form and must not still read `replace-with-cms-password-hash`. Required in every environment. **Never a plaintext password** — mint it with `npm run cms:hash-password -- 'the-password'` (§12). | Startup throws: `CMS_PASSWORD_HASH must be configured (not placeholder)` |
+
+⚠ **`CMS_IP_WHITELIST` and `DISPLAY_IP_WHITELIST` must not be set to the same
+value.** They describe two different audiences on two different network paths:
+`DISPLAY_IP_WHITELIST` holds the room's TVs, `CMS_IP_WHITELIST` holds the
+operator's laptop. Copying one into the other fails in one of two directions
+and both are bad — either the operator is locked out of the console mid-event,
+or the console becomes reachable from every address that can reach a TV, which
+is the whole of D-13's network layer given away in one paste. The service
+cannot detect this for you: two identical lists are a legal configuration.
 
 This is a deliberate, hard fail-fast: there is no configuration flag to
 disable webhook authentication in production. If you see one of these
@@ -175,6 +187,16 @@ None of these four belongs in the fail-fast table above: all four have
 site-independent defaults that are correct out of the box, and — per
 D-09's own reasoning for `VIEW_PROBE_INTERVAL_MS` — no supported way
 exists to switch off the only signal that ingestion is dead.
+
+CMS variables added in Phase 8 that are optional and have working defaults
+(the two that are **not** optional, `CMS_USERNAME` and `CMS_PASSWORD_HASH`,
+are in the fail-fast table above; see §12 for the console these govern):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CMS_SESSION_COOKIE_NAME` | `cms_session` | The name of the operator's session cookie. Override only if it collides with something else served from the same host. The cookie carries `HttpOnly` and `SameSite=Lax` and deliberately **no `Secure` flag** — see §12's security posture, which explains why and what that costs. |
+| `CMS_UPLOAD_DIR` | `./data/uploads` | Where uploaded logo/background/QR images are written. Must stay **outside** the code directory (D-15): a written file must never land somewhere the process could later execute or serve as source. The directory is created if missing. Files here are served only through `GET /uploads/:filename`, which types them from their own bytes and can emit only PNG, JPEG, GIF or WebP. |
+| `CMS_UPLOAD_MAX_BYTES` | `5242880` (5 MiB) | The cap on one decoded image. Raising it also raises the JSON body limit on `POST /cms/api/assets`, which is derived from this value (`ceil(value × 4/3) + 65536`, for base64 inflation plus envelope) — the global 100 kb body limit stays in force on every other route, including `/on-register`. Lowering it does not shrink files already on disk. |
 
 Session lifecycle variables added in Phase 7 (optional, working default —
 see §5 for the two anchors this governs):
@@ -1647,3 +1669,398 @@ reload documented above.
 
 See §3's environment-variable table for `LOG_LEVEL`'s own row (the default
 it starts at, `info`, is unchanged by this section).
+
+## 12. The CMS operator console, and the `web-slide` cutover (Phase 8)
+
+Phase 8 did two things that change what an operator does day to day. It added
+an operator console at `/cms` — a single-account, IP-gated web UI for event
+branding, photo history and the booth Agent's four safe settings. And it moved
+the room screen **into this service**, at `GET /display-screen`, so that
+`web-slide` is retired (D-05).
+
+This section covers running the console, performing that cutover, and reading
+the log lines both produce.
+
+### What moved, and what did not
+
+**The room screen moved.** It is now a route on this service, fed by the same
+`WS /display` feed §9 already documents, themed by whichever event is active.
+One process, one deploy, one log, one database holding config, photos and the
+queue — no second source of truth to drift.
+
+**`NOTIFY_WEBHOOK_URL` did not move, and was not removed** (D-04). It still
+does exactly what §8 says it does: it delivers the guest their own photo, and
+it remains available for third-party integration. What changed is that it no
+longer feeds the room screen — that used to be the same channel doing both
+jobs, and it is now two. If you are reading §8 and this section together: §8 is
+still correct and still current. Turning `NOTIFY_WEBHOOK_URL` off to "stop
+feeding the screen" would break NOT-01/NOT-02 and stop guests receiving their
+photos, while changing nothing about the screen.
+
+**The queue and the booth state machine did not move and were not touched.**
+Phase 8 is additive to Phases 1-7 by decision (D-01), and that is measured
+rather than asserted: `test/phase8-cutover-readiness.test.ts` reads the
+`queue_job` and `booth_state` definitions back out of SQLite and compares them
+character for character with their pre-Phase-8 form. §5 and §6 are unchanged.
+
+### Logging in
+
+The console is at `http://<server>:<PORT>/cms` — the same `PORT` this service
+already serves on (§3, default `3002`), not a second port and not a second
+process.
+
+Two independent layers stand in front of it (D-13), in this order:
+
+1. **The IP allow-list.** `CMS_IP_WHITELIST` (§3) is checked first, before any
+   session logic runs at all. A non-allow-listed address gets the same generic
+   `{"error":"Forbidden"}` 403 that every other refused surface in this service
+   returns — no login form, no hint that a CMS exists here.
+2. **The password.** One account: `CMS_USERNAME` and `CMS_PASSWORD_HASH` (§3).
+   There is no user table, no account CRUD, no password-reset flow and **no
+   automatic inactivity timeout** — being logged out mid-event is worse than a
+   lingering session (D-14). Log out with the button; that is the only thing
+   that ends a session, other than restarting the service.
+
+A wrong password and an unknown username produce byte-identical responses, on
+purpose: the console never tells a caller whether an account name was right.
+
+**If you cannot log in, check the IP layer first.** A 403 is the network layer
+refusing you and your password is irrelevant to it; a 401 with the Vietnamese
+error copy means you reached the login and the credentials did not match.
+
+### Rotating the CMS password
+
+The service is never given a plaintext password. Mint the digest **offline, on
+your own machine**, and paste the result into `.env`:
+
+```bash
+cd mirror-request && npm run cms:hash-password -- 'the-password-you-chose'
+```
+
+It prints one line, `CMS_PASSWORD_HASH=<salt>:<hash>`. Replace the value in
+`.env` and restart the service.
+
+**Running it twice on the same password prints different output. That is the
+fresh 16-byte salt, not an error** — it is what stops two installations that
+happen to share a password from sharing a digest. Nothing about this helper
+touches the service: it does not import the config, the logger or the app, so
+the plaintext never enters a process that has log transports attached.
+
+### Creating and configuring an event
+
+`GET /cms/events` lists the event library; `GET /cms/events/new` creates one.
+An event is a saved set of branding: name, logo, background, QR image and CTA
+text, five colours, one of three fonts, the idle heading and sub-heading, and
+how many photos the slideshow holds and for how long.
+
+Three things are worth knowing before an operator is surprised by them:
+
+- **Every cap and range is enforced on the server, not just in the form.** Name
+  60 characters, idle heading 80, idle sub 120, QR CTA 60; photo count 1-50;
+  photo duration 2000-30000 ms. An out-of-range number is **refused, never
+  silently clamped** — a clamp would leave the form and the wall disagreeing,
+  and the operator would find out from the wall.
+- **A save with one bad field writes nothing at all.** The whole patch is
+  refused rather than partially applied, for the same reason.
+- **Colours accept six-digit hex and nothing else.** `red` and `rgb(0,0,0)` are
+  valid CSS and are refused anyway — these values are written into CSS custom
+  properties on every TV in the room.
+
+Uploads go through `POST /cms/api/assets` (the form does this for you). The
+server mints the filename itself and types the file from its own first bytes;
+nothing the browser claims about the name or the content type is read. Only
+PNG, JPEG, GIF and WebP can be stored or served. An SVG will be refused, and
+that is deliberate rather than an oversight.
+
+**The Screen URL is one fixed path for every event.** The event configuration
+page shows it as a copyable string; it is `/display-screen`, identical for
+every event and every TV. Screens carry no identity (D-12) — activating a
+different event in the console is what changes what that one URL renders. If
+you ever find yourself editing a URL on a TV to change customer, something has
+gone wrong: that is exactly the chore this phase exists to remove.
+
+### Switching the active event while guests are queued (D-02)
+
+Exactly one event is active at a time. Activating a second one **replaces** the
+pointer rather than adding to it.
+
+If guests are still queued when you switch, the console refuses the first
+attempt with a `409` and tells you how many are waiting, then lets you confirm
+and proceed. **This is a warning, not a block, and the distinction is
+deliberate.** The refusal is conditional on you not having confirmed — never on
+the queue being non-empty. Blocking was considered and rejected on measured
+evidence: a real ticket (`3X818VEJ`) sat queued with nobody left to shoot it
+and had to be fixed by hand in the database. An operator who genuinely needs to
+switch mid-queue must be able to.
+
+The confirmation is checked **on the server**, not in a browser dialog, so a
+second tab or a replayed request meets it too.
+
+**What switching does not do:** it does not touch the queue. Queued guests stay
+queued, in order, with their retry counts unchanged; the booth state machine is
+not consulted and not modified. What changes is the branding on the wall and
+which event new photos are recorded against.
+
+### Photo history, and the only way anything is ever deleted (D-11)
+
+`GET /cms/photos` shows the durable per-event photo history — 50 rows a page,
+newest first. Rows are written when a print upload resolves (§8's attribution
+point, unchanged), and they store the photo's **URL**, not the photo: no second
+copy of a real guest's photograph exists on this server to secure or to lose.
+
+A thumbnail whose far side has dropped the file renders a neutral placeholder
+tile with a warning icon and a visible label — never the browser's broken-image
+glyph, and **the row is never removed**. A far side that deleted a file has not
+un-photographed the guest.
+
+**There is no expiry, no row cap and no scheduled cleanup anywhere in this
+surface.** Photo history is deleted by exactly one action:
+`POST /cms/api/photos/clear`, reached from `GET /cms/photos/clear`, which
+requires you to retype **the event's own name** and checks it on the server. A
+generic "yes" would confirm that you meant to delete something; the name
+confirms you meant to delete *this* one.
+
+Deleting an event (`POST /cms/api/events/:id/delete`, also typed-confirmed)
+removes that event's photo history with it, in one transaction.
+
+Those two are the whole deletion story for this service. Nothing else in the
+codebase removes an `event_photo` row, and a future change that added a
+retention sweep would fail the test suite rather than quietly deleting a
+wedding.
+
+### Agent configuration, and one step back (D-16, D-18)
+
+`GET /cms/agent` configures the booth Agent remotely. **Four fields are
+editable** — `logLevel`, `autoOpenDisplay`, `dslrBoothApiPort`,
+`dslrBoothPassword` — and **four are shown read-only**:
+`extensionServiceWsUrl`, `extensionServiceWsToken`, `triggerServerPort` and
+`logDir`. The read-only four are not a UI convenience: the server refuses a
+save carrying any of them, and the Agent ignores them on receipt. They are the
+bootstrap credentials that create the very WebSocket a change would travel
+over — a wrong value means the Agent can never reconnect and **someone must
+physically go to the booth**. To change one of those four, edit the Agent's own
+`.env` on the booth machine and restart it.
+
+Configuration travels by **pull, not push** (D-17). The Agent asks for its
+configuration when it connects; when you save in the console the service sends
+a bare `reload_config` and the Agent asks again. The Agent applies values in
+memory and never rewrites its own `.env`.
+
+**If the Agent is offline when you save, the save still succeeds** and the
+console says so. The values are stored here and the Agent will pull them on its
+next connect. Nothing is lost and nothing needs re-doing.
+
+**"It broke right after I saved."** That is what the restore button is for.
+`POST /cms/api/agent/restore` puts back the configuration that was in place
+before your last save, in one step, and sends the Agent a reload. Two things
+about it that will otherwise surprise you at 8pm:
+
+- **It is one step back, not an undo history.** Restoring clears the stored
+  previous configuration as it applies it. A second press is refused with a
+  `409` and the message `Không có cấu hình trước đó để khôi phục.` — it does
+  not hand you back the configuration you just rejected. The same button doing
+  the opposite thing on a second press, with nothing to indicate it had, was
+  the failure this avoids.
+- **It restores the Agent's configuration only.** It has nothing to do with
+  events, branding or photo history.
+
+### The cutover: retiring `web-slide` (D-05, D-06)
+
+This is a one-way operational change. Read all of it before starting.
+
+**There is no redirect shim and therefore no fast rollback.** A shim was
+offered during planning and declined (D-06). Nothing will answer on
+`web-slide`'s old port after you stop it, and nothing will forward a TV that is
+still pointed there. If the new screen misbehaves after the cutover, the
+recovery is the same walk you are about to do, in reverse, TV by TV.
+
+**Do it between events, never during one.** This is the same both-or-neither
+honesty §7 applies to the Agent contract: the cost of getting it wrong is paid
+in front of guests.
+
+Before you start, note what has already been checked automatically. The
+readiness probe proves, against a temporary database, that the room screen
+renders on an empty database, that both CMS layers refuse and admit correctly,
+that an event's configuration reaches an already-connected screen with no
+reload, that an uploaded asset serves with its sniffed type, that a capture
+becomes durable history and a hero moment, and that the Agent's configuration
+pull answers from the allow-list only:
+
+```bash
+cd mirror-request && npx vitest run test/phase8-cutover-readiness.test.ts
+```
+
+What it cannot prove is anything physical: whether the screen is legible on a
+real TV at real viewing distance, and how `web-slide` is currently kept alive.
+
+**1. Identify how `web-slide` is supervised.** This is the step the repository
+cannot answer for you, and it is the one that decides whether the cutover
+holds. Neither `web-slide/` nor this repository contains a deployed process
+manager configuration — no PM2 ecosystem file, no installed systemd unit, no
+compose file. `web-slide/README.md` does carry a **template** systemd unit
+(`webhook-slideshow.service`, `WorkingDirectory=/opt/webhook-slideshow`,
+`Restart=always`), which is the best lead available and is **not** evidence
+that it is what is actually running. Check, in roughly this order:
+
+```bash
+systemctl status webhook-slideshow      # the README's template name
+pm2 list                                # if pm2 is installed
+ss -lntp | grep 3001                    # what is actually holding the port
+```
+
+`Restart=always` in that template is the trap: **killing the process without
+stopping its supervisor gets you a fresh one within seconds**, still serving
+stale content on the old port, and the cutover will look like it worked until
+somebody opens the old URL.
+
+**2. Stop it, and stop its supervision.** For systemd that is `stop` **and**
+`disable`; for pm2 it is `stop` **and** `delete` plus rewriting the saved
+process list. Then confirm the old URL no longer answers at all:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' http://<server>:3001/   # expect a connection failure, not a page
+```
+
+**3. Confirm this service is serving the screen.** From an allow-listed
+address, before you touch any TV:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' http://<server>:<PORT>/display-screen   # expect 200
+```
+
+A `403` here means the requesting address is not in `DISPLAY_IP_WHITELIST`
+(§3, §9) — fix that before walking anywhere, because every TV will get the same
+403.
+
+**4. Re-point each TV.** The same URL for every screen:
+`http://<server>:<PORT>/display-screen`. The console shows it as a copyable
+string. Confirm each TV renders the idle standby screen before moving to the
+next one.
+
+**5. Judge the screen at real viewing distance**, standing where guests stand.
+Is the idle heading legible from several metres? Do Vietnamese diacritics
+render correctly at hero size? Does "nobody has been photographed yet" clearly
+read as a designed state rather than as a broken screen? No automated check
+substitutes for this one.
+
+**Ports, for the avoidance of doubt:** `web-slide` served the slideshow on
+`3001` and this service serves on `PORT` (§3, default `3002`). They are
+different ports on the same host, so both can be running at once during the
+cutover — which is exactly why step 2 must actually stop the old one rather
+than rely on a port conflict to do it.
+
+**`web-slide`'s source stays in git** (D-08). It is not deleted, its `README.md`
+now says it is retired and names the replacement route, and its `index.html`
+remains useful as the layout reference the new screen came from. Nothing
+deploys it.
+
+### What the operator will see in the logs
+
+Every line below is quoted verbatim from the source as it now stands, and each
+was grep-verified against `src/` before this section was written.
+
+**The CMS gate and login:**
+
+| Log line | Level | Meaning |
+|---|---|---|
+| `Blocked /cms from non-whitelisted IP: <ip>` | warn | Layer one refused an address before any session logic ran. If an operator reports "the console is down", this line with their address is the answer. |
+| `Blocked /uploads from non-whitelisted IP: <ip>` | warn | An address outside the **union** of the display and CMS allow-lists asked for an uploaded asset. A TV logging this means its address is in neither list, and its logo and background will not render. |
+| `Failed CMS login attempt from <ip>` | warn | Wrong password **or** unknown username — the line does not distinguish them, matching the response, which does not either. |
+| `CMS login succeeded from <ip>` | info | A session was issued. |
+
+**Uploads** (all four refusals leave the upload directory untouched):
+
+| Log line | Level | Meaning |
+|---|---|---|
+| `Refused an oversize CMS asset upload before decoding it` | warn | The encoded body exceeded the bound derived from `CMS_UPLOAD_MAX_BYTES` and was rejected without allocating its decoded form. |
+| `Refused a CMS asset upload larger than the configured cap` | warn | The decoded image exceeded `CMS_UPLOAD_MAX_BYTES` (§3). |
+| `Refused a CMS asset upload whose content is not one of the four allowed image types` | warn | The bytes are not PNG, JPEG, GIF or WebP. An SVG or an HTML file renamed `.png` lands here — the extension was never consulted. |
+| `Failed to store a validated CMS asset upload` | warn | The image passed every check and the write itself failed: a full disk or a bad `CMS_UPLOAD_DIR`. This is the one in this group that is an operator problem rather than a caller problem. |
+| `Stored CMS asset <name> (<type>, <n> bytes)` | info | A successful upload. The name is the server-minted one. |
+| `Refused upload request for a non-file name: <id>` | warn | A request for a stored asset whose name is not a plain filename. |
+| `Refused upload request resolving outside the upload directory: <id>` | warn | A path-traversal-shaped request for a stored asset. |
+| `Refused upload request for a non-image payload: <id>` | warn | The file on disk is not one of the four types. Serving re-derives the type from the bytes every time, so a file that changed underneath the service is refused rather than served. |
+
+**Events:**
+
+| Log line | Level | Meaning |
+|---|---|---|
+| `Created event <id> ("<name>")` | info | A new event was added to the library. |
+| `Saved configuration for event <id>` | info | An event's branding was updated. Field values are not logged. |
+| `Active-event switch to <id> needs confirmation — <n> guests still waiting` | info | The first, unconfirmed attempt at a mid-queue switch (D-02). Not an error; the operator was asked. |
+| `Activated event <id> with <n> guests still waiting` | info | The switch happened. `<n>` is `0` for an ordinary between-events switch, which is what makes a non-zero value worth noticing here. |
+| `Deleted event <id> and <n> photo history rows` | info | An event was deleted. When it was the active one, the line continues ` — it was the active event, screens return to the shipped defaults`, which is also the explanation for every TV in the room changing appearance at that moment. |
+| `Cleared photo history for event <id> — <n> rows deleted by a confirmed operator action` | info | The **only** operator-invoked deletion of photo history. This is the audit trail for an irreversible act; it deliberately carries no guest name and not even the event's name, which is operator-authored free text that may carry a couple's names. |
+
+**Photo history written from a capture** (both from the queue, both `warn`):
+
+| Log line | Level | Meaning |
+|---|---|---|
+| `Print upload for <jobId> resolved but no active event — photo not recorded to history` | warn | A real capture completed and the guest was still sent their photo, but no event was active so there was nowhere to file it. **Seeing this during an event means nobody activated one** — the room screen will also be showing shipped defaults rather than the customer's branding. |
+| `Print upload for <jobId> could not be recorded to photo history: <reason>` | warn | The history write itself failed — a locked database, a full disk. Delivery to the guest is deliberately **not** on this path and proceeded anyway; history is the less important of the two and fails alone. |
+
+**Agent configuration:**
+
+| Log line | Level | Meaning |
+|---|---|---|
+| `Refused Agent configuration save carrying non-editable field "<key>"` | warn | A save named one of the four read-only fields. The whole save was refused and the stored row is untouched. From the console's own form this cannot happen; seeing it means something else posted to the endpoint. |
+| `Saved Agent configuration (<field names>)` | info | Field **names** only — `dslrBoothPassword`'s value is treated exactly like the Agent bearer token and never appears in a log line. The line continues either ` and asked the Agent to reload` or ` — Agent offline, it will pull on reconnect`. |
+| `Restored the previous Agent configuration` | info | D-18's one step back, with the same two continuations as above. |
+| `Dropped non-editable field "<key>" from the stored Agent configuration` | warn | A stored row contained a field outside the allow-list and it was projected away before being sent. Names only, never values. |
+| `Seeded agent_config with the shipped defaults on first Agent request` | info | The first time an Agent ever asks on a fresh database. Expected exactly once per installation. |
+| `Agent WS: config_request received but no configuration source is registered` | warn | An Agent asked and the service had nothing wired to answer with, so it sent nothing rather than sending an empty configuration the Agent would dutifully apply. This is a wiring fault in the service, not a booth fault. |
+
+Note that `Blocked /display-screen from non-whitelisted IP: <ip>` is a Phase 5
+line and is documented in §9 with the rest of the display surfaces; it is
+listed here only because the room screen now lives on this service and an
+operator debugging a blank TV after the cutover will be looking for it.
+
+### Security posture, stated honestly
+
+**No TLS terminates anywhere in this deployment.** Nothing in this service sets
+up HTTPS, and the known deployment story is a Node process on a venue LAN. The
+consequence is recorded rather than glossed:
+
+- **The session cookie carries `HttpOnly` and `SameSite=Lax` and deliberately
+  no `Secure` flag.** Setting `Secure` on a deployment with no TLS would mean
+  the browser never sends the cookie back over plain HTTP and the operator can
+  never log in — a "secure-by-default" setting that produces a total,
+  confusing outage. **If TLS is ever put in front of this service, add the flag
+  at that time.** This is a carried-forward follow-up, not a closed question.
+- **The residual exposure is real and is bounded, not eliminated.** The cookie
+  and everything else on this connection cross the LAN in the clear, readable
+  by anything that can passively observe that segment. `CMS_IP_WHITELIST`
+  bounds *who can reach the console at all* to a short list of already-trusted
+  addresses; it does nothing about observation. The accepted risk is other
+  devices already on the trusted LAN segment — not the open internet.
+
+**There is no rate limiting on CMS login, and that is a decision rather than an
+omission.** `GET /status/:jobId` is rate-limited (§10) because it is reachable
+by guests; the CMS is not reachable at all from an address outside
+`CMS_IP_WHITELIST`, so the network layer is doing the work a login limiter
+would do. **If that IP layer is ever relaxed — an operator working from a
+phone tether, a VPN range added, an "allow everything" list in a hurry — login
+rate limiting stops being optional.** Treat widening `CMS_IP_WHITELIST` as the
+trigger to revisit this, not as a routine configuration change.
+
+Two things that are *not* accepted risks, recorded so nobody re-derives them as
+gaps: the password is stored only as a salted scrypt digest and no plaintext
+password key exists anywhere in the configuration, and uploaded assets are
+typed from their own bytes with server-minted filenames, so neither the file
+name nor the declared content type from a request participates in any code
+path.
+
+### Route inventory (Phase 8)
+
+| Route | Gate | Purpose |
+|---|---|---|
+| `GET /display-screen` | `DISPLAY_IP_WHITELIST` | The room screen. One URL for every TV. |
+| `WS /display` | `DISPLAY_IP_WHITELIST` | The feed that drives it (§9). |
+| `GET /assets/fonts/*` | none | The three self-hosted screen fonts. Deliberately ungated: a font carries no event or guest data, and a TV that could not fetch one would render everything in a fallback face. |
+| `GET /uploads/:filename` | union of the display and CMS allow-lists | Uploaded branding assets, typed from their bytes. No session — a TV has no session and cannot get one. |
+| `GET`/`POST /cms/login`, `POST /cms/logout` | CMS IP allow-list | Session lifecycle. |
+| `GET /cms/`, `GET /cms/events`, `GET /cms/events/new`, `GET /cms/events/:id` | IP + session | The event library and its forms. |
+| `POST /cms/api/events`, `POST /cms/api/events/:id`, `POST /cms/api/events/:id/activate`, `POST /cms/api/events/:id/delete` | IP + session | Event mutations. Activate and delete are confirmed server-side. |
+| `POST /cms/api/assets` | IP + session | Image upload. |
+| `GET /cms/agent`, `POST /cms/api/agent`, `POST /cms/api/agent/restore`, `POST /cms/api/agent/test` | IP + session | Agent configuration, one step back, and a liveness read. |
+| `GET /cms/photos`, `GET /cms/photos/clear`, `POST /cms/api/photos/clear` | IP + session | Photo history and its one deletion path. |
