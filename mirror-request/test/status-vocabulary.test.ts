@@ -23,7 +23,7 @@ import {
 
 const ANNOUNCED_VALUES = [false, true] as const;
 
-// The expected guest word for every one of the 30 combinations, written out as
+// The expected guest word for every one of the 36 combinations, written out as
 // literal data rather than recomputed from a rule. A rule here would be a
 // second implementation of the mapping, and two copies of a rule agree with
 // each other even when both are wrong.
@@ -73,6 +73,20 @@ const EXPECTED: Record<string, GuestStatus> = {
   'failed|sent|true': 'see_staff',
   'failed|pending|true': 'see_staff',
   'failed|failed|true': 'see_staff',
+
+  // Phase 7 D-09/D-10: the session ended with no print composite ever seen.
+  // It resolves to the SAME guest word as 'failed' on all six rows, because
+  // from the guest's side the required action is identical — go find a person.
+  // The operator-side distinction is carried by the internal status itself,
+  // not by a seventh guest word; the guest's photo state is carried by the
+  // separate photoDelivery field, which is why all three photo values appear
+  // here and none of them changes the answer.
+  'no_photo|sent|false': 'see_staff',
+  'no_photo|pending|false': 'see_staff',
+  'no_photo|failed|false': 'see_staff',
+  'no_photo|sent|true': 'see_staff',
+  'no_photo|pending|true': 'see_staff',
+  'no_photo|failed|true': 'see_staff',
 };
 
 interface Combination {
@@ -101,26 +115,27 @@ function crossProduct(): Combination[] {
 
 describe('D-11/D-12 — the guest-facing vocabulary is exhaustive and closed', () => {
   describe('the full cross-product of internal states', () => {
-    it('is exactly 5 job statuses x 3 photo states x 2 announced values = 30 combinations', () => {
+    it('is exactly 6 job statuses x 3 photo states x 2 announced values = 36 combinations', () => {
       const combos = crossProduct();
 
       // Asserted against the product of the implementation's own array lengths
-      // AND against the literal 30 measured at plan time. The first catches a
-      // future narrowing of either array; the second catches both arrays being
-      // changed together in a way that quietly shrinks coverage.
-      expect(KNOWN_JOB_STATUSES.length).toBe(5);
+      // AND against the literal 36 measured when D-09's sixth status landed.
+      // The first catches a future narrowing of either array; the second
+      // catches both arrays being changed together in a way that quietly
+      // shrinks coverage.
+      expect(KNOWN_JOB_STATUSES.length).toBe(6);
       expect(PHOTO_DELIVERY_STATES.length).toBe(3);
       expect(combos).toHaveLength(
         KNOWN_JOB_STATUSES.length * PHOTO_DELIVERY_STATES.length * ANNOUNCED_VALUES.length,
       );
-      expect(combos).toHaveLength(30);
+      expect(combos).toHaveLength(36);
 
       // Every combination is distinct — a duplicated key would let the count
       // be right while a real combination went untested.
-      expect(new Set(combos.map((c) => c.key)).size).toBe(30);
+      expect(new Set(combos.map((c) => c.key)).size).toBe(36);
     });
 
-    it('resolves every one of the 30 combinations to one of the six guest words', () => {
+    it('resolves every one of the 36 combinations to one of the six guest words', () => {
       const combos = crossProduct();
       let iterations = 0;
 
@@ -138,10 +153,10 @@ describe('D-11/D-12 — the guest-facing vocabulary is exhaustive and closed', (
 
       // The iteration counts itself: a future narrowing of either exported
       // array cannot silently shrink this test's coverage to a passing subset.
-      expect(iterations).toBe(30);
+      expect(iterations).toBe(36);
     });
 
-    it('resolves every one of the 30 combinations to the exact expected word', () => {
+    it('resolves every one of the 36 combinations to the exact expected word', () => {
       const combos = crossProduct();
 
       // The literal table and the generated cross-product must cover exactly
@@ -160,7 +175,7 @@ describe('D-11/D-12 — the guest-facing vocabulary is exhaustive and closed', (
       }
     });
 
-    it('never returns an internal operator word for any of the 30 combinations', () => {
+    it('never returns an internal operator word for any of the 36 combinations', () => {
       const combos = crossProduct();
 
       for (const combo of combos) {
@@ -233,12 +248,13 @@ describe('D-11/D-12 — the guest-facing vocabulary is exhaustive and closed', (
       ]);
     });
 
-    it('lists the five real internal job statuses and the three photo-delivery states', () => {
+    it('lists the six real internal job statuses and the three photo-delivery states', () => {
       expect([...KNOWN_JOB_STATUSES].sort()).toEqual([
         'completed',
         'dispatched',
         'failed',
         'in_progress',
+        'no_photo',
         'queued',
       ]);
       expect([...PHOTO_DELIVERY_STATES].sort()).toEqual(['failed', 'pending', 'sent']);
@@ -279,7 +295,7 @@ describe('D-11/D-12 — the guest-facing vocabulary is exhaustive and closed', (
       expect(errorSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('does not log for any of the 30 mapped combinations', () => {
+    it('does not log for any of the 36 mapped combinations', () => {
       for (const combo of crossProduct()) {
         toGuestStatus({
           jobStatus: combo.jobStatus,
@@ -315,6 +331,59 @@ describe('D-11/D-12 — the guest-facing vocabulary is exhaustive and closed', (
 
       for (const input of inputs) {
         expect(PHOTO_DELIVERY_STATES as readonly string[]).toContain(toPhotoDelivery(input));
+      }
+    });
+  });
+
+  describe('toPhotoDelivery — the optional jobStatus argument (D-09/D-10/D-11)', () => {
+    it('reports a no_photo session with no notification record as a failed photo', () => {
+      // The honest answer for a session that produced nothing: there is no
+      // photo coming, so 'pending' would be a promise the system cannot keep.
+      expect(toPhotoDelivery(undefined, 'no_photo')).toBe('failed');
+    });
+
+    it('lets a genuinely delivered photo outrank the no_photo outcome (D-11)', () => {
+      // D-11: a print that arrives after the job was closed as no-photo is
+      // still delivered. Once it HAS been delivered the guest's photo state
+      // must read 'sent' — the outcome word describes the session, not the
+      // photo's eventual fate. This is why the delivered check runs first.
+      expect(toPhotoDelivery('delivered', 'no_photo')).toBe('sent');
+    });
+
+    it('reports a terminally failed notification as failed regardless of the outcome word', () => {
+      expect(toPhotoDelivery('failed', 'no_photo')).toBe('failed');
+      expect(toPhotoDelivery('failed', 'completed')).toBe('failed');
+    });
+
+    it('leaves every non-no_photo job status to the notification status alone', () => {
+      // The second argument must change the answer for exactly one job status.
+      // Any other status keeps the Phase 4 behaviour byte-for-byte.
+      for (const jobStatus of KNOWN_JOB_STATUSES) {
+        if (jobStatus === 'no_photo') continue;
+
+        expect(toPhotoDelivery(undefined, jobStatus), `jobStatus ${jobStatus}`).toBe('pending');
+        expect(toPhotoDelivery('sending', jobStatus), `jobStatus ${jobStatus}`).toBe('pending');
+        expect(toPhotoDelivery('delivered', jobStatus), `jobStatus ${jobStatus}`).toBe('sent');
+      }
+    });
+
+    it('keeps every single-argument call site meaning exactly what it meant before', () => {
+      // The parameter is optional precisely so that the existing call sites and
+      // their tests keep compiling AND keep their result. Omitting it must be
+      // indistinguishable from Phase 4's one-argument function.
+      expect(toPhotoDelivery('delivered')).toBe('sent');
+      expect(toPhotoDelivery('failed')).toBe('failed');
+      expect(toPhotoDelivery('pending')).toBe('pending');
+      expect(toPhotoDelivery(undefined)).toBe('pending');
+      expect(toPhotoDelivery(undefined, undefined)).toBe('pending');
+    });
+
+    it('only ever returns a member of PHOTO_DELIVERY_STATES on the two-argument path', () => {
+      for (const notificationStatus of ['delivered', 'failed', 'sending', '', undefined]) {
+        for (const jobStatus of [...KNOWN_JOB_STATUSES, 'some_future_status', '', undefined]) {
+          expect(PHOTO_DELIVERY_STATES as readonly string[])
+            .toContain(toPhotoDelivery(notificationStatus, jobStatus));
+        }
       }
     });
   });
