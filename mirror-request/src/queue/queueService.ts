@@ -15,6 +15,12 @@ export class QueueService {
   private announcementTimer: NodeJS.Timeout | null = null;
   private announcingJobId: string | null = null;
   private announcementEndsAt: number | null = null;
+  /**
+   * Job ids for which a `print` upload has been accepted, so `sessionEnded()`
+   * can warn about a session that produced none. Cleared per job on completion,
+   * so this cannot grow without bound.
+   */
+  private printUploadSeen = new Set<string>();
 
   private sessionTimeoutMs: number;
   private countdownMs: number;
@@ -157,7 +163,21 @@ export class QueueService {
 
   sessionEnded(): void {
     const completedJobId = this.store.completeInProgressJob(Date.now());
-    if (completedJobId) queueLogger.info(`Completed job ${completedJobId} after session_end`);
+    if (completedJobId) {
+      queueLogger.info(`Completed job ${completedJobId} after session_end`);
+      // A session that ends without a print upload leaves the guest with
+      // nothing on the slideshow. dslrBooth can emit `file_upload` AFTER
+      // `session_end` (measured 2026-08-12: session_end at 06:16:01.819, a
+      // further upload at 06:16:04.959), so this is a warning, not a verdict —
+      // a late print is still accepted and delivered. It exists so the
+      // no-print case is visible instead of silent.
+      if (!this.printUploadSeen.has(completedJobId)) {
+        queueLogger.warn(
+          `No print upload seen for ${completedJobId} at session_end; slideshow will stay empty unless one arrives late`,
+        );
+      }
+      this.printUploadSeen.delete(completedJobId);
+    }
     this.store.setBoothIdle();
     this.clearBusyTimer();
     this.tick();
@@ -222,7 +242,7 @@ export class QueueService {
     } else if (eventType === 'session_start' && jobId) {
       this.sessionAcked(jobId);
     } else if (eventType === 'file_upload' && jobId && payload) {
-      this.sendNotification(jobId, String(payload.photoUrl ?? ''));
+      this.onFileUpload(jobId, payload);
     } else {
       queueLogger.debug(`Unhandled Agent event: ${eventType}${jobId ? ` (job ${jobId})` : ''}`);
     }
@@ -292,6 +312,45 @@ export class QueueService {
       this.handleStall(jobId, 'session_ack_timeout');
       this.tick();
     }, timeoutMs);
+  }
+
+  /**
+   * Translate one dslrBooth `file_upload` trigger into at most one guest
+   * notification.
+   *
+   * dslrBooth does NOT send a `photoUrl` field. Its trigger carries positional
+   * parameters, measured against a real booth on 2026-08-12:
+   *   param1 = local file path   e.g. C:\dslrBooth\Test_event\Singles\...jpg
+   *   param2 = the shared URL    e.g. https://fotoshare.co/i/1t1vcs3
+   *   param3 = 'original' | 'print'
+   *   param4 = event name
+   * The Agent forwards every param verbatim (it is a dumb relay per CLAUDE.md),
+   * so the source-format knowledge lives here, on the server, where the rest of
+   * the business logic is. `photoUrl` is still read first so a future Agent or a
+   * different booth vendor that does send it keeps working unchanged.
+   *
+   * **Only the `print` composite is accepted, and that is a correctness
+   * requirement, not a preference.** One session emits several uploads (measured:
+   * four `original` frames and one `print`, spread over 11 seconds), and
+   * `LocalStore.enqueueNotification()` last-writer-wins until the row reaches
+   * `delivered`/`failed`. Accepting every upload would therefore make the guest's
+   * photo depend on whether the notification sweeper happened to fire between two
+   * uploads — a race deciding what the guest receives. Exactly one `print` exists
+   * per session, so filtering on it is deterministic.
+   */
+  private onFileUpload(jobId: string, payload: Record<string, unknown>): void {
+    const kind = typeof payload.param3 === 'string' ? payload.param3 : undefined;
+    if (kind !== undefined && kind !== 'print') {
+      queueLogger.debug(`Ignoring '${kind}' upload for ${jobId}: only the print composite is delivered`);
+      return;
+    }
+    const photoUrl = String(payload.photoUrl ?? payload.param2 ?? '');
+    if (!photoUrl) {
+      queueLogger.warn(`Print upload for ${jobId} carried no URL in photoUrl or param2`);
+      return;
+    }
+    this.printUploadSeen.add(jobId);
+    void this.sendNotification(jobId, photoUrl);
   }
 
   private async sendNotification(jobId: string, photoUrl: string): Promise<void> {
