@@ -1,0 +1,159 @@
+const express = require('express');
+const cors = require('cors');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+const app = express();
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3001;
+const DEBUG_REQUEST_LOG = path.join(__dirname, 'webhook-json.log');
+console.log('STARTUP: server.js loaded from', __filename);
+console.log('STARTUP: __dirname=', __dirname, 'cwd=', process.cwd());
+console.log('STARTUP: logging webhook JSON to', DEBUG_REQUEST_LOG);
+
+app.use(cors());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use(express.static(__dirname));
+
+if (!fs.existsSync('./uploads')) fs.mkdirSync('./uploads');
+
+app.get('/_status', (req, res) => {
+  res.json({
+    status: 'ok',
+    serverFile: __filename,
+    cwd: process.cwd(),
+    dirname: __dirname,
+  });
+});
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, './uploads/'),
+  filename: (req, file, cb) => {
+    const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    cb(null, unique + path.extname(file.originalname));
+  }
+});
+const upload = multer({ storage, limits: { fileSize: 20 * 1024 * 1024 } });
+
+const customers = [];
+const MAX = 50;
+const sseClients = new Set();
+
+function broadcast(data) {
+  const msg = `data: ${JSON.stringify(data)}\n\n`;
+  sseClients.forEach(res => res.write(msg));
+}
+
+app.get('/events', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+  res.write(`data: ${JSON.stringify({ type: 'init', customers })}\n\n`);
+  sseClients.add(res);
+  req.on('close', () => sseClients.delete(res));
+});
+
+app.post('/webhook', upload.single('image'), (req, res) => {
+  try {
+    const body = req.body;
+    const file = req.file;
+    const customer = {
+      id: body.jobId || Date.now(),
+      jobId: body.jobId || null,
+      name: body.guestName || body.name || body.customer_name || 'Khách hàng',
+      phone: body.phone || body.customer_phone || '',
+      email: body.email || body.customer_email || '',
+      note: body.note || body.message || (body.mode ? `Mode: ${body.mode}` : ''),
+      receivedAt: body.timestamp || new Date().toISOString(),
+      imageUrl: file ? `/uploads/${file.filename}` : (body.photoUrl || body.imageUrl || body.image_url || null),
+      mode: body.mode || null,
+      imageBase64: null,
+    };
+    if (!customer.imageUrl && body.image_base64) {
+      const base64Data = body.image_base64.replace(/^data:image\/\w+;base64,/, '');
+      const ext = body.image_type || 'jpg';
+      const filename = `${Date.now()}-b64.${ext}`;
+      fs.writeFileSync(`./uploads/${filename}`, Buffer.from(base64Data, 'base64'));
+      customer.imageUrl = `/uploads/${filename}`;
+    }
+    customers.unshift(customer);
+    if (customers.length > MAX) customers.pop();
+    broadcast({ type: 'new_customer', customer });
+    res.status(200).json({ success: true, id: customer.id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/webhook/json', (req, res) => {
+  try {
+    const body = req.body;
+    const requestLog = `TIME=${new Date().toISOString()} BODY=${JSON.stringify(body)}\n`;
+    fs.appendFileSync(DEBUG_REQUEST_LOG, requestLog);
+    console.log('DEBUG webhook/json body=', JSON.stringify(body));
+
+    const customer = {
+      id: body.jobId || Date.now(),
+      jobId: body.jobId || null,
+      name: body.guestName || body.name || body.customer_name || 'Khách hàng',
+      phone: body.phone || body.customer_phone || '',
+      email: body.email || body.customer_email || '',
+      note: body.note || body.message || (body.mode ? `Mode: ${body.mode}` : ''),
+      receivedAt: body.timestamp || new Date().toISOString(),
+      imageUrl: body.photoUrl || body.imageUrl || body.image_url || null,
+      mode: body.mode || null,
+    };
+
+    if (!customer.imageUrl && body.image_base64) {
+      const base64Data = body.image_base64.replace(/^data:image\/\w+;base64,/, '');
+      const ext = (body.image_type || 'jpg').replace('image/', '');
+      const filename = `${Date.now()}-b64.${ext}`;
+      fs.writeFileSync(`./uploads/${filename}`, Buffer.from(base64Data, 'base64'));
+      customer.imageUrl = `/uploads/${filename}`;
+    }
+
+    customers.unshift(customer);
+    if (customers.length > MAX) customers.pop();
+
+    console.log('NEW CUSTOMER JSON:', JSON.stringify(customer));
+    fs.appendFileSync(DEBUG_REQUEST_LOG, `RESULT=${JSON.stringify(customer)}\n`);
+    broadcast({ type: 'new_customer', customer });
+
+    res.status(200).json({
+      success: true,
+      id: customer.id,
+      receivedBody: body,
+      mappedCustomer: customer,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/customers', (req, res) => res.json(customers));
+
+app.delete('/api/customers', (req, res) => {
+  customers.length = 0;
+  broadcast({ type: 'clear' });
+  res.json({ success: true });
+});
+
+app.listen(PORT, () => {
+  console.log(`\n✅ Server chạy tại: http://localhost:${PORT}`);
+  console.log(`📡 Webhook endpoint:`);
+  console.log(`   POST http://localhost:${PORT}/webhook       (multipart/form-data)`);
+  console.log(`   POST http://localhost:${PORT}/webhook/json  (application/json)`);
+  console.log(`🖥️  Slideshow:  http://localhost:${PORT}\n`);
+}).on('error', err => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} already in use. Stop the running service and restart this server.`);
+    process.exit(1);
+  }
+  console.error(err);
+  process.exit(1);
+});
