@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueueService } from '../src/queue/queueService';
 import type { LocalStore } from '../src/state/localStore';
+import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
 
 // D-02: a booth left BUSY after completion (guest walked away without
 // exiting the sharing screen) must return to service on its own, without
@@ -44,6 +45,12 @@ function buildStore() {
     },
     getQueuedGuestSummaries: () => [],
     getQueueLength: () => 0,
+    // tick() sweeps the pending-print registry on every interval and
+    // onPrintComposite() opens a slot, so the mocked store must satisfy
+    // that part of the real LocalStore surface too. The shared helper is
+    // used rather than four inline stubs so the three-status semantics
+    // cannot drift away from the SQL they stand in for (07-03).
+    ...createPendingPrintRegistry().registry,
     getJobRegistration: () => undefined,
     requeueWithRetry,
     requeueNoRetry,

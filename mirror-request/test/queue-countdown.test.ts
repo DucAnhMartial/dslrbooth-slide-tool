@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueueService } from '../src/queue/queueService';
 import type { LocalStore } from '../src/state/localStore';
+import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
 
 describe('Queue countdown with multiple registrations', () => {
   afterEach(() => vi.useRealTimers());
@@ -27,6 +28,12 @@ describe('Queue countdown with multiple registrations', () => {
       getQueuePosition: () => 1,
       getQueueLength: () => queued.length,
       getQueuedGuestSummaries: () => queued.map((job, index) => ({ jobId: job.id, name: `Guest ${job.id}`, position: index + 1 })),
+      // tick() sweeps the pending-print registry on every interval and
+      // onPrintComposite() opens a slot, so the mocked store must satisfy
+      // that part of the real LocalStore surface too. The shared helper is
+      // used rather than four inline stubs so the three-status semantics
+      // cannot drift away from the SQL they stand in for (07-03).
+      ...createPendingPrintRegistry().registry,
       getJobRegistration: () => undefined,
     } as unknown as LocalStore;
     const service = new QueueService(store);
@@ -115,6 +122,12 @@ describe('booth state transitions', () => {
         return true;
       },
       getQueuePosition: () => 1,
+      // tick() sweeps the pending-print registry on every interval and
+      // onPrintComposite() opens a slot, so the mocked store must satisfy
+      // that part of the real LocalStore surface too. The shared helper is
+      // used rather than four inline stubs so the three-status semantics
+      // cannot drift away from the SQL they stand in for (07-03).
+      ...createPendingPrintRegistry().registry,
       getJobRegistration: (jobId: string) => ({
         job: { id: jobId },
         registration: { id: 'reg-1', name: 'Guest One', email: '', phone: '', mode: 'boomerang', registered_at: '' },

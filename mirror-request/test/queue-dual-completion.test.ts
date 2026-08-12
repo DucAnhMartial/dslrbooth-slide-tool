@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueueService, queueLogger } from '../src/queue/queueService';
 import { LocalStore } from '../src/state/localStore';
+import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
 
 // SC-2, the phase's tracer. `completeInProgressJob()` used to select the
 // most-recently-acknowledged in_progress row with no jobId parameter at all
@@ -60,6 +61,12 @@ function buildStore() {
     getQueueLength: () => queued.filter((j) => jobStatus[j.id] === 'queued').length,
     completeJob,
     getQueuePosition: () => 1,
+    // tick() sweeps the pending-print registry on every interval and
+    // onPrintComposite() opens a slot, so the mocked store must satisfy
+    // that part of the real LocalStore surface too. The shared helper is
+    // used rather than four inline stubs so the three-status semantics
+    // cannot drift away from the SQL they stand in for (07-03).
+    ...createPendingPrintRegistry().registry,
     getJobRegistration: (jobId: string) => ({
       job: { id: jobId },
       registration: { id: 'reg-1', name: 'Guest', email: '', phone: '', mode: 'boomerang', registered_at: '' },

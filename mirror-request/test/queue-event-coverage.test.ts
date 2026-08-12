@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueueService, queueLogger } from '../src/queue/queueService';
 import type { LocalStore } from '../src/state/localStore';
+import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
 
 // AGT-04/D-14: all ten named event types (plus anything the booth invents
 // later) must reach onAgentEvent() without throwing. Five keep their real
@@ -65,6 +66,12 @@ function buildStore() {
     getQueueLength: () => 0,
     completeJob,
     getQueuePosition: () => undefined,
+    // tick() sweeps the pending-print registry on every interval and
+    // onPrintComposite() opens a slot, so the mocked store must satisfy
+    // that part of the real LocalStore surface too. The shared helper is
+    // used rather than four inline stubs so the three-status semantics
+    // cannot drift away from the SQL they stand in for (07-03).
+    ...createPendingPrintRegistry().registry,
     getJobRegistration: () => undefined,
   } as unknown as LocalStore;
   return { store, updateJobStatus, completeJob, getBooth: () => booth };
@@ -162,6 +169,12 @@ describe('QueueService.onAgentEvent — all ten AGT-04 event types reach a defin
     service.bindNotificationService({ sendPhotoLink });
     const debugSpy = vi.spyOn(queueLogger, 'debug');
 
+    // The composite anchor first, because since 07-03 delivery is gated on a
+    // pending-print slot being open for the job (D-04/D-07) — a print upload
+    // no session was awaiting reaches nobody. Driving the real anchor rather
+    // than seeding the registry keeps this case a proof of the whole handler
+    // path, which is what it is here to assert.
+    service.onAgentEvent('processing_start', 'job-x', { param5: 'C:\\dslrBooth\\Prints\\composite.jpg' });
     service.onAgentEvent('file_upload', 'job-x', { photoUrl: 'http://example.com/x.jpg' });
     await Promise.resolve(); // let the fire-and-forget async sendNotification settle
 

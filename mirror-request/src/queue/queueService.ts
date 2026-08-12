@@ -7,6 +7,30 @@ import { labelLogger } from '../logging/logger';
 // Exported so tests can spy on the exact instance this module logs through.
 export const queueLogger = labelLogger('queue');
 
+/**
+ * D-07/D-11: how long a pending-print slot stays open before the sweep marks
+ * it expired and writes the `No print upload seen` warning.
+ *
+ * The floor is DERIVED, not chosen: `SESSION_TIMEOUT_MS` (300000,
+ * `src/config.ts:103`) + `NEXT_GUEST_COUNTDOWN_MS` (7000, `src/config.ts:104`)
+ * = 307000 ms. Below that a legitimately late print could expire before the
+ * next guest could even physically be dispatched, and the service would drop a
+ * real guest's photo. 600000 ms sits at roughly 1.95x that derived floor —
+ * enough headroom that a future increase to either input does not silently
+ * make the window unsafe, while still bounded enough that the warning arrives
+ * within the same event rather than the next day.
+ *
+ * D-12: deliberately a module constant and a constructor seam, NOT a key in
+ * `src/config.ts`. There is no environment variable and no runtime toggle for
+ * it, and no test may reach it by mutating `process.env`; the constructor's
+ * optional `PENDING_PRINT_EXPIRY_MS` is the only injection point, following
+ * Phase 2's config-injection pattern for every other timing value here.
+ */
+export const PENDING_PRINT_EXPIRY_MS = 600_000;
+
+/** `SESSION_TIMEOUT_MS` + `NEXT_GUEST_COUNTDOWN_MS`, the derived floor above. */
+export const PENDING_PRINT_EXPIRY_FLOOR_MS = 307_000;
+
 export class QueueService {
   private store: LocalStore;
   private running = false;
@@ -27,13 +51,6 @@ export class QueueService {
   private announcementTimer: NodeJS.Timeout | null = null;
   private announcingJobId: string | null = null;
   private announcementEndsAt: number | null = null;
-  /**
-   * Job ids for which a `print` upload has been accepted, so `sessionEnded()`
-   * can warn about a session that produced none. Cleared per job on completion,
-   * so this cannot grow without bound.
-   */
-  private printUploadSeen = new Set<string>();
-
   private sessionTimeoutMs: number;
   private countdownMs: number;
   private sessionMaxRetries: number;
@@ -61,6 +78,7 @@ export class QueueService {
    * this codebase.
    */
   private jobIdMismatchWarnLogged = false;
+  private pendingPrintExpiryMs: number;
   private sendCommandCb: ((payload: {
     type: 'command'; action: 'start_session'; jobId: string; mode?: string
   }) => void) | null = null;
@@ -74,7 +92,14 @@ export class QueueService {
 
   constructor(
     store: LocalStore = getStore(),
-    config: Pick<EnvConfig, 'SESSION_TIMEOUT_MS' | 'NEXT_GUEST_COUNTDOWN_MS' | 'SESSION_MAX_RETRIES' | 'BOOTH_RELEASE_TIMEOUT_MS'> = getConfig(),
+    // PENDING_PRINT_EXPIRY_MS is intersected in rather than Pick'ed from
+    // EnvConfig on purpose (D-12): it is not an environment key and has no
+    // runtime toggle, so it must not appear in EnvConfig or config.ts. The
+    // optional property is the test-injection seam, matching Phase 2's
+    // constructor-injection pattern for every other timing value here — never
+    // read from getConfig() inside a method body.
+    config: Pick<EnvConfig, 'SESSION_TIMEOUT_MS' | 'NEXT_GUEST_COUNTDOWN_MS' | 'SESSION_MAX_RETRIES' | 'BOOTH_RELEASE_TIMEOUT_MS'>
+      & { PENDING_PRINT_EXPIRY_MS?: number } = getConfig(),
   ) {
     this.store = store;
     this.sessionTimeoutMs = config.SESSION_TIMEOUT_MS;
@@ -85,6 +110,15 @@ export class QueueService {
     this.boothReleaseTimeoutMs = Number.isFinite(configuredReleaseMs) && configuredReleaseMs >= 30_000
       ? configuredReleaseMs
       : 120_000;
+    // Clamped to the derived floor for the same reason boothReleaseTimeoutMs
+    // is clamped to 30s: a value below SESSION_TIMEOUT_MS +
+    // NEXT_GUEST_COUNTDOWN_MS would expire a slot before the next guest could
+    // physically be dispatched, and a legitimately late print would be dropped.
+    const configuredExpiryMs = config.PENDING_PRINT_EXPIRY_MS;
+    this.pendingPrintExpiryMs = Math.max(
+      PENDING_PRINT_EXPIRY_FLOOR_MS,
+      Number.isFinite(configuredExpiryMs) ? (configuredExpiryMs as number) : PENDING_PRINT_EXPIRY_MS,
+    );
   }
 
   start(): void {
@@ -207,21 +241,13 @@ export class QueueService {
       return;
     }
 
-    // The printUploadSeen Set and this warn are rebound from the removed
-    // completion id to currentJobId so test/queue-file-upload-print.test.ts's
-    // existing assertions keep passing. Plan 07-03 deletes both when the
-    // durable pending-print registry lands; do not delete them here.
-    if (!this.printUploadSeen.has(currentJobId)) {
-      // A session that ends without a print upload leaves the guest with
-      // nothing on the slideshow. dslrBooth can emit `file_upload` AFTER
-      // `session_end` (measured 2026-08-12: session_end at 06:16:01.819, a
-      // further upload at 06:16:04.959), so this is a warning, not a
-      // verdict — a late print is still accepted and delivered.
-      queueLogger.warn(
-        `No print upload seen for ${currentJobId} at session_end; slideshow will stay empty unless one arrives late`,
-      );
-    }
-    this.printUploadSeen.delete(currentJobId);
+    // No print check happens here, and none may be added back. dslrBooth's
+    // print upload has no fixed ordering relative to session_end — measured 26
+    // seconds BEFORE it on one session and about one second AFTER it on job
+    // BZWCWFN6 — so any check at this moment fires on successful sessions and
+    // is silent on some genuinely failed ones. That was WINDOWS item 9. The
+    // `No print upload seen` warning now lives on pending-print registry
+    // expiry (sweepPendingPrints), which is the only anchor that can be right.
 
     this.store.setBoothIdle(); // clears current_job_id in the same write
     this.clearBusyTimer();
@@ -304,6 +330,26 @@ export class QueueService {
     queueLogger.info(`Completed job ${currentJobId} via ${eventType} composite ${compositePath}`);
     this.clearBusyTimer(); // the completed job can no longer be stalled and requeued by BTH-02's session timer
     this.startReleaseTimer(currentJobId); // D-02: falls back to releasing the booth if session_end never arrives
+
+    // D-07: the pending-print slot is opened HERE, at the composite anchor —
+    // before the upload exists — rather than when the upload arrives. That
+    // ordering is the whole mechanism: by the time a `file_upload` shows up the
+    // booth may already have been released and rebound to the next guest, so
+    // the only record of who is owed this photo has to have been written
+    // earlier, and durably.
+    const now = Date.now();
+    const opened = this.store.openPendingPrint({
+      jobId: currentJobId,
+      compositePath,
+      openedAt: now,
+      expiresAt: now + this.pendingPrintExpiryMs,
+    });
+    if (!opened) {
+      // The processing_start/printing double fire. Not an error — the first
+      // event already opened the slot, and ON CONFLICT DO NOTHING kept its
+      // deadline and composite path intact.
+      queueLogger.info(`Pending-print slot for ${currentJobId} was already open; ${eventType} did not reopen it`);
+    }
   }
 
   onAgentAck(jobId: string, ok: boolean, errorMessage?: string): void {
@@ -497,8 +543,55 @@ export class QueueService {
       queueLogger.warn(`Print upload for ${jobId} carried no URL in photoUrl or param2`);
       return;
     }
-    this.printUploadSeen.add(jobId);
-    void this.sendNotification(jobId, photoUrl);
+
+    // D-07: the lookup key is the pending-print registry, NOT
+    // booth_state.current_job_id. The print upload's ordering relative to
+    // session_end is not fixed — measured 26 seconds BEFORE it on one session
+    // and about one second AFTER it on job BZWCWFN6 — so resolving against
+    // whichever job owns the booth at the moment the upload arrives would
+    // attribute a real guest's photo to the next guest in exactly the second
+    // ordering, or drop it if the booth were idle. The registry is the only
+    // thing that still remembers who is owed this photo once the booth has
+    // moved on.
+    //
+    // Three answers, and all three are load-bearing:
+    const pending = this.store.getPendingPrint(jobId);
+
+    if (pending === undefined) {
+      // D-04: no slot was ever opened for this job, so no session was awaiting
+      // a print for it. Deliver nothing. Without this, a stranger pressing
+      // start on the booth's own screen would have their photo sent to the
+      // last real guest's email and phone number, because the Agent stamps a
+      // stale activeJobId on every event and never clears it.
+      queueLogger.warn(`Print upload for ${jobId} dropped: no session was awaiting a print for it`);
+      return;
+    }
+
+    if (pending.status === 'expired') {
+      // D-11: the slot expired but the photo is real. Getting it late beats
+      // not getting it, so deliver anyway. The job's own status is
+      // deliberately NOT touched here — a terminal row is never re-armed, and
+      // that guarantee is enforced by Phase 4's SQL, not by a condition on
+      // this path. The warn exists because a recurring one means the deadline
+      // is set too tight.
+      const lateByMs = Date.now() - pending.expiresAt;
+      queueLogger.warn(
+        `Print upload for ${jobId} arrived ${Math.round(lateByMs / 1000)}s after its pending-print slot expired; delivering late and leaving the job status unchanged`,
+      );
+      if (this.store.resolvePendingPrint(jobId, Date.now())) {
+        void this.sendNotification(jobId, photoUrl);
+      }
+      return;
+    }
+
+    // 'awaiting' — the ordinary path. Resolving BEFORE delivering is
+    // deliberate and follows Phase 4's durable-work-item-before-the-network-
+    // call precedent: the resolve is what makes a duplicate or replayed upload
+    // a no-op, so it has to land first. A false return means another delivery
+    // already claimed this slot.
+    if (this.store.resolvePendingPrint(jobId, Date.now())) {
+      void this.sendNotification(jobId, photoUrl);
+    }
   }
 
   private async sendNotification(jobId: string, photoUrl: string): Promise<void> {
