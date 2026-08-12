@@ -627,3 +627,138 @@ describe('GET /status/:jobId — the estimate is suppressed rather than fabricat
     expect(checked).toBe(5);
   });
 });
+
+const DB_PATH_NO_PHOTO = `./data/test-status-no-photo-${process.pid}-${Date.now()}.sqlite`;
+
+/**
+ * D-10, the guest-facing half of the sixth internal status. A guest whose
+ * session produced nothing is routed to a human in the vocabulary Phase 5
+ * closed — and still receives their photo, correctly labelled, if it turns up
+ * late (D-11).
+ *
+ * Fixtures are driven through the production write path (enqueue ->
+ * updateJobStatus -> closeJobNoPhoto), never INSERTed as a row shaped like the
+ * result, so the response is evidence about the route rather than about the
+ * fixture.
+ */
+describe('GET /status/:jobId — a session that produced no photo (D-10, D-11)', () => {
+  let store: LocalStore;
+  let queue: QueueService;
+
+  const noPhotoJobId = `job-np-${process.pid}`;
+  const lateDeliveryJobId = `job-np-late-${process.pid}`;
+
+  function seedRegistration(id: string, name: string): void {
+    store.upsertRegistration({
+      id,
+      name,
+      email: `${id}@example.com`,
+      phone: '0900000000',
+      mode: 'print',
+      registered_at: new Date().toISOString(),
+    });
+  }
+
+  function seedNoPhotoJob(id: string, name: string, base: number): void {
+    seedRegistration(id, name);
+    store.enqueueJob({ id, queued_at: base });
+    store.updateJobStatus(id, 'in_progress', 'acknowledged_at', base + 1_000);
+    const closed = store.closeJobNoPhoto(id, base + 90_000);
+    if (!closed) {
+      throw new Error(`fixture broken: closeJobNoPhoto(${id}) returned false`);
+    }
+  }
+
+  function appWith(agentOnline: boolean): express.Express {
+    const app = express();
+    app.use(
+      createStatusRouter(store, queue, { isAgentOnline: () => agentOnline }, {
+        WAIT_ESTIMATE_SAMPLE_SIZE: 20,
+        WAIT_ESTIMATE_MIN_SAMPLES: 5,
+        WAIT_ESTIMATE_DEFAULT_MS: 180_000,
+        STATUS_RATE_LIMIT_WINDOW_MS: 60_000,
+        STATUS_RATE_LIMIT_MAX: 1000,
+        STATUS_RATE_LIMIT_MAX_KEYS: 10_000,
+      }),
+    );
+    return app;
+  }
+
+  beforeAll(() => {
+    store = new LocalStore(DB_PATH_NO_PHOTO);
+    const base = 1_700_000_000_000;
+
+    seedNoPhotoJob(noPhotoJobId, 'No Photo Guest', base);
+    seedNoPhotoJob(lateDeliveryJobId, 'Late Photo Guest', base + 1_000_000);
+
+    // D-11: the print turned up after the job was already closed as no-photo,
+    // and Phase 4 delivered it. The job's own status is deliberately NOT
+    // changed by that delivery.
+    store.saveNotification({
+      jobId: lateDeliveryJobId,
+      status: 'delivered',
+      photoUrl: 'https://cdn.example/late.jpg',
+    });
+
+    queue = new QueueService(store, {
+      SESSION_TIMEOUT_MS: 300_000,
+      NEXT_GUEST_COUNTDOWN_MS: 7_000,
+      SESSION_MAX_RETRIES: 2,
+    });
+
+    // The fixture really is in the state it claims to be in.
+    expect(store.getJob(noPhotoJobId)?.status).toBe('no_photo');
+    expect(store.getJob(lateDeliveryJobId)?.status).toBe('no_photo');
+  });
+
+  beforeEach(() => {
+    store.setBoothIdle();
+  });
+
+  afterAll(() => {
+    store.close();
+    for (const suffix of ['', '-wal', '-shm']) {
+      fs.rmSync(`${DB_PATH_NO_PHOTO}${suffix}`, { force: true });
+    }
+  });
+
+  it('reports see_staff with an honest failed photo state', async () => {
+    const res = await request(appWith(true)).get(`/status/${noPhotoJobId}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('see_staff');
+    expect(res.body.photoDelivery).toBe('failed');
+  });
+
+  it('omits waitEstimate entirely, because this job is not waiting', async () => {
+    const res = await request(appWith(true)).get(`/status/${noPhotoJobId}`);
+
+    expect(Object.keys(res.body).sort()).toEqual(SEVEN_KEYS);
+    // `in` is what distinguishes an absent key from one present and null.
+    expect('waitEstimate' in res.body).toBe(false);
+  });
+
+  it('leaks no seventh guest word and no operator vocabulary', async () => {
+    const res = await request(appWith(true)).get(`/status/${noPhotoJobId}`);
+    const serialized = JSON.stringify(res.body);
+
+    // T-07-15: the sixth internal status must add no new guest-facing token.
+    expect(serialized).not.toContain('no_photo');
+    for (const word of OPERATOR_WORDS) {
+      expect(serialized).not.toContain(word);
+    }
+  });
+
+  it('flips photoDelivery to sent when the print arrived late, while status stays see_staff (D-11)', async () => {
+    const res = await request(appWith(true)).get(`/status/${lateDeliveryJobId}`);
+
+    expect(res.status).toBe(200);
+    // The guest holding their photo must never be told it failed.
+    expect(res.body.photoDelivery).toBe('sent');
+    // The outcome word describes the SESSION, which genuinely produced no
+    // composite; it is not rewritten by the photo turning up afterwards.
+    expect(res.body.status).toBe('see_staff');
+    // And the delivery did not rewrite the persisted outcome either.
+    expect(store.getJob(lateDeliveryJobId)?.status).toBe('no_photo');
+  });
+});
