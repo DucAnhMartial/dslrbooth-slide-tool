@@ -11,6 +11,7 @@ import { DBPoller } from './ingestion/dbPoller';
 import { createViewHealthProbe } from './ops/viewHealthProbe';
 import { createQueueService } from './queue/queueService';
 import { AgentServer } from './agent/agentServer';
+import { readAgentConfigForAgent } from './agent/agentConfigContract';
 import { createNotificationService } from './notifications/notificationService';
 import { mask } from './logging/logger';
 import { DisplayServer } from './display/displayServer';
@@ -102,6 +103,14 @@ const agentServer = new AgentServer();
 const notifier = createNotificationService();
 const queue = createQueueService(agentServer, notifier);
 const displayServer = new DisplayServer(queue, agentServer);
+
+// UI-02 / D-17: the Agent PULLS its configuration. This is the whole of the
+// service's side of that round trip — the Agent asks on connect (and again
+// whenever a CMS save sends it a `reload_config`), and this callback answers
+// from `agent_config`, projected onto D-16's allow-list. It takes no argument
+// because there is nothing about the request worth reading: configuration
+// travels one way.
+agentServer.registerConfigRequestHandler(() => readAgentConfigForAgent(store));
 
 app.use(createStatusRouter(store, queue, agentServer, config));
 

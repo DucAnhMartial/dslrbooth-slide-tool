@@ -8,6 +8,16 @@ const HEARTBEAT_INTERVAL = 15_000;
 
 type AgentAckHandler = (jobId: string, ok: boolean, errorMessage?: string) => void;
 type AgentEventHandler = (eventType: string, jobId?: string, payload?: Record<string, unknown>) => void;
+/**
+ * Answers "what configuration should this booth be running?" — and takes no
+ * arguments, deliberately (D-17, T-08-19). The inbound `config_request` is a
+ * REQUEST: the Agent asks, the service answers from `agent_config`, and there
+ * is structurally nothing off the wire this handler could read even if a
+ * future edit wanted to. Returning `undefined` means "no source wired", which
+ * sends nothing rather than sending an empty configuration the Agent would
+ * dutifully apply.
+ */
+type AgentConfigRequestHandler = () => Record<string, unknown> | undefined;
 
 export class AgentServer {
   private wss: WebSocketServer | null = null;
@@ -21,6 +31,7 @@ export class AgentServer {
   private ackHandler: AgentAckHandler = () => {};
   private eventHandler: AgentEventHandler = () => {};
   private disconnectHandler: () => void = () => {};
+  private configRequestHandler: AgentConfigRequestHandler = () => undefined;
 
   constructor(opts: { heartbeatIntervalMs?: number; heartbeatTimeoutMs?: number } = {}) {
     this.heartbeatIntervalMs = opts.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL;
@@ -30,6 +41,7 @@ export class AgentServer {
   registerAckHandler(fn: AgentAckHandler): void { this.ackHandler = fn; }
   registerEventHandler(fn: AgentEventHandler): void { this.eventHandler = fn; }
   registerDisconnectHandler(fn: () => void): void { this.disconnectHandler = fn; }
+  registerConfigRequestHandler(fn: AgentConfigRequestHandler): void { this.configRequestHandler = fn; }
 
   /**
    * Verifies the `Authorization: Bearer <token>` header against the
@@ -126,6 +138,18 @@ export class AgentServer {
             typeof msg.jobId === 'string' ? msg.jobId : undefined,
             msg.payload as Record<string, unknown> | undefined
           );
+        } else if (type === 'config_request') {
+          // D-17's pull, and its one-way property. `msg` is not read below —
+          // not its `data`, not any field riding beside it — so a booth that
+          // asks cannot also tell (T-08-19). An Agent built before this phase
+          // never sends this type and is unaffected; the branch is strictly
+          // additive to AGT-01..05.
+          const data = this.configRequestHandler();
+          if (data === undefined) {
+            logger.warn('Agent WS: config_request received but no configuration source is registered');
+          } else {
+            this.sendEvent({ type: 'config', data });
+          }
         } else if (type === 'heartbeat') {
           // heartbeat acknowledged, timestamp already updated above
         } else {
