@@ -1,4 +1,42 @@
-# Webhook Slideshow
+# Webhook Slideshow — RETIRED
+
+> **This app is retired and is no longer deployed.** Do not start it, and do
+> not point a TV at it.
+>
+> **Replacement:** the room screen now lives inside the Extension Service
+> (`mirror-request`) at **`GET /display-screen`** — one fixed URL for every TV,
+> served on that service's own `PORT` (default `3002`), not on `3001`. It is
+> driven by the same `WS /display` feed that already knows the queue, and it is
+> themed per event from the operator console at `/cms`. Everything this app did
+> for the room — receive photos, hold a queue of guests, rotate a slideshow —
+> is done there now, by one process against one database.
+>
+> **Why this source is still here:** it is kept deliberately as **layout
+> reference** (Phase 8, decision D-08). `index.html` is where the replacement
+> screen's layout and fluid typography came from, and it stays readable for
+> that reason. Nothing here is deployed, nothing here is maintained, and
+> nothing in `mirror-request` imports or calls it.
+>
+> **If this app is still running somewhere, that is the bug.** It predates the
+> Extension Service's hardening: `server.js` accepted anonymous uploads and, at
+> one point, exposed destructive endpoints with no authentication at all. A
+> copy left alive on `:3001` also keeps serving *stale* content, which looks
+> like the new screen being broken rather than the old one being alive. See
+> `mirror-request/docs/OPS-RUNBOOK.md` §12 ("The cutover: retiring
+> `web-slide`") for how to find and stop whatever is supervising it — stopping
+> the process alone is not enough if a supervisor will restart it.
+>
+> **Guest photo delivery did not move here or away.** `NOTIFY_WEBHOOK_URL` in
+> the Extension Service still delivers each guest their own photo exactly as
+> before (OPS-RUNBOOK §8). What changed is that it no longer feeds a room
+> screen (D-04).
+
+---
+
+## Historical documentation
+
+Everything below describes this app as it was when it was in service. It is
+kept for reference and is **not** instructions to run anything.
 
 Web app nhận webhook và trình chiếu ảnh khách hàng dạng slideshow real-time.
 
