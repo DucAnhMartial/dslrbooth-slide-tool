@@ -58,11 +58,15 @@ function eventLines(spy: { mock: { calls: unknown[][] } }): string[] {
   return spy.mock.calls.map((call) => String(call[0])).filter((m) => m.startsWith(EVENT_LINE));
 }
 
-function buildStore(boundJobId: string | undefined = 'job-x') {
+// `null` rather than `undefined` for "the booth holds no job": passing
+// `undefined` to an optional parameter re-triggers its default, so an
+// `undefined` default would silently hand back a booth bound to 'job-x' and the
+// no-current-job case would assert nothing.
+function buildStore(boundJobId: string | null = 'job-x') {
   const updateJobStatus = vi.fn();
   const completeJob = vi.fn(() => true);
   let booth = 'BUSY';
-  let currentJobId: string | undefined = boundJobId;
+  let currentJobId: string | undefined = boundJobId ?? undefined;
   const store = {
     getBoothState: () => booth,
     getNextQueuedJob: () => undefined,
@@ -180,7 +184,7 @@ describe('QueueService.onAgentEvent — one info line per event, unconditionally
   });
 
   it('the line names an explicit token, not an empty gap, when the booth has no current job', () => {
-    const { store } = buildStore(undefined);
+    const { store } = buildStore(null);
     const service = new QueueService(store, CONFIG);
     const infoSpy = vi.spyOn(queueLogger, 'info');
 

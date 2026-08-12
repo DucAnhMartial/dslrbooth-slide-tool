@@ -441,7 +441,93 @@ export class QueueService {
     this.tick();
   }
 
+  /**
+   * D-12/D-13: exactly one `info` line for every Agent event, whatever its
+   * type and whatever the handler below does with it.
+   *
+   * NEVER pass an object to the log call. The masking formatters in
+   * `logging/logger.ts:16-25` and `:37-45` only run `mask()` when
+   * `typeof message === 'string'`, so an object argument would bypass email
+   * and phone redaction entirely. Every line here is a template string.
+   *
+   * The per-event parameter selection is an explicit ALLOW-LIST, not a spread
+   * of `payload`, and that shape is the mitigation for T-07-20 rather than a
+   * stylistic choice. `param2`/`photoUrl` carry the fotoshare URL, which is a
+   * capability URL to the guest's photo: anyone who can read the log can view
+   * the photo, rotated logs keep it for fourteen days, and the masking filter
+   * recognises emails and phone numbers but has no concept of a URL — nothing
+   * downstream will catch a leak, so the prohibition has to hold here. Do not
+   * read `param2` or `photoUrl` in this method, and do not "simplify" the
+   * allow-list into a payload spread.
+   *
+   * The composite path IS carried, and that is T-07-22 accepted deliberately:
+   * it is booth-local (`C:\dslrBooth\<event>\Prints\<timestamp>.jpg`), the
+   * event-folder segment is a business name rather than personal data, and it
+   * is what makes the completion anchor diagnosable from the log alone.
+   */
+  private logAgentEvent(eventType: string, jobId: string | undefined, payload?: Record<string, unknown>): void {
+    const attributedJobId = this.store.getBoothCurrentJobId();
+
+    // `none` rather than an empty gap: an operator reading `booth_job=` with
+    // nothing after it cannot tell "no job bound" from "the id was dropped".
+    let line = `Agent event ${eventType} booth_job=${attributedJobId ?? 'none'}`;
+
+    // Only when the two disagree, and labelled apart from the attributed one.
+    // The Agent stamps a stale activeJobId on every forwarded event and never
+    // clears it (D-06), so a disagreement is the normal shape of a stray
+    // event — printing both ids unlabelled would make the log the thing that
+    // confuses rather than the thing that explains.
+    if (jobId !== undefined && jobId !== attributedJobId) {
+      line += ` event_job=${jobId}`;
+    }
+
+    const detail = this.agentEventDetail(eventType, payload);
+    if (detail) line += ` ${detail}`;
+
+    queueLogger.info(line);
+  }
+
+  /**
+   * The allow-list itself, kept as its own method so the prohibition above is
+   * enforced in one readable place. Every branch names the single field it
+   * reads; the remaining seven AGT-04 types contribute nothing.
+   */
+  private agentEventDetail(eventType: string, payload?: Record<string, unknown>): string {
+    if (!payload) return '';
+    const str = (field: string): string | undefined => {
+      const raw = payload[field];
+      return typeof raw === 'string' && raw.trim() ? raw.trim() : undefined;
+    };
+    switch (eventType) {
+      // The print composite, from the two events measured to carry the same
+      // completed file in different positional params.
+      case 'processing_start': {
+        const composite = str('param5');
+        return composite ? `composite=${composite}` : '';
+      }
+      case 'printing': {
+        const composite = str('param1');
+        return composite ? `composite=${composite}` : '';
+      }
+      // param3 ONLY — 'original' or 'print'. param1 (the local path) and
+      // param2 (the fotoshare URL) are both deliberately absent.
+      case 'file_upload': {
+        const kind = str('param3');
+        return kind ? `upload_type=${kind}` : '';
+      }
+      default:
+        return '';
+    }
+  }
+
   onAgentEvent(eventType: string, jobId?: string, payload?: Record<string, unknown>): void {
+    // FIRST statement, above the branch chain, and that placement is what
+    // makes D-12's "one line, unconditionally" true. A line emitted inside
+    // each branch would miss every early return the handlers take — the
+    // no-usable-path return, the no-job-bound return, the stale-id return —
+    // and those returns are exactly the cases an operator needs to see.
+    this.logAgentEvent(eventType, jobId, payload);
+
     if (eventType === 'session_end') {
       this.sessionEnded();
     } else if (eventType === 'session_start' && jobId) {
@@ -453,7 +539,12 @@ export class QueueService {
     } else if (eventType === 'printing' && payload) {
       this.onPrintComposite(eventType, jobId, payload);
     } else {
-      queueLogger.debug(`Unhandled Agent event: ${eventType}${jobId ? ` (job ${jobId})` : ''}`);
+      // Deliberately empty. An unrecognised event type — and every named type
+      // that reaches here without the payload its handler needs — has ALREADY
+      // been logged by the call above, which runs for every event without
+      // exception. The `debug` "Unhandled Agent event" line that used to live
+      // here was removed in 07-05, not misplaced: restoring one would
+      // double-log every event that lands in this branch.
     }
   }
 
