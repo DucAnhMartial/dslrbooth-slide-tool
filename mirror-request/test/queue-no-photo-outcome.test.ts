@@ -91,7 +91,10 @@ function buildStore(jobIds: string[] = ['job-1']) {
     setBoothTimeout,
     getBoothCurrentJobId: () => currentJobId,
     setBoothCurrentJob: (jobId: string | null) => { currentJobId = jobId ?? undefined; },
-    getJob: (id: string) => (id in jobStatus ? { id, status: jobStatus[id] } : undefined),
+    // acknowledged_at is handed back so D-14's summary line can compute the
+    // session duration from it (07-05). The map was already recorded below for
+    // the candidate query's age predicate; only the read-back is new.
+    getJob: (id: string) => (id in jobStatus ? { id, status: jobStatus[id], acknowledged_at: acknowledgedAt[id] } : undefined),
     updateJobStatus: (id: string, status: string, column?: string, value?: number) => {
       jobStatus[id] = status;
       if (column === 'acknowledged_at' && typeof value === 'number') acknowledgedAt[id] = value;
@@ -294,6 +297,90 @@ describe('QueueService — the no-photo sweep (SC-3, D-03/D-09)', () => {
     // The exclusion of the live guest is decided inside the query, from
     // booth_state, not by a caller-side `if` a later edit could delete.
     expect(getJobsAwaitingNoPhotoClose).toHaveBeenCalledWith(expect.any(Number), 'job-1');
+
+    service.stop();
+  });
+
+  // D-14 / SC-3, the no-photo side. The sweep is the OTHER place a job closes,
+  // so it is the other place the summary line is emitted from. The plan text
+  // for this task said to emit it from sessionEnded()'s no-photo branch; no
+  // such branch exists — 07-04 shipped the close as a swept deadline by human
+  // decision after the session_end version regressed the SC-2 tracer, and
+  // sessionEnded() is release-only. The close path is what D-14 asks for, and
+  // here the close path is sweepNoPhotoJobs().
+  it('closing a job as no_photo emits exactly one summary line with the no-photo outcome and no composite seen', () => {
+    vi.useFakeTimers();
+    const infoSpy = vi.spyOn(queueLogger, 'info');
+    const { store, jobStatus } = buildStore();
+    const service = startSession(store);
+
+    service.onAgentEvent('session_end');
+    vi.advanceTimersByTime(NO_PHOTO_CLOSE_DELAY_MS + 1_000);
+    expect(jobStatus['job-1']).toBe('no_photo');
+
+    const lines = infoSpy.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('SESSION_SUMMARY'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('job=job-1');
+    expect(lines[0]).toContain('outcome=no_photo');
+    expect(lines[0]).toContain('print_composite=no');
+    expect(lines[0]).toMatch(/duration_ms=\d+/);
+
+    service.stop();
+  });
+
+  // THE RESIDUAL MADE OBSERVABLE. Option C narrows the wrongful-close window to
+  // fifteen minutes; it does not eliminate it. A job closed no_photo while its
+  // capture count is greater than zero is precisely the shape of a session that
+  // photographed a guest and was closed anyway — the one thing an operator must
+  // be able to see if the residual ever fires in production. This assertion is
+  // the design requirement, not a nicety: without the capture count on the
+  // no-photo line, a wrongful close is indistinguishable from a guest who
+  // walked away before the first shot.
+  it('carries the capture count on the no-photo line too, so a wrongful close is visible as captures>0 with outcome=no_photo', () => {
+    vi.useFakeTimers();
+    const infoSpy = vi.spyOn(queueLogger, 'info');
+    const { store } = buildStore();
+    const service = startSession(store);
+
+    service.onAgentEvent('capture_start', 'job-1', {});
+    service.onAgentEvent('capture_start', 'job-1', {});
+    service.onAgentEvent('session_end');
+    vi.advanceTimersByTime(NO_PHOTO_CLOSE_DELAY_MS + 1_000);
+
+    const line = infoSpy.mock.calls.map((c) => String(c[0])).find((m) => m.includes('SESSION_SUMMARY'))!;
+    expect(line).toContain('outcome=no_photo');
+    expect(line).toContain('captures=2');
+
+    service.stop();
+  });
+
+  it('a guest who walked away before any shot is distinguishable — captures=unknown, not captures=2', () => {
+    vi.useFakeTimers();
+    const infoSpy = vi.spyOn(queueLogger, 'info');
+    const { store } = buildStore();
+    const service = startSession(store);
+
+    service.onAgentEvent('session_end');
+    vi.advanceTimersByTime(NO_PHOTO_CLOSE_DELAY_MS + 1_000);
+
+    const line = infoSpy.mock.calls.map((c) => String(c[0])).find((m) => m.includes('SESSION_SUMMARY'))!;
+    expect(line).toContain('captures=unknown');
+
+    service.stop();
+  });
+
+  it('later ticks emit no second summary for a job the sweep already closed', () => {
+    vi.useFakeTimers();
+    const infoSpy = vi.spyOn(queueLogger, 'info');
+    const { store } = buildStore();
+    const service = startSession(store);
+
+    service.onAgentEvent('session_end');
+    vi.advanceTimersByTime(NO_PHOTO_CLOSE_DELAY_MS + 1_000);
+    vi.advanceTimersByTime(60_000); // 240 more ticks
+
+    const lines = infoSpy.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('SESSION_SUMMARY'));
+    expect(lines).toHaveLength(1);
 
     service.stop();
   });

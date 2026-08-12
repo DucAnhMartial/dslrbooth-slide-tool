@@ -25,6 +25,10 @@ function buildStore() {
     { id: 'job-2', name: 'Guest Two' },
   ];
   const jobStatus: Record<string, string> = { 'job-1': 'queued', 'job-2': 'queued' };
+  // 07-05 D-14: the summary line's duration is Date.now() - acknowledged_at, so
+  // the mock has to record the timestamp updateJobStatus() is given and hand it
+  // back through getJob(). Purely additive — nothing above reads it.
+  const acknowledgedAt: Record<string, number> = {};
   let currentJobId: string | undefined;
 
   const pushState = (state: string) => {
@@ -59,8 +63,11 @@ function buildStore() {
     setBoothTimeout: () => { pushState('IDLE'); currentJobId = undefined; },
     getBoothCurrentJobId: () => currentJobId,
     setBoothCurrentJob: (jobId: string | null) => { currentJobId = jobId ?? undefined; },
-    getJob: (id: string) => (id in jobStatus ? { id, status: jobStatus[id] } : undefined),
-    updateJobStatus: (id: string, status: string) => { jobStatus[id] = status; },
+    getJob: (id: string) => (id in jobStatus ? { id, status: jobStatus[id], acknowledged_at: acknowledgedAt[id] } : undefined),
+    updateJobStatus: (id: string, status: string, column?: string, value?: number) => {
+      jobStatus[id] = status;
+      if (column === 'acknowledged_at' && typeof value === 'number') acknowledgedAt[id] = value;
+    },
     getQueuedGuestSummaries: () =>
       queued
         .filter((j) => jobStatus[j.id] === 'queued')
@@ -283,6 +290,173 @@ describe('QueueService.sessionAcked — terminal-state guard prevents resurrecti
 describe('LocalStore.prototype carries no positional completion method (SC-2 invariant)', () => {
   it('completeInProgressJob is undefined on the prototype — this assertion goes red the instant a future phase reintroduces the positional assumption', () => {
     expect((LocalStore.prototype as Record<string, unknown>).completeInProgressJob).toBeUndefined();
+  });
+});
+
+/**
+ * D-14 / SC-3, the completion side. One line per CLOSED JOB, greppable by one
+ * token, carrying everything an operator needs about that session — so the
+ * question "what did this session do" is answered by one grep on the job id
+ * instead of by reading fifteen interleaved event lines backwards.
+ *
+ * Every count here filters on SUMMARY_TOKEN rather than counting total
+ * queueLogger.info calls. Task 1 emits one line per event and the handlers emit
+ * their own, so a total-call count would be a tripwire on unrelated work — and
+ * would have to be re-tuned by every future plan that adds a log line.
+ */
+const SUMMARY_TOKEN = 'SESSION_SUMMARY';
+
+function summaryLines(spy: { mock: { calls: unknown[][] } }): string[] {
+  return spy.mock.calls.map((c) => String(c[0])).filter((m) => m.includes(SUMMARY_TOKEN));
+}
+
+describe('QueueService — one summary line per closed job, from the close path (D-14, SC-3)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  /** Drives the real dispatch path to "job-1 is in_progress and owns the booth". */
+  function startFirstSession(store: LocalStore) {
+    const service = new QueueService(store);
+    service.bindSendCommand(() => {});
+    service.start();
+    vi.advanceTimersByTime(250); // announce job-1
+    vi.advanceTimersByTime(7_000); // dispatch job-1, booth BUSY
+    service.onAgentEvent('session_start', 'job-1');
+    return service;
+  }
+
+  it('completing at the print composite emits exactly one summary line carrying every D-14 field', () => {
+    vi.useFakeTimers();
+    const { store } = buildStore();
+    const infoSpy = vi.spyOn(queueLogger, 'info');
+    const service = startFirstSession(store);
+
+    service.onAgentEvent('capture_start', 'job-1', {});
+    vi.advanceTimersByTime(4_000); // a session takes real time; duration must reflect it
+    service.onAgentEvent('processing_start', 'job-1', { param5: COMPOSITE_PATH });
+
+    const lines = summaryLines(infoSpy);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('job=job-1');
+    expect(lines[0]).toContain('outcome=completed');
+    expect(lines[0]).toContain('captures=1');
+    expect(lines[0]).toContain('print_composite=yes');
+    expect(lines[0]).toMatch(/duration_ms=\d+/);
+
+    service.stop();
+  });
+
+  it('the processing_start/printing double fire still emits exactly one summary, not two', () => {
+    vi.useFakeTimers();
+    const { store } = buildStore();
+    const infoSpy = vi.spyOn(queueLogger, 'info');
+    const service = startFirstSession(store);
+
+    service.onAgentEvent('processing_start', 'job-1', { param5: COMPOSITE_PATH });
+    service.onAgentEvent('printing', 'job-1', { param1: COMPOSITE_PATH });
+
+    // The second event's completeJob matches zero rows, so it returns before
+    // reaching the summary — the same structural absorption that keeps the
+    // registry slot from being reopened.
+    expect(summaryLines(infoSpy)).toHaveLength(1);
+    service.stop();
+  });
+
+  it('releasing the booth emits NO summary line — the line belongs to the close, not the release (D-02)', () => {
+    vi.useFakeTimers();
+    const { store } = buildStore();
+    const infoSpy = vi.spyOn(queueLogger, 'info');
+    const service = startFirstSession(store);
+
+    service.onAgentEvent('processing_start', 'job-1', { param5: COMPOSITE_PATH });
+    expect(summaryLines(infoSpy)).toHaveLength(1);
+    infoSpy.mockClear();
+
+    // The legitimate session_end, then job-2's whole dispatch, then job-1's
+    // stray duplicate session_end — the measured 3-in-52s shape. A summary
+    // attached to the release path would report a session that ended minutes
+    // earlier here, and on the stray-duplicate path no session at all.
+    service.onAgentEvent('session_end');
+    vi.advanceTimersByTime(7_000);
+    service.onAgentEvent('session_start', 'job-2');
+    service.onAgentEvent('session_end');
+
+    expect(summaryLines(infoSpy)).toHaveLength(0);
+    service.stop();
+  });
+
+  it('three capture_start events for the job that owns the booth yield captures=3 — a retake is a counted quantity for the first time', () => {
+    vi.useFakeTimers();
+    const { store } = buildStore();
+    const infoSpy = vi.spyOn(queueLogger, 'info');
+    const service = startFirstSession(store);
+
+    service.onAgentEvent('capture_start', 'job-1', {});
+    service.onAgentEvent('capture_start', 'job-1', {});
+    service.onAgentEvent('capture_start', 'job-1', {});
+    service.onAgentEvent('processing_start', 'job-1', { param5: COMPOSITE_PATH });
+
+    expect(summaryLines(infoSpy)[0]).toContain('captures=3');
+    service.stop();
+  });
+
+  it('a capture_start stamped with a jobId that is not the attributed one increments nothing', () => {
+    vi.useFakeTimers();
+    const { store } = buildStore();
+    const infoSpy = vi.spyOn(queueLogger, 'info');
+    const service = startFirstSession(store);
+
+    // The Agent's stale-activeJobId shape, arriving mid-session for job-1.
+    service.onAgentEvent('capture_start', 'job-2', {});
+    service.onAgentEvent('processing_start', 'job-1', { param5: COMPOSITE_PATH });
+
+    // No entry was ever created, so the count is an explicit unknown rather
+    // than a zero that would read as "the guest was never photographed".
+    expect(summaryLines(infoSpy)[0]).toContain('captures=unknown');
+    service.stop();
+  });
+
+  it('a job closed with no counter entry at all reports captures=unknown, not captures=0', () => {
+    vi.useFakeTimers();
+    const { store } = buildStore();
+    const infoSpy = vi.spyOn(queueLogger, 'info');
+    const service = startFirstSession(store);
+
+    // The restart-mid-session shape: the counter is in memory only, so a
+    // process that restarted after the captures degrades to unknown. Reporting
+    // 0 would be a wrong number rather than a missing one.
+    service.onAgentEvent('processing_start', 'job-1', { param5: COMPOSITE_PATH });
+
+    expect(summaryLines(infoSpy)[0]).toContain('captures=unknown');
+    service.stop();
+  });
+
+  it('the counter is deleted at close, so a second session reads its own count and not an accumulated one', () => {
+    vi.useFakeTimers();
+    const { store } = buildStore();
+    const infoSpy = vi.spyOn(queueLogger, 'info');
+    const service = startFirstSession(store);
+
+    service.onAgentEvent('capture_start', 'job-1', {});
+    service.onAgentEvent('capture_start', 'job-1', {});
+    service.onAgentEvent('processing_start', 'job-1', { param5: COMPOSITE_PATH });
+    service.onAgentEvent('session_end');
+
+    vi.advanceTimersByTime(7_000); // dispatch job-2
+    service.onAgentEvent('session_start', 'job-2');
+    service.onAgentEvent('capture_start', 'job-2', {});
+    service.onAgentEvent('processing_start', 'job-2', { param5: COMPOSITE_PATH });
+
+    const lines = summaryLines(infoSpy);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('captures=2');
+    // 1, not 3. A map that were never cleaned would read 3 here, and would also
+    // grow without bound across a long event.
+    expect(lines[1]).toContain('job=job-2');
+    expect(lines[1]).toContain('captures=1');
+    service.stop();
   });
 });
 
