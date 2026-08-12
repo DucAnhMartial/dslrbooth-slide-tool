@@ -1,8 +1,18 @@
 import { Router, Request, Response } from 'express';
 import { labelLogger } from '../logging/logger';
 import { getConfig } from '../config';
-import { renderCmsDashboardPage } from './cmsPages';
 import { handleAssetUpload, isStoredAssetUrl } from './uploadHandler';
+import {
+  renderCmsEventListPage,
+  renderCmsEventCreatePage,
+  renderCmsEventFormPage,
+  FONT_CHOICES,
+  LAYOUT_STYLES,
+  FIELD_CAPS,
+  PHOTO_COUNT_RANGE,
+  PHOTO_DURATION_RANGE,
+  SAVE_ERROR,
+} from './cmsEventPages';
 import type { EventConfig } from '../types';
 import type { EventSummary, EventUpdatePatch } from '../state/localStore';
 
@@ -40,24 +50,14 @@ export interface CmsEventRouteOptions {
   maxBytes?: number;
 }
 
-const MAX_EVENT_NAME_LENGTH = 80;
-
-/**
- * UI-SPEC's save-failure copy, verbatim. Defined here rather than in the page
- * module because the JSON save route is the first thing that needs it; the
- * page module imports it so the string the API returns and the string the
- * browser renders can never drift into two slightly different apologies.
- */
-export const SAVE_ERROR = 'Không lưu được cấu hình — vui lòng thử lại. Nếu vẫn lỗi, liên hệ kỹ thuật.';
-export const SAVE_SUCCESS = 'Đã lưu cấu hình sự kiện';
-
 /**
  * The event-update field vocabulary, and the validation that stands between an
- * operator's browser and what every TV in the room renders.
+ * operator's browser and what every TV in the room renders (T-08-17).
  *
- * Plan 08-03 Task 1 covers the three uploaded-asset URLs; the remaining CMS-01
- * fields join this table in Task 2. Each entry validates a value and returns
- * either the column value to write or `undefined` for "refuse the whole save".
+ * Each entry validates one value and returns either the column value to write
+ * or `undefined`, which refuses the whole save. Every cap and every envelope
+ * lives in `cmsEventPages.ts` beside the input attribute that advertises it,
+ * so the form and the check below cannot state different limits.
  */
 type FieldValidator = (raw: unknown) => string | number | null | undefined;
 
@@ -74,10 +74,85 @@ const assetUrlField: FieldValidator = (raw) => {
   return isStoredAssetUrl(raw) ? raw : undefined;
 };
 
+/**
+ * A capped free-text field. Emptying it writes NULL, which read-time coalescing
+ * resolves back to the shipped default — that is what makes "clear this" mean
+ * "go back to the default" rather than "render nothing on the wall".
+ */
+function textField(cap: number): FieldValidator {
+  return (raw) => {
+    if (raw === null || raw === '') return null;
+    if (typeof raw !== 'string') return undefined;
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) return null;
+    // The cap is applied to what will be STORED and rendered, after trimming,
+    // so trailing whitespace cannot be used to smuggle a longer string past a
+    // check that ran on the raw value.
+    return trimmed.length <= cap ? trimmed : undefined;
+  };
+}
+
+/** The event name is the one text field that may not be emptied. */
+const nameField: FieldValidator = (raw) => {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  return trimmed.length <= FIELD_CAPS.name ? trimmed : undefined;
+};
+
+/**
+ * Exactly six hex digits after a `#`, and nothing else.
+ *
+ * These values are written into CSS custom properties on the room screen, so
+ * the accepted grammar is deliberately narrower than CSS's own: `red` and
+ * `rgb(0,0,0)` are perfectly valid CSS and are refused here anyway, because a
+ * permissive colour parser at this boundary is a CSS-injection surface and a
+ * six-digit hex is all the colour picker in the form can produce.
+ */
+const colorField: FieldValidator = (raw) => {
+  if (raw === null || raw === '') return null;
+  if (typeof raw !== 'string') return undefined;
+  return /^#[0-9a-fA-F]{6}$/.test(raw) ? raw.toLowerCase() : undefined;
+};
+
+/** An enumerated value, refused rather than coerced when unknown. */
+function enumField(values: readonly string[]): FieldValidator {
+  return (raw) => (typeof raw === 'string' && values.includes(raw) ? raw : undefined);
+}
+
+/**
+ * A bounded integer. Out of range is REFUSED, never clamped: a silent clamp
+ * leaves the operator's form and the room screen disagreeing about what was
+ * saved, and the operator finds out from the wall rather than from the CMS.
+ *
+ * `null` is not accepted — these two fields always have a value, the form
+ * always submits one, and "no photo count" is not a state the screen can
+ * render.
+ */
+function intField(range: { min: number; max: number }): FieldValidator {
+  return (raw) => {
+    if (typeof raw !== 'number' || !Number.isInteger(raw)) return undefined;
+    return raw >= range.min && raw <= range.max ? raw : undefined;
+  };
+}
+
 const FIELD_VALIDATORS: Record<string, FieldValidator> = {
+  name: nameField,
   logo_url: assetUrlField,
   background_url: assetUrlField,
   qr_image_url: assetUrlField,
+  color_dominant: colorField,
+  color_secondary: colorField,
+  color_accent: colorField,
+  color_text: colorField,
+  color_text_muted: colorField,
+  font_choice: enumField(FONT_CHOICES),
+  layout_style: enumField(LAYOUT_STYLES),
+  idle_heading: textField(FIELD_CAPS.idle_heading),
+  idle_sub: textField(FIELD_CAPS.idle_sub),
+  qr_cta_text: textField(FIELD_CAPS.qr_cta_text),
+  photo_count: intField(PHOTO_COUNT_RANGE),
+  photo_duration_ms: intField(PHOTO_DURATION_RANGE),
 };
 
 /**
@@ -108,8 +183,9 @@ export function validateEventPatch(
  * `requireSession()`, so nothing here re-checks authentication — the
  * ordering in the parent router is the control.
  *
- * Field validation beyond the name is plan 08-03's surface; this plan's
- * routes are the tracer's minimum: list, create, activate.
+ * Page routes render HTML; every mutation is a JSON POST under /api/. The
+ * split is deliberate: the pages are progressive-enhancement shells and the
+ * mutations are the contract the tests drive.
  */
 export function createCmsEventRoutes(
   store: CmsEventStore,
@@ -119,20 +195,42 @@ export function createCmsEventRoutes(
   const uploadDir = opts.uploadDir ?? getConfig().CMS_UPLOAD_DIR;
   const maxBytes = opts.maxBytes ?? getConfig().CMS_UPLOAD_MAX_BYTES;
 
-  router.get('/', (_req: Request, res: Response) => {
+  function renderList(res: Response): void {
     res.type('html').send(
-      renderCmsDashboardPage({
+      renderCmsEventListPage({
         events: store.listEvents(),
         activeEventId: store.getActiveEventId(),
       }),
     );
+  }
+
+  // `/` and `/events` are the same page. The operator lands on the event
+  // library after login rather than on a separate dashboard, because the
+  // library IS the dashboard — every CMS action starts by choosing an event.
+  router.get('/', (_req: Request, res: Response) => renderList(res));
+  router.get('/events', (_req: Request, res: Response) => renderList(res));
+
+  // Before '/events/:id', or 'new' would be read as an event id.
+  router.get('/events/new', (_req: Request, res: Response) => {
+    res.type('html').send(renderCmsEventCreatePage());
+  });
+
+  router.get('/events/:id', (req: Request, res: Response) => {
+    const event = store.getEventConfig(req.params.id);
+    if (!event) {
+      res.status(404).json({ error: 'Event not found' });
+      return;
+    }
+    const notice =
+      req.query.saved !== undefined ? 'saved' : req.query.error !== undefined ? 'error' : undefined;
+    res.type('html').send(renderCmsEventFormPage({ event, notice }));
   });
 
   router.post('/api/events', (req: Request, res: Response) => {
     const raw = (req.body ?? {}) as { name?: unknown };
-    const name = typeof raw.name === 'string' ? raw.name.trim() : '';
-    if (!name || name.length > MAX_EVENT_NAME_LENGTH) {
-      res.status(400).json({ error: 'Invalid event' });
+    const name = nameField(raw.name);
+    if (typeof name !== 'string') {
+      res.status(400).json({ error: SAVE_ERROR });
       return;
     }
 

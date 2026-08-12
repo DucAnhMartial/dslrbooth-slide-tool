@@ -449,7 +449,10 @@ describe('UI-SPEC contracts in the rendered CMS markup', () => {
 
   it('truncates long list names with an ellipsis while carrying the full name in title', async () => {
     const h = build();
-    const longName = 'Tiệc cưới của anh Nguyễn Văn A và chị Trần Thị B tại sảnh lớn';
+    // 48 characters — long enough to overflow a list row, inside the 60-cap.
+    // (The 61-character version of this string was the first thing the server
+    // cap actually refused while this suite was being written.)
+    const longName = 'Tiệc cưới của anh Nguyễn Văn A và chị Trần Thị B';
     await createEvent(h, longName);
 
     const res = await request(h.app).get('/cms/events').set('Cookie', h.cookie);
