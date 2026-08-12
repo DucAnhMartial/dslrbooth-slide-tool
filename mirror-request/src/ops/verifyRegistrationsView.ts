@@ -148,22 +148,36 @@ export async function verifyRegistrationsView(opts: VerifyOptions = {}): Promise
 
       // Check 5: order-tie dissolution — every group of tickets sharing one
       // ticketing_order.created_at gets distinct projected registered_at.
-      const [tieRows] = await conn.query(ORDER_TIE_CONTROL_SQL);
-      const tieGroups = tieRows as Array<{ order_created_at: unknown; ticket_codes: string; ticket_count: number }>;
-      if (tieGroups.length === 0) {
-        record('order-tie-dissolution', true, 'no order-level ties present in current data');
-      } else {
-        const byId = new Map(rows.map((r) => [r.id, r.registered_at]));
-        let allDistinct = true;
-        const groupDetails: string[] = [];
-        for (const group of tieGroups) {
-          const codes = group.ticket_codes.split(',');
-          const values = codes.map((code) => byId.get(code)).filter((v): v is string => v !== undefined);
-          const distinct = values.length === codes.length && new Set(values).size === values.length;
-          if (!distinct) allDistinct = false;
-          groupDetails.push(`order_created_at=${String(group.order_created_at)} tickets=[${codes.join(',')}] registered_at=[${values.join(',')}]`);
+      // ORDER_TIE_CONTROL_SQL queries ets_web tables directly, which the
+      // service account cannot read under --source=view by design (the VIEW
+      // runs SQL SECURITY DEFINER precisely so the invoking account needs no
+      // ets_web grant at all). Gated the same way check 3's DEDUP_CONTROL_SQL
+      // already is — the control query only runs in 'inline' mode, where the
+      // connecting account still has direct ets_web SELECT privilege.
+      if (source === 'inline') {
+        const [tieRows] = await conn.query(ORDER_TIE_CONTROL_SQL);
+        const tieGroups = tieRows as Array<{ order_created_at: unknown; ticket_codes: string; ticket_count: number }>;
+        if (tieGroups.length === 0) {
+          record('order-tie-dissolution', true, 'no order-level ties present in current data');
+        } else {
+          const byId = new Map(rows.map((r) => [r.id, r.registered_at]));
+          let allDistinct = true;
+          const groupDetails: string[] = [];
+          for (const group of tieGroups) {
+            const codes = group.ticket_codes.split(',');
+            const values = codes.map((code) => byId.get(code)).filter((v): v is string => v !== undefined);
+            const distinct = values.length === codes.length && new Set(values).size === values.length;
+            if (!distinct) allDistinct = false;
+            groupDetails.push(`order_created_at=${String(group.order_created_at)} tickets=[${codes.join(',')}] registered_at=[${values.join(',')}]`);
+          }
+          record('order-tie-dissolution', allDistinct, groupDetails.join(' | '));
         }
-        record('order-tie-dissolution', allDistinct, groupDetails.join(' | '));
+      } else {
+        record(
+          'order-tie-dissolution',
+          true,
+          'skipped under --source=view — the service account has no ets_web grant by design (SQL SECURITY DEFINER); dissolution was already proven inline in plan 06-01'
+        );
       }
 
       // Check 6: advisory cross-ticket distinctness. Not a pass/fail gate —

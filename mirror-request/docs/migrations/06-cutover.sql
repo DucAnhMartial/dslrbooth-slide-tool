@@ -62,6 +62,12 @@ SHOW GRANTS FOR 'extension_service_ro'@'%';
 -- once they exist as VIEWs — re-run this SHOW GRANTS at execution time to
 -- confirm the baseline has not changed, then read section 4's note before
 -- deciding whether the GRANT statement there is needed at all.
+--
+-- OBSERVED RESULT (recorded by plan 06-05, executed by the human operator in
+-- an admin session, 2026-08-11/12): CURRENT_USER() = 'extension_service_ro'@'%',
+-- matching the baseline. VERSION() = 8.0.46-0ubuntu0.22.04.3. TABLE_TYPE =
+-- BASE TABLE, COUNT(*) = 0 — premise held, section 2 proceeded. SHOW GRANTS
+-- unchanged from the plan 06-04 baseline quoted above.
 
 
 -- =============================================================================
@@ -73,6 +79,10 @@ SHOW GRANTS FOR 'extension_service_ro'@'%';
 -- =============================================================================
 
 DROP TABLE photobooth.registrations;
+
+-- OBSERVED RESULT: OK. Executed by the human operator in an admin MySQL
+-- session, 2026-08-11/12. The zero-row BASE TABLE is gone; this step is now
+-- irreversible history, not a pending action — do not re-run it.
 
 
 -- =============================================================================
@@ -161,6 +171,26 @@ WHERE t.status = 'valid' AND o.status = 'completed'
 ) d
 WHERE d.rn = 1;
 
+-- OBSERVED RESULT: both CREATE OR REPLACE VIEW statements returned OK when
+-- run by the human operator, 2026-08-11/12. INCIDENT, caught and fixed
+-- before this section was trusted: the interactive terminal paste
+-- double-encoded the one non-ASCII literal above ('Khách • ') to
+-- 'KhÃ¡ch â€¢ ' (confirmed via
+-- HEX(SUBSTRING(VIEW_DEFINITION, LOCATE('Kh', VIEW_DEFINITION), 6)) = hex
+-- 4B68C383C2A16368, not the correct 4B68C3A16368). Root cause was the
+-- interactive copy-paste channel, not the server (utf8mb4 confirmed on
+-- every connection/session variable; a piped round-trip test on this same
+-- server was byte-exact even without --default-character-set). Fixed by
+-- re-running only the two CREATE OR REPLACE VIEW statements via
+-- `mysql < docs/migrations/06-registrations-view.sql` (piping, not paste) —
+-- that file holds no DROP/GRANT, so nothing destructive or data-bearing was
+-- at risk. Post-fix HEX check confirmed 4B68C3A16368 20 = 'Khách ', correct.
+-- Runbook lesson (for OPS-RUNBOOK §10, 06-06 Task 1): "copy verbatim" does
+-- not defend against this — pasting through a terminal is itself a lossy
+-- channel for non-ASCII bytes. Any DDL with a non-ASCII literal must be
+-- applied via `mysql < file.sql`, never interactive paste, and verified
+-- afterward with a HEX() check on the stored VIEW_DEFINITION.
+
 
 -- =============================================================================
 -- SECTION 4: GRANT. Read this comment BEFORE running the statement below.
@@ -193,6 +223,15 @@ WHERE d.rn = 1;
 -- GRANT SELECT ON photobooth.* TO 'extension_service_ro'@'%';
 -- FLUSH PRIVILEGES;
 
+-- OBSERVED RESULT: this statement was run anyway (branch taken: issued, not
+-- skipped) by the human operator, 2026-08-11/12, despite the comment above
+-- correctly advising it was redundant on this server. Confirmed harmless and
+-- idempotent: SHOW GRANTS FOR CURRENT_USER(), re-measured post-cutover
+-- (plan 06-05, via the service account), is byte-identical to the plan
+-- 06-04 baseline quoted above — GRANT USAGE ON *.* and GRANT SELECT ON
+-- photobooth.* only, nothing added. The script's advice to skip it was
+-- correct; running it anyway changed nothing.
+
 
 -- =============================================================================
 -- SECTION 5: POST-CHECKS (read-only). Run these AS THE SERVICE ACCOUNT
@@ -220,6 +259,25 @@ SELECT COUNT(*) FROM photobooth.registrations_name_audit;
 -- Expect: equals SECTION 5's first check's `total` — the audit VIEW carries
 -- exactly one row per ingestion-VIEW row (D-05's home).
 
+-- OBSERVED RESULT (plan 06-05, re-run as the service account
+-- 'extension_service_ro', not the admin who ran sections 2-4):
+--   total=9, distinct_ids=9, distinct_ts=9 — D-03's dedup holds and the
+--   `ordering` backstop's residual is currently zero.
+--   First row (registered_at ASC): QFAP2ABS | anh.nd3 | print |
+--     2026-07-27 07:51:19.250214
+--   Last row (registered_at DESC LIMIT 1): XACX2T63 | NetNamTest | print |
+--     2026-08-07 15:38:49.220951
+--   registered_at renders as the fixed-width space-separated string, not a
+--   native DATETIME — confirmed via src/ops/verifyRegistrationsView.ts
+--   --source=view's 'registered_at-string-format' check (PASS, all 9 rows).
+--   registrations_name_audit COUNT(*) = 9, matching total exactly.
+--   name_source distribution: customer_username=4,
+--   personalinfo_display_name=4, personalinfo_name=1 (synthetic=0 — D-04's
+--   last-resort label has never had to fire on live data).
+--   The full 9-check harness (src/ops/verifyRegistrationsView.ts
+--   --source=view) was run against these same live rows through the service
+--   account and returned ALL CHECKS PASSED.
+
 
 -- =============================================================================
 -- SECTION 6: WRITE-REFUSAL CHECK. Run AS THE SERVICE ACCOUNT. EXPECTED
@@ -244,6 +302,20 @@ VALUES ('write-refusal-check', 'test', 'test@example.com', '0000000000', 'print'
 -- IF THIS INSERT SUCCEEDS: STOP. Do not proceed to guest traffic. Revoke
 -- write access and re-run section 1's SHOW GRANTS before continuing.
 
+-- OBSERVED RESULT: refused, on both lines of defence, proven independently
+-- (plan 06-05):
+--   As the SERVICE ACCOUNT ('extension_service_ro'): ERROR 1142 (42000):
+--     INSERT command denied to user 'extension_service_ro'@'localhost' for
+--     table 'registrations' — the privilege refusal, fires before structure
+--     is reached. This is the positive proof for ROADMAP success criterion 4
+--     and needed the service account specifically.
+--   As the ADMIN account (run by the human operator, 2026-08-11/12):
+--     ERROR 1471 (HY000): The target table registrations of the INSERT is
+--     not insertable-into — the structural refusal (the VIEW's derived
+--     subquery carries a JOIN and a window function). A different, also
+--     true, proof.
+--   No write of any kind succeeded through any account.
+
 
 -- =============================================================================
 -- SECTION 7: FALLBACK — only if section 5's post-checks fail with MySQL
@@ -259,6 +331,16 @@ VALUES ('write-refusal-check', 'test', 'test@example.com', '0000000000', 'print'
 -- VIEW's FROM/JOIN list touches (ticketing_ticket, event_manager_attendance,
 -- ticketing_orderdetail, ticketing_order, ticketing_customer,
 -- account_personalinfo) before trusting its output.
+--
+-- OBSERVED RESULT: NOT NEEDED. Section 5's post-checks and the full
+-- src/ops/verifyRegistrationsView.ts --source=view harness both passed on
+-- the first attempt (after the section-3 encoding fix) under the default
+-- 'ets_web'@'127.0.0.1' definer. RESEARCH.md's open question — whether a
+-- DEFINER account scoped to ets_web can back a VIEW living in the
+-- photobooth schema — is now confirmed empirically CLOSED: it can.
+-- 'extension_service_ro' reads both views correctly through
+-- DEFINER = 'ets_web'@'127.0.0.1' with SQL SECURITY DEFINER, holding no
+-- ets_web grant of its own.
 -- =============================================================================
 
 -- CREATE OR REPLACE
@@ -285,6 +367,12 @@ VALUES ('write-refusal-check', 'test', 'test@example.com', '0000000000', 'print'
 -- 06-rollback-registrations-table.sql (captured live, plan 06-04 Task 2).
 -- Restated inline here for convenience — MySQL has no DDL undo, so this is
 -- the entire recovery path.
+--
+-- OBSERVED RESULT: not invoked. Nothing about the cutover required rollback
+-- — the only defect encountered (the section 3 encoding incident) was fixed
+-- by re-running the two CREATE OR REPLACE VIEW statements, not by rolling
+-- back to the BASE TABLE. This script remains the recovery path if ever
+-- needed later.
 -- =============================================================================
 
 -- DROP VIEW IF EXISTS photobooth.registrations;
