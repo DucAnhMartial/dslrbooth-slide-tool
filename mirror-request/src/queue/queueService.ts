@@ -416,7 +416,38 @@ export class QueueService {
     }
   }
 
+  /**
+   * SC-4 / WINDOWS item 9. Marks every pending-print slot whose deadline has
+   * passed and writes one warning per slot — the only anchor at which
+   * `No print upload seen` can be correct.
+   *
+   * The literal token `No print upload seen` is carried over unchanged from
+   * the message this replaces, so an operator's existing greps and the runbook
+   * keep working. What changed is when it fires: at `session_end` it fired on
+   * every successful session, because dslrBooth delivers the composite about a
+   * second after `session_end` on some sessions and 26 seconds before it on
+   * others.
+   *
+   * At most one warning per slot, ever, regardless of sweep frequency:
+   * expirePendingPrints() marks the rows `expired` inside the same transaction
+   * that returns them, so a row cannot be handed to this method twice.
+   */
+  private sweepPendingPrints(): void {
+    for (const row of this.store.expirePendingPrints(Date.now())) {
+      queueLogger.warn(
+        `No print upload seen for ${row.jobId} within the pending-print window; the composite ${row.compositePath} was produced but no upload arrived, so the slideshow will stay empty`,
+      );
+    }
+  }
+
   private tick(): void {
+    // FIRST statement, deliberately above the `booth !== 'IDLE'` early return
+    // below. A slot can only be open while a session is in progress, so a
+    // sweep placed after that guard would never run during the only window
+    // that matters and the warning would never fire for a booth that never
+    // sees session_end. The placement looks arbitrary and is not.
+    this.sweepPendingPrints();
+
     const booth = this.store.getBoothState();
     if (booth !== 'IDLE') return;
     if (this.announcingJobId) return;

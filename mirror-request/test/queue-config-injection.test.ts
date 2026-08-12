@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueueService } from '../src/queue/queueService';
 import type { LocalStore } from '../src/state/localStore';
+import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
 
 // D-13: queueService.ts must read its timing and retry knobs from the
 // injected typed config object, never from process.env directly. Every case
@@ -55,6 +56,12 @@ function buildStore(opts: BuildStoreOptions = {}) {
     getJobRegistration: () => undefined,
     requeueWithRetry,
     failJob,
+    // tick() sweeps the pending-print registry on its first statement, above
+    // the IDLE guard, so every mocked store a QueueService is built with has to
+    // satisfy that part of the real LocalStore surface. The shared helper is
+    // used rather than an inline stub so the three-status semantics cannot
+    // drift away from the SQL they stand in for (07-03).
+    ...createPendingPrintRegistry().registry,
   } as unknown as LocalStore;
 
   return { store, requeueWithRetry, failJob, jobId: job.id };

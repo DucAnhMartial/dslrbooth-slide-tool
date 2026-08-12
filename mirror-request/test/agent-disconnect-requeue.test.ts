@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { LocalStore } from '../src/state/localStore';
+import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
 import { QueueService } from '../src/queue/queueService';
 
 // D-12/D-13: a disconnect while the booth is BUSY must return the in-flight
@@ -64,6 +65,12 @@ function buildStore(jobs: MockJob[]) {
     requeueWithRetry,
     requeueNoRetry,
     failJob,
+    // tick() sweeps the pending-print registry on its first statement, above
+    // the IDLE guard, so every mocked store a QueueService is built with has to
+    // satisfy that part of the real LocalStore surface. The shared helper is
+    // used rather than an inline stub so the three-status semantics cannot
+    // drift away from the SQL they stand in for (07-03).
+    ...createPendingPrintRegistry().registry,
   } as unknown as LocalStore;
 
   return { store, jobs, requeueWithRetry, requeueNoRetry, failJob, updateJobStatus, getBooth: () => booth };

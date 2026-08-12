@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { LocalStore } from '../src/state/localStore';
+import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
 import { QueueService } from '../src/queue/queueService';
 
 // `booth_state` is a single global row (`CHECK (id = 1)`), shared across every
@@ -148,6 +149,12 @@ describe('QueueService.recover() — D-03 age-based BUSY survival, D-04 ANNOUNCI
       getJobRegistration: () => undefined,
       requeueWithRetry,
       failJob,
+      // tick() sweeps the pending-print registry on its first statement, above
+      // the IDLE guard, so every mocked store a QueueService is built with has to
+      // satisfy that part of the real LocalStore surface. The shared helper is
+      // used rather than an inline stub so the three-status semantics cannot
+      // drift away from the SQL they stand in for (07-03).
+      ...createPendingPrintRegistry().registry,
     } as unknown as LocalStore;
 
     const queue = new QueueService(store, { SESSION_TIMEOUT_MS: 300_000, NEXT_GUEST_COUNTDOWN_MS: 7_000, SESSION_MAX_RETRIES: 2 });
@@ -184,6 +191,12 @@ describe('QueueService.recover() — D-03 age-based BUSY survival, D-04 ANNOUNCI
       getJobRegistration: () => undefined,
       requeueWithRetry,
       failJob: vi.fn(),
+      // tick() sweeps the pending-print registry on its first statement, above
+      // the IDLE guard, so every mocked store a QueueService is built with has to
+      // satisfy that part of the real LocalStore surface. The shared helper is
+      // used rather than an inline stub so the three-status semantics cannot
+      // drift away from the SQL they stand in for (07-03).
+      ...createPendingPrintRegistry().registry,
     } as unknown as LocalStore;
 
     const queue = new QueueService(store, { SESSION_TIMEOUT_MS: 300_000, NEXT_GUEST_COUNTDOWN_MS: 7_000, SESSION_MAX_RETRIES: 2 });
@@ -207,6 +220,12 @@ describe('QueueService.recover() — D-03 age-based BUSY survival, D-04 ANNOUNCI
       getJobRegistration: () => undefined,
       requeueWithRetry: vi.fn(),
       failJob: vi.fn(),
+      // tick() sweeps the pending-print registry on its first statement, above
+      // the IDLE guard, so every mocked store a QueueService is built with has to
+      // satisfy that part of the real LocalStore surface. The shared helper is
+      // used rather than an inline stub so the three-status semantics cannot
+      // drift away from the SQL they stand in for (07-03).
+      ...createPendingPrintRegistry().registry,
     } as unknown as LocalStore;
 
     const queue = new QueueService(store, { SESSION_TIMEOUT_MS: 300_000, NEXT_GUEST_COUNTDOWN_MS: 7_000, SESSION_MAX_RETRIES: 2 });
@@ -231,6 +250,12 @@ describe('QueueService.recover() — D-03 age-based BUSY survival, D-04 ANNOUNCI
       getJobRegistration: () => undefined,
       requeueWithRetry,
       failJob: vi.fn(),
+      // tick() sweeps the pending-print registry on its first statement, above
+      // the IDLE guard, so every mocked store a QueueService is built with has to
+      // satisfy that part of the real LocalStore surface. The shared helper is
+      // used rather than an inline stub so the three-status semantics cannot
+      // drift away from the SQL they stand in for (07-03).
+      ...createPendingPrintRegistry().registry,
     } as unknown as LocalStore;
 
     const queue = new QueueService(store, { SESSION_TIMEOUT_MS: 300_000, NEXT_GUEST_COUNTDOWN_MS: 7_000, SESSION_MAX_RETRIES: 2 });
@@ -256,6 +281,12 @@ describe('QueueService.recover() — D-03 age-based BUSY survival, D-04 ANNOUNCI
       getJobRegistration: () => undefined,
       requeueWithRetry,
       failJob: vi.fn(),
+      // tick() sweeps the pending-print registry on its first statement, above
+      // the IDLE guard, so every mocked store a QueueService is built with has to
+      // satisfy that part of the real LocalStore surface. The shared helper is
+      // used rather than an inline stub so the three-status semantics cannot
+      // drift away from the SQL they stand in for (07-03).
+      ...createPendingPrintRegistry().registry,
     } as unknown as LocalStore;
 
     const queue = new QueueService(store, { SESSION_TIMEOUT_MS: 300_000, NEXT_GUEST_COUNTDOWN_MS: 7_000, SESSION_MAX_RETRIES: 2 });
@@ -301,6 +332,12 @@ describe('QueueService config injection (D-13)', () => {
         getJobRegistration: () => undefined,
         requeueWithRetry: () => ({ retries: 1 }),
         failJob: () => {},
+        // tick() sweeps the pending-print registry on its first statement, above
+        // the IDLE guard, so every mocked store a QueueService is built with has to
+        // satisfy that part of the real LocalStore surface. The shared helper is
+        // used rather than an inline stub so the three-status semantics cannot
+        // drift away from the SQL they stand in for (07-03).
+        ...createPendingPrintRegistry().registry,
       } as unknown as LocalStore;
 
       const queue = new QueueService(store, {
