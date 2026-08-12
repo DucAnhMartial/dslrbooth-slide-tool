@@ -160,6 +160,22 @@ production and is listed in the fail-fast table above, not here):
 | `WAIT_ESTIMATE_DEFAULT_MS` | `180000` (3 min) | The cold-start fallback duration. Measured fact as of this writing: the production database holds exactly **1** usable completed session, so with the default `WAIT_ESTIMATE_MIN_SAMPLES` of `5` this value — rendered as "khoảng 2–3 phút" — is what production actually serves on day one, not an edge case. |
 | `DISPLAY_IP_WHITELIST` (dev default) | unset → `[]` (empty list) outside production | In any non-production `NODE_ENV`, an unset or empty value is an allow-everything development escape hatch — every request is treated as whitelisted (`isWhitelisted()` in `src/security/ipAllowlist.ts` returns `true` for an empty list). This branch is unreachable in production because of the fail-fast check above. |
 
+Ingestion VIEW and capability-URL rate-limiting variables added in Phase 6
+(optional, have working defaults — see §10 for the full contract these
+govern):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `VIEW_PROBE_INTERVAL_MS` | `60000` (1 min) | How often the VIEW health probe (§10) checks that `photobooth.registrations` still resolves and that its ordering backstop (`COUNT(*)` vs `COUNT(DISTINCT registered_at)`) still holds. Also the cadence of the D-05 name-fallback audit. |
+| `STATUS_RATE_LIMIT_WINDOW_MS` | `60000` (1 min) | The fixed window `GET /status/:jobId`'s rate limiter (§10) counts requests within, per client address. |
+| `STATUS_RATE_LIMIT_MAX` | `30` | Requests allowed per client address per window before the (max+1)th is refused with `429`. |
+| `STATUS_RATE_LIMIT_MAX_KEYS` | `10000` | The upper bound on how many distinct client addresses the limiter tracks simultaneously — bounds memory under key-rotation pressure from an attacker rotating source addresses. |
+
+None of these four belongs in the fail-fast table above: all four have
+site-independent defaults that are correct out of the box, and — per
+D-09's own reasoning for `VIEW_PROBE_INTERVAL_MS` — no supported way
+exists to switch off the only signal that ingestion is dead.
+
 See `.env.example` for the full list of environment variables this service
 reads.
 
@@ -473,6 +489,46 @@ number grows.
 real guest phone number is a strictly worse failure than over-masking an
 id, so the regex that protects phone numbers stays exactly as Phase 1
 locked it, and the id format bends around it instead.
+
+### The ingestion VIEW cutover, deploy ordering (Phase 6 addendum)
+
+Unlike this section's own Agent-auth contract above, the Phase 6 ingestion
+cutover needs **no coordinated deploy of a second component**:
+`dbPoller.ts`'s query is unchanged (D-02), so an old, already-running
+build reads the new `photobooth.registrations` VIEW exactly as it read
+the old table — there is no equivalent of "roll back both, or neither"
+here.
+
+The ordering, as actually run during this phase's own cutover (see §10
+for what each step depends on and why):
+
+1. Stop the service.
+2. Capture the rollback artefact — `SHOW CREATE TABLE
+   photobooth.registrations` plus `SHOW GRANTS`, written to a committed,
+   runnable restore script (`src/ops/captureRegistrationsRollback.ts` →
+   `docs/migrations/06-rollback-registrations-table.sql`). This must exist
+   and be reviewed before the next step: MySQL has no DDL undo.
+3. Apply the DDL — `docs/migrations/06-cutover.sql`'s `DROP TABLE` and the
+   two `CREATE OR REPLACE VIEW` statements. **Pipe the file into `mysql`;
+   never paste it into an interactive session** — see §10's "Applying DDL
+   with a non-ASCII literal" for why this is not optional caution.
+4. Verify as the service account (`extension_service_ro`), not the admin
+   account that ran the DDL — the account that matters is the one
+   `dbPoller.ts` actually uses. `npx ts-node
+   src/ops/verifyRegistrationsView.ts --source=view` (or the built
+   `dist/` equivalent) is the harness; see §10.
+5. Seed the cursor — `node dist/ops/seedRegistrationsCursor.js`, before
+   the process (re)starts. `DBPoller` is constructed unconditionally in
+   `index.ts`, with no enable flag, so an unseeded cursor at boot would
+   dispatch every historical row.
+6. Build — `npm run build`.
+7. Start the service.
+
+**Rollback:** the two `DROP VIEW` statements
+(`DROP VIEW IF EXISTS photobooth.registrations; DROP VIEW IF EXISTS
+photobooth.registrations_name_audit;`) plus the `CREATE TABLE` captured in
+step 2 — the full runnable script lives at
+`docs/migrations/06-rollback-registrations-table.sql`.
 
 ## 8. Guest notification delivery
 
@@ -893,3 +949,365 @@ hold an open `/display` connection simultaneously. Judged acceptable
 because, after D-09, the endpoint is now LAN-restricted by
 `DISPLAY_IP_WHITELIST` and in practice serves a handful of physical
 browsers in one room, not an internet-facing audience.
+
+## 10. The ingestion VIEW (`photobooth.registrations`)
+
+This is the fifth published contract this service owns, alongside §1's
+webhook signing contract, §7's Agent auth contract, §8's notification
+payload contract, and §9's guest-facing read surfaces — except this one is
+not code this repository controls. It is a MySQL `VIEW` living inside the
+`photobooth` database, defined over six tables owned by a different
+application (`ets_web`) in a different repository this project never
+modifies. Everything below exists because nobody upstream will ever be told
+this VIEW depends on their schema.
+
+### What it is and what it depends on
+
+`photobooth.registrations` and its sibling `photobooth.registrations_name_audit`
+are `VIEW`s, not tables, over `ets_web.ticketing_ticket`,
+`ets_web.event_manager_attendance`, `ets_web.ticketing_orderdetail`,
+`ets_web.ticketing_order`, `ets_web.ticketing_customer` and
+`ets_web.account_personalinfo`. `ets_web` and `photobooth` share one MySQL
+instance, which is the only reason a cross-database VIEW is possible at
+all — there is no application code anywhere on this path. The fallback
+chain that resolves a guest's name, the validity filter that excludes
+cancelled/unpaid tickets, and the per-ticket de-duplication are all SQL,
+defined once in `src/ops/registrationsViewSql.ts`'s
+`REGISTRATIONS_INNER_SELECT` and generated — never hand-typed a second
+time — into every other artefact on this list.
+
+`dbPoller.ts` (closed to edits, D-02) reads exactly this query against
+`photobooth.registrations`, unchanged from before this phase:
+
+```
+SELECT id, name, email, phone, mode, registered_at
+FROM registrations WHERE registered_at > ? ORDER BY registered_at ASC LIMIT ?
+```
+
+The VIEW satisfies that query by producing exactly those six columns, in
+that order, for every ticket that is `valid` and whose order is
+`completed` — nothing on the polling side needed to change, or ever will,
+for this integration to keep working.
+
+### The standing cost, stated plainly
+
+An upstream `ets_web` migration that renames a table or a column referenced
+above breaks ingestion on this side with **no signal to whoever ran it.**
+Nobody on the `ets_web` side of the organisation knows this VIEW exists.
+This section is the only place that fact is written down. The health probe
+below (§10, "The health probe") is the only automated defence against it,
+and it detects that the VIEW broke — not why, and not that a *behavioural*
+change upstream (see "A VALID ticket with zero attendance rows" below) made
+the VIEW quietly wrong instead of loudly broken.
+
+### The files
+
+Name them by path; their SQL is not reproduced here because a copy that
+drifts from the generated original is worse than no copy at all.
+
+| File | What it is |
+|---|---|
+| `docs/migrations/06-registrations-view.sql` | The DDL — both `CREATE OR REPLACE VIEW` statements, generated (never hand-edited) from `src/ops/registrationsViewSql.ts` via `npx ts-node src/ops/verifyRegistrationsView.ts --emit-sql`. |
+| `docs/migrations/06-cutover.sql` | The ordered, 8-section cutover script a human runs by hand: pre-flight checks, the destructive `DROP TABLE`, the two `CREATE VIEW` statements (copied verbatim from the file above), the grant, post-checks run as the service account, the deliberate write-refusal check, a documented fallback, and the rollback. |
+| `docs/migrations/06-rollback-registrations-table.sql` | The captured pre-phase `CREATE TABLE` definition plus the pre-cutover grant baseline, generated by `src/ops/captureRegistrationsRollback.ts` before the cutover ran. This is the entire recovery path — MySQL has no DDL undo. |
+
+### Applying DDL with a non-ASCII literal — pipe the file, never paste it
+
+**This happened during this phase's own cutover, not a hypothetical.** The
+DDL contains one non-ASCII literal: D-04's last-resort name label,
+`'Khách • '`. The operator applied `06-cutover.sql`'s two `CREATE OR
+REPLACE VIEW` statements by copy-pasting them into an interactive `mysql>`
+prompt — exactly as the script's own header instructed ("copied VERBATIM").
+The paste path double-encoded that one literal: the server stored
+`'KhÃ¡ch â€¢ '` instead of `'Khách • '`. This was caught, not assumed, by
+measuring the stored bytes directly:
+
+```sql
+SELECT HEX(SUBSTRING(VIEW_DEFINITION, LOCATE('Kh', VIEW_DEFINITION), 6))
+FROM information_schema.VIEWS
+WHERE TABLE_SCHEMA='photobooth' AND TABLE_NAME='registrations';
+```
+
+returned `4B68C383C2A16368` (`KhÃ¡ch`) where the correct value is
+`4B68C3A16368` (`Khách`). The server itself was exonerated by measurement
+before assuming the corruption was somewhere else: every `character_set_*`
+session variable was `utf8mb4`, and a piped round-trip
+(`printf "SELECT HEX('Khách •');" | mysql`) on this same server returned
+the byte-exact `4B68C3A1636820E280A2`, even without
+`--default-character-set`. The corruption lived entirely in the interactive
+paste path — a terminal is itself a lossy channel for non-ASCII bytes, and
+an echoed-back terminal display can look correct while the stored bytes are
+not. It was fixed by re-running only the two `CREATE OR REPLACE VIEW`
+statements via `mysql < docs/migrations/06-registrations-view.sql`
+(piping the file, not pasting it — that file carries no `DROP`/`GRANT`, so
+nothing destructive was at risk), then re-measuring: `4B68C3A16368`,
+correct.
+
+**The rule this leaves behind:** "copy the statements verbatim" defends
+against transcription error but not against encoding corruption, because
+copy-paste through an interactive terminal is itself a lossy channel. Any
+DDL carrying a non-ASCII literal must be applied by **piping the file**
+(`mysql < path/to/file.sql`), never by pasting it into an interactive
+session, and verified afterward with a `HEX()` check on the stored
+definition — do not trust the echoed terminal output, and do not skip the
+`HEX()` check because the paste "looked fine."
+
+### The grant
+
+The account resolved by `SELECT CURRENT_USER()` during cutover is
+`extension_service_ro@%` — matching `config.ts`'s `DB_USER` default
+exactly (measured, not assumed). Its only relevant grant is:
+
+```
+GRANT SELECT ON `photobooth`.* TO `extension_service_ro`@`%`
+```
+
+That grant is schema-wide (`photobooth.*`), so it already covers both
+VIEWs the moment they exist — no per-VIEW grant is needed, and none was
+issued beyond this one statement. Neither VIEW needs `extension_service_ro`
+to hold **any** grant on `ets_web` at all: both are defined
+`DEFINER = 'ets_web'@'127.0.0.1'` with `SQL SECURITY DEFINER`, so the VIEW
+runs as its definer account, not as the account that queries it. Re-check
+the live grant with:
+
+```sql
+SHOW GRANTS FOR CURRENT_USER();
+```
+
+The deliberate write that must be refused, run as the service account:
+
+```sql
+INSERT INTO photobooth.registrations (id, name, email, phone, mode, registered_at)
+VALUES ('write-refusal-check', 'test', 'test@example.com', '0000000000', 'print', NOW());
+```
+
+This is expected to fail with `ERROR 1142 (42000): INSERT command denied to
+user 'extension_service_ro'@'...' for table 'registrations'` — refused on
+privilege, before the VIEW's own structure is ever reached. A second,
+independent line of defence exists even if privilege were ever mistakenly
+widened: the VIEW's derived subquery contains a `JOIN` and a window
+function, which MySQL's own updatable-view rules make structurally
+non-insertable regardless of grant, producing `ERROR 1471 (HY000): The
+target table registrations of the INSERT is not insertable-into` instead.
+Both were independently confirmed during this phase's cutover — 1142 as the
+service account, 1471 as the admin account. **A successful `INSERT` here is
+a blocking finding**, not a warning: it means `CLAUDE.md`'s "never write to
+the real backend DB" guarantee does not hold at the database layer, and
+guest traffic must not proceed until the grant is corrected.
+
+### Cursor seeding
+
+`DBPoller` is constructed unconditionally in `index.ts` — there is no
+enable/disable flag — so the `registrations` cursor must be seeded to
+"now" **before the process (re)starts** against a live, non-empty VIEW.
+Run this before `npm run build && npm start` (or your process manager's
+restart), never after:
+
+```bash
+node dist/ops/seedRegistrationsCursor.js
+```
+
+The part nobody would guess: the seed must be written in the VIEW's own
+lexical format, `YYYY-MM-DD HH:MM:SS.ffffff`, read from **MySQL's own
+clock** (`SELECT DATE_FORMAT(NOW(6), '%Y-%m-%d %H:%i:%s.%f')`), never from
+`new Date().toISOString()` on the Node host. `dbPoller.ts`'s cursor filter
+(`registered_at > ?`) is a **lexical string comparison**, not a
+type-aware date comparison, and an ISO-8601 seed sorts *below* a
+same-day VIEW-format value:
+
+```
+'2026-08-11 14:00:01.000000' > '2026-08-11T14:00:00.000Z'  →  false
+```
+
+An ISO-shaped seed would therefore fail to exclude same-day historical
+rows for the rest of that calendar day — the opposite of what seeding is
+for. `seedRegistrationsCursor.ts` asserts the MySQL-returned value matches
+the correct format and throws rather than silently falling back to
+`toISOString()` if it does not. Re-seeding an already-seeded cursor is
+refused unless `--force` is passed, naming the existing value, so a
+re-run cannot silently skip every guest between the old seed and the new
+one.
+
+### The health probe
+
+`VIEW_PROBE_INTERVAL_MS` (default `60000`ms, §3) controls how often
+`src/ops/viewHealthProbe.ts`'s `ViewHealthProbe` runs one query against the
+VIEW, at startup and on that interval thereafter. It branches on the MySQL
+error code:
+
+- **`ER_VIEW_INVALID` or `ER_NO_SUCH_USER`** — the VIEW itself is broken
+  (an upstream schema change, or its DEFINER account no longer exists).
+  Logs one `error` and dispatches exactly one alert through
+  `NOTIFY_WEBHOOK_URL` (§8). The exact alert payload, quoted verbatim from
+  `viewHealthProbe.ts`:
+  ```json
+  { "source": "extension-service", "severity": "error", "message": "...", "timestamp": "2026-08-12T01:00:00.000Z" }
+  ```
+- **Connection-class codes** (`ECONNREFUSED`, `PROTOCOL_CONNECTION_LOST`,
+  `ETIMEDOUT`, `ER_ACCESS_DENIED_ERROR`) **and any unrecognised code** —
+  logged as a `warn`, zero alerts dispatched. A transient outage must
+  never page anyone (Phase 1 D-05's lineage) — a page firing on an unknown
+  code would train the operator to ignore alerts.
+- **A healthy cycle logs nothing.** Silence is the expected steady state,
+  not a gap in observability.
+
+`start()` returns synchronously and the first cycle is never awaited, so a
+broken VIEW can never block `app.listen()`'s callback or terminate the
+process (D-09) — this deliberately departs from `config.ts`'s production
+fail-fast pattern, and the departure is the decision: refusing to start
+would convert an ingestion outage into a total outage for the queue,
+booth, display and every guest notification already in flight.
+
+**State this explicitly to whoever is on call: the probe detects schema
+breakage, not business-logic regressions upstream.** A change to how
+`ets_web` cancels a ticket, or to which rows get an
+`event_manager_attendance` row, would pass this probe cleanly — the query
+still runs, still returns rows — and still be wrong. See "A VALID ticket
+with zero attendance rows" below for the concrete shape of that failure
+mode.
+
+### The tie detector
+
+The same probe query, `SELECT COUNT(*) AS total, COUNT(DISTINCT
+registered_at) AS distinct_registered_at FROM registrations`, does double
+duty: it also makes the `ordering` backstop observable.
+`total != distinct_registered_at` means two or more registrations share
+the exact same `registered_at` value. Because `dbPoller.ts`'s cursor
+advances to the **last row of the batch** and its filter is a strict `>`,
+a `LIMIT` boundary that happens to fall between two rows sharing that
+timestamp drops the second one permanently and silently — a guest lost at
+a poll-batch boundary. This was a real, measured hazard in the source data
+before this phase (two order-level ties, dissolved by D-01's choice of
+`event_manager_attendance.created_at` over `ticketing_order.created_at`),
+and the live VIEW currently shows `total = distinct = 9`, i.e. zero
+residual. If the alert ever fires — it names both numbers in its message —
+treat it as: (a) confirm whether `ets_web` gained a new write path that
+can produce two attendance rows with the same microsecond timestamp, and
+(b) check whether any guest queued around that timestamp was skipped, by
+comparing `photobooth.registrations` against `queue_job` for that window.
+
+### The name fallback chain
+
+Five rungs, in order, each a `name_source` value in
+`photobooth.registrations_name_audit` (never exposed in the six-column
+ingestion VIEW itself, keeping that contract at exactly six columns):
+
+1. `personalinfo_name` — `TRIM(CONCAT(first_name, ' ', last_name))`
+2. `personalinfo_display_name` — `account_personalinfo.display_name`
+3. `customer_display_name` — `ticketing_customer.display_name`
+4. `customer_username` — `ticketing_customer.username`
+5. `synthetic` — `Khách • <last 4 of ticket_code>`, the last-resort label
+   that never leaves `name` empty
+
+Every fall-through past rung 1 emits exactly one `warn`, once per guest,
+restart-safe (persisted via `LocalStore.setCursor('name_audit', ...)`).
+Quoted verbatim from `viewHealthProbe.ts`:
+
+```
+Guest name for ticket <code> came from <rung>, not first_name/last_name
+```
+
+This warn arrives **within one `VIEW_PROBE_INTERVAL_MS` of the guest
+registering, not at the instant of ingest** — the audit runs on the
+probe's own cadence, a deliberate design forced by `dbPoller.ts` being
+closed to edits (D-02), not a delay anyone chose for its own sake.
+
+**Operational note:** a guest showing on the room's display as `Khách •
+<last 4>` means the landing page did not capture a name for that
+registration — every other rung produces *some* real value from
+`ets_web`, so reaching the synthetic label specifically means none of
+rungs 1-4 resolved anything at all.
+
+### A VALID ticket with zero attendance rows
+
+RESEARCH's Pitfall 3, carried forward as an operational note rather than a
+code path this service can defend against: an upstream `ets_web` flow can
+commit `ticket.status = 'valid'` and then fail, for whatever reason, to
+create the corresponding `event_manager_attendance` row. Because the VIEW
+reaches every row through an `INNER JOIN` on that attendance table, such a
+ticket **never appears in `photobooth.registrations` at all** — not as an
+error, not as a warn, not as anything the health probe can see, because
+there is no broken row to detect; there is simply no row. If a guest
+reports that they registered and were never called, check this case
+*before* assuming an ingestion bug on this side: the VIEW cannot see a row
+that does not exist, and nothing in this service can compensate for a gap
+upstream that produces no signal of any kind.
+
+### Rate limiting `/status/:jobId`
+
+Three keys, all optional with site-independent defaults, none in the §3
+fail-fast table (§3):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `STATUS_RATE_LIMIT_WINDOW_MS` | `60000` | The fixed window a client address's request count is measured within. |
+| `STATUS_RATE_LIMIT_MAX` | `30` | Requests allowed per address per window before the next one is refused. |
+| `STATUS_RATE_LIMIT_MAX_KEYS` | `10000` | Cap on distinct tracked client addresses — bounds memory under an attacker rotating source addresses. |
+
+The (max+1)th request in a window gets `429` with exactly this body,
+quoted verbatim from `rateLimiter.ts`'s `RATE_LIMITED_BODY`:
+
+```json
+{ "error": "too many requests" }
+```
+
+One key, deliberately — no `reason`, `code`, `hint`, or `retryAfter`
+field, and no `Retry-After` header. This is not an oversight: the
+throttled response for a real job id and for a fabricated one must be
+byte-identical, or the extra field itself becomes a signal that
+distinguishes them, defeating the point of the limiter.
+
+### Accepted risks
+
+In the same register §9's "Accepted risks" uses — stated plainly, never
+left silent.
+
+**The 40-bit capability id.** `registrations.id` is `ticketing_ticket.
+ticket_code`, minted by `ets_web`'s `short_code.py` with `secrets.choice`
+(a CSPRNG) over an 8-character Crockford base32 alphabet — 40 bits of
+entropy, well below the ≥128-bit guidance for a capability URL. A
+successful guess yields a guest's **name and queue position** — the
+`GuestStatusResponse` body — never a photo and never contact details. The
+rate limiter above turns brute-forcing this from one source address into
+roughly 2^40 / 30 minutes (~24,500 years) of guessing; see below for what
+it does not stop.
+
+**Distributed enumeration.** A per-address limiter cannot stop an attacker
+spreading guesses across many source addresses. Closing this would need a
+wider id — an `ets_web` code change, which the human has forbidden
+absolutely for this project. Accepted as a residual risk, not solved.
+
+**The alert shares `NOTIFY_WEBHOOK_URL` with the guest-photo receiver.**
+The health probe's alert (above) and §8's guest notification both POST to
+the same configured URL. `web-slide`'s receiver performs no schema
+validation and reads specific field names (`guestName`, `photoUrl`, ...) —
+none of which the alert payload's `{source, severity, message, timestamp}`
+shape contains — so a misrouted or misconfigured receiver could silently
+absorb an alert (answering `200` with nothing rendered) rather than
+surfacing it as a delivery failure. No dedicated alert channel exists as
+of this phase.
+
+**The unwatched `ets_web` schema contract.** Restated from "The standing
+cost" above because it belongs in this list too: nobody upstream is aware
+this VIEW exists or depends on their table/column names. This is the
+single largest standing risk this phase introduces, and the health probe
+is only a detector for the "broken loudly" half of it — not the "broken
+quietly" half described in "A VALID ticket with zero attendance rows."
+
+### Known gaps, honestly, as of this writing
+
+Two gaps recorded during this phase's own cutover (`06-05-SUMMARY.md`),
+carried forward here rather than left to go stale in a plan artefact:
+
+- **Production readiness fails today.** `WEBHOOK_HMAC_SECRET`,
+  `PROXY_IP_WHITELIST` and `DISPLAY_IP_WHITELIST` are all unset in the
+  live `.env` — §4's readiness check exits non-zero. The service was run
+  during this phase's own verification in non-production mode
+  (`NODE_ENV` unset), not production, and was left stopped afterward. Set
+  all three real values before any production deploy; §3/§4 above already
+  document the mechanism.
+- **The Phase 3 Agent-auth cutover (§7) has never been deployed.** No
+  Agent has ever connected against this live VIEW. This is why D-07's
+  full end-to-end proof — landing page through to the booth and
+  slideshow — could not be completed inside this phase: it is a
+  prerequisite for that proof, not a defect this phase introduced.
