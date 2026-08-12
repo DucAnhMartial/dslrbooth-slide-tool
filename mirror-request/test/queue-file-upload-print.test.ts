@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueueService, queueLogger } from '../src/queue/queueService';
 import type { LocalStore } from '../src/state/localStore';
 import { createPendingPrintRegistry, type PendingPrintStatus } from './helpers/pendingPrintRegistry';
+import { REAL_SESSION_UPLOADS, PRINT_URL, COMPOSITE } from './helpers/realSessionUploads';
 
 /**
  * Regression cover for a defect found by running a REAL dslrBooth session on
@@ -31,19 +32,12 @@ const CONFIG = { SESSION_TIMEOUT_MS: 300_000, NEXT_GUEST_COUNTDOWN_MS: 5_000, SE
 
 const JOB = 'MQNE2885'; // the real ticket_code from the session that exposed this
 
-/** The five uploads of one real session, in the order the booth emitted them. */
-const REAL_SESSION_UPLOADS = [
-  { param1: 'C:\\dslrBooth\\Test_event\\Singles\\20260812_131525_230.jpg', param2: 'https://fotoshare.co/i/1t1vcs3', param3: 'original', param4: 'Test event' },
-  { param1: 'C:\\dslrBooth\\Test_event\\Prints\\20260812_131547_837_1x.jpg', param2: 'https://fotoshare.co/i/4kmtdhm', param3: 'print', param4: 'Test event' },
-  { param1: 'C:\\dslrBooth\\Test_event\\Singles\\20260812_131532_316.jpg', param2: 'https://fotoshare.co/i/4eexxer', param3: 'original', param4: 'Test event' },
-  { param1: 'C:\\dslrBooth\\Test_event\\Singles\\20260812_131538_830.jpg', param2: 'https://fotoshare.co/i/483fqdw', param3: 'original', param4: 'Test event' },
-  { param1: 'C:\\dslrBooth\\Test_event\\Singles\\20260812_131545_279.jpg', param2: 'https://fotoshare.co/i/2yx6f9k', param3: 'original', param4: 'Test event' },
-];
-
-const PRINT_URL = 'https://fotoshare.co/i/4kmtdhm';
-
-/** The composite path the print anchor carries, from the same real session. */
-const COMPOSITE = 'C:\\dslrBooth\\Test_event\\Prints\\20260812_131547_837_1x.jpg';
+// The five uploads of one real session, the print URL and the composite path
+// all moved to test/helpers/realSessionUploads.ts in 07-05: queue-event-
+// coverage.test.ts now asserts D-13 (no info-level line carries one of these
+// URLs) against the same values, and a second hand-copied fixture would let
+// that assertion drift onto a URL the service never sees. PRINT_URL and
+// COMPOSITE are derived from the fixture there rather than retyped.
 
 /**
  * How the registry is seeded before the test runs. `'awaiting'` is the default
