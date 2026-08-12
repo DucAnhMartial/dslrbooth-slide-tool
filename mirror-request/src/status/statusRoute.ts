@@ -133,7 +133,13 @@ export function createStatusRouter(
     // getJobRegistration() is the only method that actually performs the join.
     const guestName = store.getJobRegistration(jobId)?.registration.name ?? null;
 
-    const photoDelivery = toPhotoDelivery(store.getNotification(jobId)?.status);
+    // ONE rule, evaluated once, exactly as the canServe comment below requires
+    // of this file. The job's status is passed in rather than handled by a
+    // second `if` beside this line: two places that could each decide
+    // photoDelivery would be two rules free to drift apart. The precedence
+    // (a delivered notification outranks the job's outcome word) lives inside
+    // toPhotoDelivery and is commented there, because D-11 depends on it.
+    const photoDelivery = toPhotoDelivery(store.getNotification(jobId)?.status, job.status);
 
     const boothState = store.getBoothState();
     // D-05: when nothing can be dispatched, say so and suppress the estimate.
