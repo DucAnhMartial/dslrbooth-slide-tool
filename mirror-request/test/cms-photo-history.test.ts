@@ -540,7 +540,11 @@ describe('CMS photo history — clearing is a confirmed operator action and noth
     const lines = info.mock.calls.filter((call) => String(call[0]).includes(eventId));
     expect(lines).toHaveLength(1);
     const line = String(lines[0][0]);
+    // ONE string argument. Found by mutation: asserting only `typeof call[0]`
+    // leaves a second, object-shaped argument free to carry a guest name past
+    // the masking formatters, which run on the message and nothing else.
     expect(typeof lines[0][0]).toBe('string');
+    expect(lines[0]).toHaveLength(1);
     expect(line).toContain('1');
     expect(line).not.toContain(guestName);
     expect(line).not.toContain('0912345678');
