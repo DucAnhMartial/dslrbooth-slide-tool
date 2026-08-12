@@ -40,6 +40,14 @@ export function loadConfig(): EnvConfig {
 
   required('AGENT_WS_TOKEN', 'replace-with-agent-token');
   required('DB_PASSWORD', 'replace-with-readonly-password');
+  // D-14 (phase 8): the single CMS operator account. CMS_PASSWORD_HASH is a
+  // salted scrypt digest minted offline by `npm run cms:hash-password` — the
+  // service must never be handed a plaintext password, so a placeholder here
+  // is a startup error exactly like an unset Agent token. Distinct placeholder
+  // strings per key so a half-filled .env names the specific key that is
+  // still unset.
+  required('CMS_USERNAME', 'replace-with-cms-username');
+  required('CMS_PASSWORD_HASH', 'replace-with-cms-password-hash');
   // Delivery is handled by the optional photo webhook. SMTP/Twilio settings
   // remain in the config type for backwards compatibility but are not needed.
 
@@ -61,6 +69,13 @@ export function loadConfig(): EnvConfig {
   // default, so an unset key defaults to empty (the same development escape
   // hatch PROXY_IP_WHITELIST uses).
   const displayIpWhitelist = toCSV('DISPLAY_IP_WHITELIST', []);
+  // D-13 (phase 8): a NEW key, independent of DISPLAY_IP_WHITELIST above
+  // (RESEARCH Pitfall 2 — reusing the display list either locks the operator
+  // out or exposes the CMS to every address that can reach a TV). Same
+  // empty-array dev default and same production fail-fast, because the same
+  // reasoning applies: there is no sensible site-independent default, and an
+  // unset list in production would silently allow every address.
+  const cmsIpWhitelist = toCSV('CMS_IP_WHITELIST', []);
 
   if (isProduction && !webhookSecret) {
     errors.push('WEBHOOK_HMAC_SECRET must be configured in production (D-09)');
@@ -70,6 +85,9 @@ export function loadConfig(): EnvConfig {
   }
   if (isProduction && displayIpWhitelist.length === 0) {
     errors.push('DISPLAY_IP_WHITELIST must be configured in production with the real display-machine addresses (D-09, Assumption A4)');
+  }
+  if (isProduction && cmsIpWhitelist.length === 0) {
+    errors.push('CMS_IP_WHITELIST must be configured in production with the real operator-laptop addresses (D-13) — it is NOT DISPLAY_IP_WHITELIST');
   }
 
   if (errors.length > 0) {
@@ -82,6 +100,10 @@ export function loadConfig(): EnvConfig {
     AGENT_WS_TOKEN: get('AGENT_WS_TOKEN') ?? '',
     PROXY_IP_WHITELIST: ipWhitelist,
     DISPLAY_IP_WHITELIST: displayIpWhitelist,
+    CMS_IP_WHITELIST: cmsIpWhitelist,
+    CMS_USERNAME: get('CMS_USERNAME') ?? '',
+    CMS_PASSWORD_HASH: get('CMS_PASSWORD_HASH') ?? '',
+    CMS_SESSION_COOKIE_NAME: get('CMS_SESSION_COOKIE_NAME') ?? 'cms_session',
     DB_HOST: get('DB_HOST') ?? 'localhost',
     // MySQL default port. Was previously 5432 (a Postgres-era leftover) —
     // the poller reads MySQL, not Postgres (RESEARCH.md Pitfall 4).

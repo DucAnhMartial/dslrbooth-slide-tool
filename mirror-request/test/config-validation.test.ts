@@ -39,6 +39,11 @@ describe('loadConfig() — production-strict validation and Phase 1 defaults', (
     process.env.WEBHOOK_HMAC_SECRET = 'real-webhook-secret';
     process.env.PROXY_IP_WHITELIST = '10.0.0.5,10.0.0.6';
     process.env.DISPLAY_IP_WHITELIST = '10.0.0.20';
+    // Phase 8 D-13: a fourth production-required control. This line was added
+    // when CMS_IP_WHITELIST landed — without it the case fails naming the CMS
+    // key rather than proving anything about the webhook controls it is
+    // actually about.
+    process.env.CMS_IP_WHITELIST = '10.0.0.30';
 
     expect(() => loadConfig()).not.toThrow();
   });
@@ -61,9 +66,59 @@ describe('loadConfig() — production-strict validation and Phase 1 defaults', (
     process.env.WEBHOOK_HMAC_SECRET = 'real-webhook-secret';
     process.env.PROXY_IP_WHITELIST = '10.0.0.5,10.0.0.6';
     process.env.DISPLAY_IP_WHITELIST = '10.0.0.20,10.0.0.21';
+    process.env.CMS_IP_WHITELIST = '10.0.0.30';
 
     const config = loadConfig();
     expect(config.DISPLAY_IP_WHITELIST).toEqual(['10.0.0.20', '10.0.0.21']);
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 8 — CMS_IP_WHITELIST (D-13, RESEARCH Pitfall 2)
+  // -------------------------------------------------------------------------
+
+  it('throws naming CMS_IP_WHITELIST when NODE_ENV=production and it is unset (D-13)', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.AGENT_WS_TOKEN = 'real-agent-token';
+    process.env.DB_PASSWORD = 'real-db-password';
+    process.env.WEBHOOK_HMAC_SECRET = 'real-webhook-secret';
+    process.env.PROXY_IP_WHITELIST = '10.0.0.5,10.0.0.6';
+    process.env.DISPLAY_IP_WHITELIST = '10.0.0.20';
+    delete process.env.CMS_IP_WHITELIST;
+
+    expect(() => loadConfig()).toThrowError(/CMS_IP_WHITELIST/);
+  });
+
+  it('keeps CMS_IP_WHITELIST independent of DISPLAY_IP_WHITELIST — a configured display list does not satisfy the CMS one', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.AGENT_WS_TOKEN = 'real-agent-token';
+    process.env.DB_PASSWORD = 'real-db-password';
+    process.env.WEBHOOK_HMAC_SECRET = 'real-webhook-secret';
+    process.env.PROXY_IP_WHITELIST = '10.0.0.5,10.0.0.6';
+    // The room's TVs are configured; the operator's laptop is not. RESEARCH
+    // Pitfall 2's failure mode is exactly this being allowed to pass.
+    process.env.DISPLAY_IP_WHITELIST = '10.0.0.20,10.0.0.21';
+    delete process.env.CMS_IP_WHITELIST;
+
+    expect(() => loadConfig()).toThrowError(/CMS_IP_WHITELIST/);
+
+    process.env.CMS_IP_WHITELIST = '10.0.0.30';
+    const config = loadConfig();
+    expect(config.CMS_IP_WHITELIST).toEqual(['10.0.0.30']);
+    expect(config.CMS_IP_WHITELIST).not.toEqual(config.DISPLAY_IP_WHITELIST);
+  });
+
+  it('defaults CMS_SESSION_COOKIE_NAME to cms_session and never exposes a plaintext CMS password (D-14)', () => {
+    process.env.NODE_ENV = 'test';
+    process.env.AGENT_WS_TOKEN = 'real-agent-token';
+    process.env.DB_PASSWORD = 'real-db-password';
+    delete process.env.CMS_SESSION_COOKIE_NAME;
+
+    const config = loadConfig();
+    expect(config.CMS_SESSION_COOKIE_NAME).toBe('cms_session');
+    // The only credential key on EnvConfig is the hash — there is no
+    // CMS_PASSWORD field for a plaintext value to be assigned to.
+    expect(Object.keys(config)).not.toContain('CMS_PASSWORD');
+    expect(config.CMS_PASSWORD_HASH).toMatch(/^[0-9a-f]+:[0-9a-f]+$/);
   });
 
   it('does not throw when NODE_ENV=test and neither control is configured, using dev defaults', () => {

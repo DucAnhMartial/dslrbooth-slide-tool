@@ -72,6 +72,46 @@ export interface NotificationRecord {
   dueAt?: number;
 }
 
+/**
+ * Phase 8 CMS-01: the room screen's per-event presentation contract, and the
+ * ONLY shape of event data that ever reaches the display wire.
+ *
+ * This is a purpose-built projection, never a raw `event` row — the same
+ * discipline `DisplaySnapshot`'s own header comment below pins for
+ * `queue_job`. `event` carries operator-facing columns (`created_at`,
+ * `updated_at`) that have no business on a TV, and future columns added for
+ * the CMS must not silently ride out to every screen because someone widened
+ * a `SELECT *`.
+ *
+ * Every field except the four asset/id nullables is non-null by construction:
+ * `LocalStore.getActiveEventConfig()` coalesces each unset column onto
+ * `DEFAULT_EVENT_CONFIG`, which is what makes UI-01 ("the idle screen renders
+ * correctly before any event exists") hold with zero rows in `event` and with
+ * a brand-new, entirely uncustomized event alike.
+ *
+ * `id` is null when no event is active — the screen is running on shipped
+ * defaults. It is NOT an error state and must never render as one.
+ */
+export interface EventConfig {
+  id: string | null;
+  name: string;
+  logoUrl: string | null;
+  backgroundUrl: string | null;
+  colorDominant: string;
+  colorSecondary: string;
+  colorAccent: string;
+  colorText: string;
+  colorTextMuted: string;
+  fontChoice: string;
+  idleHeading: string;
+  idleSub: string;
+  qrImageUrl: string | null;
+  qrCtaText: string;
+  photoCount: number;
+  photoDurationMs: number;
+  layoutStyle: string;
+}
+
 export interface DisplaySnapshot {
   // D-15: no `currentJob: QueueJob` field exists here, deliberately. The
   // guarantee that no operator column (registration_id, stall_reason,
@@ -88,6 +128,11 @@ export interface DisplaySnapshot {
   countdownSeconds: number | null;
   announcementEndsAt: number | null;
   upNext: Array<{ jobId: string; name: string; position: number }>;
+  // CMS-01/D-12: the active event's presentation config. Every screen opens
+  // the same URL and renders whatever event is active, so this rides the
+  // existing snapshot rather than a per-screen URL or a second feed. It is
+  // never null — see EventConfig above.
+  eventConfig: EventConfig;
 }
 
 export interface EnvConfig {
@@ -101,6 +146,21 @@ export interface EnvConfig {
   // independently configurable. Default is an empty array (dev escape
   // hatch); production fails fast when it is left unset (config.ts).
   DISPLAY_IP_WHITELIST: string[];
+  // D-13 (phase 8): the CMS's own, INDEPENDENT allow-list. Deliberately not a
+  // reuse of DISPLAY_IP_WHITELIST's value (RESEARCH Pitfall 2): the two lists
+  // describe different audiences on different network paths — the operator's
+  // laptop versus the room's TVs. Sharing one value would either lock the
+  // operator out or expose the CMS to every address that can reach a TV.
+  // Only the isWhitelisted() *function* is shared. Production fails fast when
+  // unset, exactly as DISPLAY_IP_WHITELIST does.
+  CMS_IP_WHITELIST: string[];
+  // D-14 (phase 8): the single operator account. CMS_PASSWORD_HASH holds a
+  // salted scrypt digest (salt:hash hex), NEVER a plaintext password — mint it
+  // offline with `npm run cms:hash-password`. No code path in this service
+  // receives, prints, or logs a plaintext CMS password.
+  CMS_USERNAME: string;
+  CMS_PASSWORD_HASH: string;
+  CMS_SESSION_COOKIE_NAME: string;
   DB_HOST: string;
   DB_PORT: number;
   DB_NAME: string;

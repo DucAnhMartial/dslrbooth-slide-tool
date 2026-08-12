@@ -1,11 +1,115 @@
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { getConfig } from '../config';
 import logger from '../logging/logger';
-import type { Registration, QueueJob, BoothState, NotificationRecord } from '../types';
+import type { Registration, QueueJob, BoothState, NotificationRecord, EventConfig } from '../types';
 
 const CONFIG = getConfig();
+
+/**
+ * UI-01's guarantee, expressed as data: what the room screen renders when no
+ * event is active, and what every field of a brand-new, entirely
+ * uncustomized event falls back to. "The idle screen renders correctly before
+ * any request exists" is not a special first-boot case here — it is the
+ * ordinary read path with every column NULL.
+ *
+ * Values are the 08-UI-SPEC contract: the Room Screen default theme, the
+ * Room Screen default copy table, and the single shipped layout
+ * (`stage_sidebar` — Open Question 2 ships exactly one layout this phase,
+ * with the field present so later layouts need no migration).
+ *
+ * The two operational status colours (#a33127 destructive, #34d399 success)
+ * are deliberately ABSENT from this object. They are fixed, non-themeable,
+ * and live in the room-screen stylesheet, because an event's branding must
+ * never be able to hide an Agent fault behind a colour that reads as normal.
+ *
+ * `id: null` means "no event is active" — a legitimate steady state, not an
+ * error.
+ */
+export const DEFAULT_EVENT_CONFIG: EventConfig = Object.freeze({
+  id: null,
+  name: 'Photo Booth',
+  logoUrl: null,
+  backgroundUrl: null,
+  colorDominant: '#0a0a0f',
+  colorSecondary: '#13131a',
+  colorAccent: '#6c8fff',
+  colorText: '#f5f5f7',
+  colorTextMuted: '#9a9aa8',
+  fontChoice: 'system-ui',
+  idleHeading: 'Sẵn sàng chụp ảnh cùng bạn',
+  idleSub: 'Quét mã QR bên dưới để đăng ký',
+  qrImageUrl: null,
+  qrCtaText: 'Quét mã QR bên dưới để đăng ký',
+  photoCount: 12,
+  photoDurationMs: 6000,
+  layoutStyle: 'stage_sidebar',
+});
+
+/** The raw `event` row shape. Never leaves this module — see toEventConfig(). */
+interface EventRow {
+  id: string;
+  name: string;
+  logo_url: string | null;
+  background_url: string | null;
+  color_dominant: string | null;
+  color_secondary: string | null;
+  color_accent: string | null;
+  color_text: string | null;
+  color_text_muted: string | null;
+  font_choice: string | null;
+  idle_heading: string | null;
+  idle_sub: string | null;
+  qr_image_url: string | null;
+  qr_cta_text: string | null;
+  photo_count: number | null;
+  photo_duration_ms: number | null;
+  layout_style: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/**
+ * The single row -> wire projection for event configuration, and the only
+ * place a NULL column becomes a shipped default.
+ *
+ * Its narrowness is the point (the same discipline `buildSnapshot()`'s header
+ * comment pins for `queue_job`): `created_at`/`updated_at` are operator
+ * bookkeeping and are dropped here rather than filtered out downstream, so a
+ * future column added to `event` for the CMS cannot ride out to every TV just
+ * because someone widened a SELECT.
+ */
+function toEventConfig(row: EventRow): EventConfig {
+  return {
+    id: row.id,
+    name: row.name,
+    logoUrl: row.logo_url,
+    backgroundUrl: row.background_url,
+    colorDominant: row.color_dominant ?? DEFAULT_EVENT_CONFIG.colorDominant,
+    colorSecondary: row.color_secondary ?? DEFAULT_EVENT_CONFIG.colorSecondary,
+    colorAccent: row.color_accent ?? DEFAULT_EVENT_CONFIG.colorAccent,
+    colorText: row.color_text ?? DEFAULT_EVENT_CONFIG.colorText,
+    colorTextMuted: row.color_text_muted ?? DEFAULT_EVENT_CONFIG.colorTextMuted,
+    fontChoice: row.font_choice ?? DEFAULT_EVENT_CONFIG.fontChoice,
+    idleHeading: row.idle_heading ?? DEFAULT_EVENT_CONFIG.idleHeading,
+    idleSub: row.idle_sub ?? DEFAULT_EVENT_CONFIG.idleSub,
+    qrImageUrl: row.qr_image_url,
+    qrCtaText: row.qr_cta_text ?? DEFAULT_EVENT_CONFIG.qrCtaText,
+    photoCount: row.photo_count ?? DEFAULT_EVENT_CONFIG.photoCount,
+    photoDurationMs: row.photo_duration_ms ?? DEFAULT_EVENT_CONFIG.photoDurationMs,
+    layoutStyle: row.layout_style ?? DEFAULT_EVENT_CONFIG.layoutStyle,
+  };
+}
+
+/** The operator-facing summary the CMS event list renders. */
+export interface EventSummary {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+}
 
 export class LocalStore {
   private db: Database.Database;
@@ -98,6 +202,59 @@ export class LocalStore {
         expires_at     INTEGER NOT NULL,
         resolved_at    INTEGER,
         updated_at     TEXT NOT NULL DEFAULT 'now'
+      );
+      -- Phase 8 / CMS-01: the library of saved event configurations. D-01
+      -- rules that "one server, several events" means MANY saved rows here
+      -- with exactly ONE active at a time (see active_event below) — NOT
+      -- concurrent live events. Nothing in this table joins to queue_job or
+      -- booth_state: the global FIFO queue built in Phases 1-7 is untouched
+      -- by this phase, and no existing table gains, loses, or changes a
+      -- column for it.
+      --
+      -- Every presentation column except name is NULLABLE on purpose. NULL
+      -- means "this event never customized this field", and reads coalesce it
+      -- onto DEFAULT_EVENT_CONFIG at projection time rather than at write
+      -- time. That is what lets a shipped default be corrected later and
+      -- immediately apply to every uncustomized event, instead of being
+      -- frozen into rows written before the correction. font_choice and
+      -- layout_style are the two exceptions: they carry SQL-level defaults
+      -- because they are enumerated values the CMS form always submits.
+      CREATE TABLE IF NOT EXISTS event (
+        id                TEXT PRIMARY KEY,
+        name              TEXT NOT NULL,
+        logo_url          TEXT,
+        background_url    TEXT,
+        color_dominant    TEXT,
+        color_secondary   TEXT,
+        color_accent      TEXT,
+        color_text        TEXT,
+        color_text_muted  TEXT,
+        font_choice       TEXT NOT NULL DEFAULT 'system-ui',
+        idle_heading      TEXT,
+        idle_sub          TEXT,
+        qr_image_url      TEXT,
+        qr_cta_text       TEXT,
+        photo_count       INTEGER,
+        photo_duration_ms INTEGER,
+        layout_style      TEXT NOT NULL DEFAULT 'stage_sidebar',
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL
+      );
+      -- D-01's single-active-event pointer, in booth_state's CHECK (id = 1)
+      -- single-row idiom. The cardinality constraint is the decision: with a
+      -- plain table an "activate" that INSERTed instead of UPSERTing would
+      -- accumulate rows and leave "which event is live?" ambiguous, which is
+      -- exactly the concurrent-events design D-01 rejects. CHECK (id = 1)
+      -- makes that mistake throw at the database rather than surface later as
+      -- two TVs disagreeing.
+      --
+      -- event_id is deliberately NOT a foreign key: a deleted event must
+      -- leave a dangling pointer that getActiveEventConfig() resolves to the
+      -- shipped defaults (UI-01), never a failed read that blanks the screen.
+      CREATE TABLE IF NOT EXISTS active_event (
+        id         INTEGER PRIMARY KEY CHECK (id = 1),
+        event_id   TEXT,
+        updated_at TEXT NOT NULL DEFAULT 'now'
       );
     `);
   }
@@ -752,6 +909,92 @@ export class LocalStore {
       return rows.map((row) => ({ jobId: row.jobId, compositePath: row.composite_path ?? '' }));
     });
     return sweep(now);
+  }
+
+  // ---------------------------------------------------------------------
+  // Phase 8 — events and the single-active-event pointer (D-01, CMS-01/02/03)
+  // ---------------------------------------------------------------------
+
+  /**
+   * Mints an event id with randomUUID() rather than a timestamp-derived
+   * value. Two reasons, both load-bearing: a UUID cannot collide when an
+   * operator creates two events in the same millisecond, and it carries no
+   * embedded digit run for PHONE_RE to partially asterisk when the id appears
+   * in a log line (the collision agentServer.ts already had to fix at its own
+   * mint site).
+   *
+   * Only `name` is accepted here. Everything else is left NULL so it reads
+   * back as the shipped default (D-01/UI-SPEC "partial" row: an event can go
+   * live with zero customization and still render a correct screen).
+   * Customization is plan 08-03's updateEvent path.
+   */
+  createEvent(input: { name: string }): EventSummary {
+    const now = Date.now();
+    const id = randomUUID();
+    this.db.prepare(
+      `INSERT INTO event (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`
+    ).run(id, input.name, now, now);
+    return { id, name: input.name, createdAt: now, updatedAt: now };
+  }
+
+  /** The full projection for one event, or undefined when it does not exist. */
+  getEventConfig(id: string): EventConfig | undefined {
+    const row = this.db.prepare('SELECT * FROM event WHERE id = ?').get(id) as EventRow | undefined;
+    return row ? toEventConfig(row) : undefined;
+  }
+
+  /** Newest first — the order the CMS event list renders. */
+  listEvents(): EventSummary[] {
+    const rows = this.db
+      .prepare('SELECT id, name, created_at, updated_at FROM event ORDER BY created_at DESC')
+      .all() as Array<{ id: string; name: string; created_at: number; updated_at: number }>;
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  getActiveEventId(): string | undefined {
+    const row = this.db.prepare('SELECT event_id FROM active_event WHERE id = 1').get() as
+      | { event_id: string | null }
+      | undefined;
+    return row?.event_id ?? undefined;
+  }
+
+  /**
+   * D-01: this REPLACES the pointer, it never appends. The `id = 1` literal
+   * plus the table's CHECK constraint mean "exactly one event is active" is
+   * enforced by the schema, not by remembering to delete the previous row.
+   *
+   * Deliberately does NOT touch queue_job or booth_state: D-02 allows
+   * switching events while guests are queued, and the queue is explicitly
+   * out of this phase's blast radius.
+   */
+  setActiveEvent(eventId: string | null): void {
+    this.db.prepare(
+      `INSERT INTO active_event (id, event_id, updated_at) VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET event_id = excluded.event_id, updated_at = excluded.updated_at`
+    ).run(eventId, new Date().toISOString());
+  }
+
+  /**
+   * The room screen's read. Returns the shipped defaults — never null, never
+   * a missing key — when there is no pointer, when the pointer is null, or
+   * when it dangles at a deleted event. UI-01 has to hold in all three cases,
+   * and a screen that renders an error because nobody has created an event
+   * yet is the exact failure this phase exists to remove.
+   */
+  getActiveEventConfig(): EventConfig {
+    const activeId = this.getActiveEventId();
+    if (!activeId) return { ...DEFAULT_EVENT_CONFIG };
+    const config = this.getEventConfig(activeId);
+    if (!config) {
+      logger.warn(`Active event pointer references a missing event ${activeId} — serving shipped defaults`);
+      return { ...DEFAULT_EVENT_CONFIG };
+    }
+    return config;
   }
 
   close(): void {

@@ -1,0 +1,206 @@
+import { Request, Response, NextFunction, RequestHandler } from 'express';
+import { scryptSync, randomBytes, timingSafeEqual } from 'crypto';
+
+/**
+ * D-14's password and session layer — the second of the CMS's two gates.
+ *
+ * There is no in-repo password-hashing precedent, so this file is new code;
+ * but the two security-critical primitives it needs (a KDF and a constant-time
+ * comparison) are Node builtins, not hand-rolled, and the comparison idiom is
+ * copied from `agentServer.ts:46-57` rather than reinvented. Zero new npm
+ * dependencies (RESEARCH: scrypt replaces bcrypt/argon2, which both need a
+ * native or WASM binding for a single-account login).
+ */
+
+/**
+ * N = 2^14, NOT OWASP's 2^17.
+ *
+ * This is a measured constraint, not a preference: crypto.scryptSync's default
+ * `maxmem` is 32MB, and N=131072 (2^17) with r=8 exceeds it and THROWS
+ * "Invalid scrypt params: memory limit exceeded" (RESEARCH verified this by
+ * direct execution). Raising N here without also raising `maxmem` does not
+ * harden the login — it breaks it outright, and it breaks it at verify time,
+ * on the operator's laptop, mid-event.
+ *
+ * 2^14 is a defensible target for this specific credential: a single account
+ * on a LAN-only service that is already behind an IP allow-list and is not
+ * reachable from the internet. OWASP's 2^17 figure assumes an
+ * internet-exposed, high-value credential store. If this service ever gains a
+ * public surface, raise BOTH N and maxmem together and re-mint the hash.
+ */
+const SCRYPT_PARAMS = { N: 16384, r: 8, p: 1 } as const;
+const KEY_LENGTH = 64;
+const SALT_LENGTH = 16;
+const SESSION_TOKEN_BYTES = 32;
+
+/**
+ * Mints `salt:hash` (both hex). Used by the offline
+ * `npm run cms:hash-password` helper and by tests — never by a request
+ * handler, because the service must never receive a plaintext password to
+ * hash in the first place (D-14, T-08-06).
+ */
+export function hashPassword(password: string): string {
+  const salt = randomBytes(SALT_LENGTH);
+  const derived = scryptSync(password, salt, KEY_LENGTH, SCRYPT_PARAMS);
+  return `${salt.toString('hex')}:${derived.toString('hex')}`;
+}
+
+/**
+ * Constant-time verification against a stored `salt:hash`.
+ *
+ * The length guard and the try/catch are both copied deliberately from
+ * `agentServer.ts:46-57`: `timingSafeEqual` THROWS on a length mismatch
+ * rather than returning false, so without the guard a malformed stored hash
+ * would surface as an uncaught exception on the login path instead of a clean
+ * rejection. Returns a bare boolean and logs nothing — neither the presented
+ * password nor the stored digest may ever appear in a message, an error, or a
+ * thrown value.
+ */
+export function verifyPassword(password: string, stored: string): boolean {
+  try {
+    const [saltHex, hashHex] = stored.split(':');
+    if (!saltHex || !hashHex) return false;
+    const salt = Buffer.from(saltHex, 'hex');
+    const expected = Buffer.from(hashHex, 'hex');
+    if (salt.length === 0 || expected.length === 0) return false;
+    const actual = scryptSync(password, salt, expected.length, SCRYPT_PARAMS);
+    if (actual.length !== expected.length) return false;
+    return timingSafeEqual(actual, expected);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Constant-time string comparison for the username and for session tokens.
+ * Same shape as verifyPassword's guard, for the same reason: `===` on strings
+ * short-circuits at the first differing byte and leaks how many leading bytes
+ * were correct.
+ */
+export function safeEqual(a: string, b: string): boolean {
+  try {
+    const left = Buffer.from(a, 'utf8');
+    const right = Buffer.from(b, 'utf8');
+    if (left.length !== right.length) return false;
+    return timingSafeEqual(left, right);
+  } catch {
+    return false;
+  }
+}
+
+export interface SessionStore {
+  create(username: string): string;
+  isValid(token: string): boolean;
+  destroy(token: string): void;
+  size(): number;
+}
+
+/**
+ * D-14: sessions live in memory, in a Map built per router instance — never a
+ * SQLite table and never module scope.
+ *
+ * In memory because CMS-03's durability requirement names event configuration
+ * and photo history, not sessions: a service restart already requires an
+ * operator to be present, so losing the session then is correct behaviour
+ * rather than a gap. Per instance because two routers built in one process
+ * (which is exactly what a test suite does) must not share session state.
+ *
+ * There is no inactivity timeout, deliberately — an event runs for hours and
+ * ejecting the operator to a login screen mid-event is operationally worse
+ * than a lingering session on an IP-allow-listed LAN. Logout is manual.
+ */
+export function createSessionStore(): SessionStore {
+  const sessions = new Map<string, { username: string; createdAt: number }>();
+  return {
+    create(username: string): string {
+      const token = randomBytes(SESSION_TOKEN_BYTES).toString('hex');
+      sessions.set(token, { username, createdAt: Date.now() });
+      return token;
+    },
+    /**
+     * Scans with safeEqual rather than calling `sessions.has(token)`. A Map
+     * lookup is a hash comparison whose timing varies with the presented
+     * value; with a single operator account the session set is tiny, so a
+     * linear constant-time scan costs nothing measurable and keeps the token
+     * check the same shape as every other secret comparison in this repo.
+     */
+    isValid(token: string): boolean {
+      if (!token) return false;
+      let found = false;
+      for (const known of sessions.keys()) {
+        if (safeEqual(known, token)) found = true;
+      }
+      return found;
+    },
+    destroy(token: string): void {
+      for (const known of [...sessions.keys()]) {
+        if (safeEqual(known, token)) sessions.delete(known);
+      }
+    },
+    size(): number {
+      return sessions.size;
+    },
+  };
+}
+
+/** Minimal `Cookie:` header parse — no cookie-parser dependency for one key. */
+export function parseCookies(header: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!header) return out;
+  for (const part of header.split(';')) {
+    const index = part.indexOf('=');
+    if (index < 0) continue;
+    const key = part.slice(0, index).trim();
+    if (!key) continue;
+    out[key] = decodeURIComponent(part.slice(index + 1).trim());
+  }
+  return out;
+}
+
+/**
+ * The Set-Cookie value for a new session.
+ *
+ * NO `Secure` ATTRIBUTE IS SET, AND THAT IS DELIBERATE. Nothing in this
+ * deployment terminates TLS anywhere — the service is plain HTTP on a venue
+ * LAN (see OPS-RUNBOOK). A `Secure` cookie would simply never be sent back by
+ * the browser over http://, so the operator could never log in: a
+ * "secure-by-default" flag that produces a total outage and no security.
+ *
+ * The honest consequence, stated rather than papered over: the session cookie
+ * crosses the LAN in the clear and is readable by anything that can observe
+ * that traffic. `CMS_IP_WHITELIST` BOUNDS that exposure to already-trusted LAN
+ * addresses — it does not eliminate it. This is an accepted risk (threat
+ * register T-08-04), not an oversight. If TLS is ever terminated in front of
+ * this service, add `Secure` here at that time.
+ *
+ * `HttpOnly` blocks script access to the token; `SameSite=Lax` is the CSRF
+ * control for the mutating /cms routes (T-08-05), chosen over a CSRF-token
+ * library because this is a single-operator console with no public write
+ * surface. `Path=/cms` keeps the cookie off every other route this service
+ * serves, including the room screen.
+ */
+export function buildSessionCookie(cookieName: string, token: string): string {
+  return `${cookieName}=${token}; HttpOnly; SameSite=Lax; Path=/cms`;
+}
+
+export function buildClearedSessionCookie(cookieName: string): string {
+  return `${cookieName}=; HttpOnly; SameSite=Lax; Path=/cms; Max-Age=0`;
+}
+
+/**
+ * One generic refusal for every way of failing the session check — no cookie,
+ * an unknown token, a forged token, a destroyed one. Mirrors
+ * `statusRoute.ts`'s `genericNotFound()` discipline: two shapes here would be
+ * two failure modes waiting to drift apart, and any difference between them
+ * tells an attacker which half of the guess was right.
+ */
+export function createRequireSession(sessions: SessionStore, cookieName: string): RequestHandler {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const token = parseCookies(req.headers.cookie)[cookieName] ?? '';
+    if (!sessions.isValid(token)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    next();
+  };
+}

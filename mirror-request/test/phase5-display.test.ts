@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { WebSocket } from 'ws';
 import http from 'http';
 import express from 'express';
-import { LocalStore } from '../src/state/localStore';
+import { LocalStore, DEFAULT_EVENT_CONFIG } from '../src/state/localStore';
 import type { QueueService } from '../src/queue/queueService';
 import type { AgentServer } from '../src/agent/agentServer';
 import { DisplayServer } from '../src/display/displayServer';
@@ -212,6 +212,13 @@ describe('DisplayServer — no PII-capable field can reach the wire (D-15)', () 
       'announcementEndsAt',
       'boothState',
       'countdownSeconds',
+      // Phase 8 CMS-01: the ninth key. This list is a deliberate tripwire —
+      // adding a snapshot field must be a conscious act, not something that
+      // rides out to every TV unnoticed. eventConfig is admitted here because
+      // it is a purpose-built projection (types.ts EventConfig), not a raw
+      // `event` row; the forbidden-substring loop below still guards the
+      // operator columns D-15 is about.
+      'eventConfig',
       'guestName',
       'queueLength',
       'queuePosition',
@@ -221,6 +228,10 @@ describe('DisplayServer — no PII-capable field can reach the wire (D-15)', () 
     for (const forbidden of ['stall_reason', 'ack_error_message', 'retries', 'registration_id', 'email', 'phone', 'qr_token']) {
       expect(serialised).not.toContain(forbidden);
     }
+    // eventConfig carries no operator bookkeeping either — created_at and
+    // updated_at exist on the `event` row and are dropped by the projection.
+    expect(serialised).not.toContain('created_at');
+    expect(serialised).not.toContain('updated_at');
 
     display.stop();
     await closeServer(server);
@@ -236,6 +247,16 @@ describe('DisplayServer — no PII-capable field can reach the wire (D-15)', () 
       },
       getJob: () => {
         throw new Error('D-15 violation: getJob() must never be called from the broadcast path');
+      },
+      // Phase 8: the broadcast path reads the active event through this
+      // projection. Supplying it here keeps the trap intact rather than
+      // weakening it — the two raw-row getters above still throw, so this
+      // case still fails loudly if buildSnapshot() ever reaches for one.
+      getActiveEventConfig: () => ({ ...DEFAULT_EVENT_CONFIG }),
+      // A raw-row event getter is a trap for the same reason getJob is: the
+      // snapshot must never be built from an `event` row directly.
+      getEventConfig: () => {
+        throw new Error('D-15 violation: getEventConfig() must never be called from the broadcast path');
       },
     } as unknown as LocalStore;
 

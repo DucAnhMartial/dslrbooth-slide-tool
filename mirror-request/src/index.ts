@@ -15,6 +15,8 @@ import { mask } from './logging/logger';
 import { DisplayServer } from './display/displayServer';
 import { renderDisplayPage } from './display/displayPage';
 import { createStatusRouter } from './status/statusRoute';
+import { createCmsIpGate } from './cms/cmsIpGate';
+import { createCmsRouter } from './cms/cmsRouter';
 import { clientIp, isWhitelisted } from './security/ipAllowlist';
 
 const config = getConfig();
@@ -55,6 +57,19 @@ const queue = createQueueService(agentServer, notifier);
 const displayServer = new DisplayServer(queue, agentServer);
 
 app.use(createStatusRouter(store, queue, agentServer, config));
+
+// D-13's two layers, in the ONE order that makes them two layers: the IP
+// allow-list gate is mounted BEFORE the router, so a non-whitelisted peer is
+// refused without any session logic running at all. Swapping these two
+// arguments leaves a CMS that still demands a password and still passes every
+// happy-path test, while having silently deleted the network control — see
+// src/cms/cmsIpGate.ts, and test/cms-access-control.test.ts for the case that
+// proves the layers refuse independently.
+//
+// config.CMS_IP_WHITELIST, never config.DISPLAY_IP_WHITELIST: the operator's
+// laptop and the room's TVs are different audiences on different network
+// paths (RESEARCH Pitfall 2).
+app.use('/cms', createCmsIpGate(config.CMS_IP_WHITELIST), createCmsRouter(store, config));
 
 const poller = new DBPoller(
   config.DB_POLL_INTERVAL_MS,

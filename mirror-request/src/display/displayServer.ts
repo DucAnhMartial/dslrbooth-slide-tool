@@ -138,6 +138,13 @@ export class DisplayServer {
       countdownSeconds: announcement?.remainingSeconds ?? null,
       announcementEndsAt: announcement?.endsAt ?? null,
       upNext,
+      // CMS-01/D-12: read fresh on every build, exactly like the queue and
+      // booth-state reads above, so activating an event in the CMS reaches
+      // every connected screen through maybeBroadcast()'s existing
+      // serialized-diff guard — no new broadcast wiring, no per-screen URL,
+      // and no page reload. getActiveEventConfig() is a purpose-built
+      // projection, never a raw `event` row (see this method's header note).
+      eventConfig: this.store.getActiveEventConfig(),
     };
   }
 
