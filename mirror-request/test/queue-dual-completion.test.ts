@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueueService, queueLogger } from '../src/queue/queueService';
-import type { LocalStore } from '../src/state/localStore';
+import { LocalStore } from '../src/state/localStore';
 
 // SC-2, the phase's tracer. `completeInProgressJob()` used to select the
 // most-recently-acknowledged in_progress row with no jobId parameter at all
@@ -177,6 +177,125 @@ describe('QueueService — a print composite completes exactly the job it is bou
     const message = String(warnSpy.mock.calls[0][0]);
     expect(message).toContain('job-1');
     expect(message).toContain('job-2');
+
+    service.stop();
+  });
+});
+
+// Task 2: the second, independently-closable half of the WINDOWS-8
+// mechanism. Task 1 closed the completion path; this closes the resurrection
+// path — a stray session_start naming a job that has already reached a
+// terminal state must not write it back to in_progress.
+describe('QueueService.sessionAcked — terminal-state guard prevents resurrecting a closed job (WINDOWS-8, second half)', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function buildAckStore(initialStatus: Record<string, string>) {
+    const jobStatus = { ...initialStatus };
+    const updateJobStatus = vi.fn((id: string, status: string) => { jobStatus[id] = status; });
+    const setBoothCurrentJob = vi.fn();
+    const store = {
+      getJob: (id: string) => (id in jobStatus ? { id, status: jobStatus[id] } : undefined),
+      updateJobStatus,
+      setBoothCurrentJob,
+    } as unknown as LocalStore;
+    return { store, jobStatus, updateJobStatus, setBoothCurrentJob };
+  }
+
+  it('a session_start for a job whose stored status is completed leaves that status unchanged and emits exactly one warn naming the job id; updateJobStatus is never called', () => {
+    const { store, jobStatus, updateJobStatus } = buildAckStore({ 'job-1': 'completed' });
+    const service = new QueueService(store);
+    const warnSpy = vi.spyOn(queueLogger, 'warn');
+
+    service.sessionAcked('job-1');
+
+    expect(jobStatus['job-1']).toBe('completed');
+    expect(updateJobStatus).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(String(warnSpy.mock.calls[0][0])).toContain('job-1');
+    service.stop();
+  });
+
+  it('a session_start for a job whose stored status is failed behaves identically', () => {
+    const { store, jobStatus, updateJobStatus } = buildAckStore({ 'job-1': 'failed' });
+    const service = new QueueService(store);
+    const warnSpy = vi.spyOn(queueLogger, 'warn');
+
+    service.sessionAcked('job-1');
+
+    expect(jobStatus['job-1']).toBe('failed');
+    expect(updateJobStatus).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    service.stop();
+  });
+
+  it('a session_start for a queued job still writes in_progress — the guard does not change the normal path', () => {
+    const { store, jobStatus, updateJobStatus } = buildAckStore({ 'job-2': 'queued' });
+    const service = new QueueService(store);
+
+    service.sessionAcked('job-2');
+
+    expect(updateJobStatus).toHaveBeenCalledWith('job-2', 'in_progress', 'acknowledged_at', expect.any(Number));
+    expect(jobStatus['job-2']).toBe('in_progress');
+    service.stop();
+  });
+
+  it('a session_start for a dispatched job still writes in_progress — the guard does not change the normal path', () => {
+    const { store, jobStatus, updateJobStatus } = buildAckStore({ 'job-3': 'dispatched' });
+    const service = new QueueService(store);
+
+    service.sessionAcked('job-3');
+
+    expect(updateJobStatus).toHaveBeenCalledWith('job-3', 'in_progress', 'acknowledged_at', expect.any(Number));
+    expect(jobStatus['job-3']).toBe('in_progress');
+    service.stop();
+  });
+
+  it('a job absent from the store (getJob returns undefined) keeps today behaviour and is not blocked', () => {
+    const { store, updateJobStatus } = buildAckStore({});
+    const service = new QueueService(store);
+
+    service.sessionAcked('job-unknown');
+
+    expect(updateJobStatus).toHaveBeenCalledWith('job-unknown', 'in_progress', 'acknowledged_at', expect.any(Number));
+    service.stop();
+  });
+});
+
+describe('LocalStore.prototype carries no positional completion method (SC-2 invariant)', () => {
+  it('completeInProgressJob is undefined on the prototype — this assertion goes red the instant a future phase reintroduces the positional assumption', () => {
+    expect((LocalStore.prototype as Record<string, unknown>).completeInProgressJob).toBeUndefined();
+  });
+});
+
+describe('D-06 mismatch warn throttling (Task 2)', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('ten consecutive mismatching print-composite events produce exactly one warn, and a further mismatch after a matching event warns once more', () => {
+    vi.useFakeTimers();
+    const { store } = buildStore();
+    const service = new QueueService(store);
+    const warnSpy = vi.spyOn(queueLogger, 'warn');
+    service.bindSendCommand(() => {});
+
+    service.start();
+    vi.advanceTimersByTime(250);
+    vi.advanceTimersByTime(7_000); // dispatch job-1
+    service.onAgentEvent('session_start', 'job-1');
+    warnSpy.mockClear();
+
+    for (let i = 0; i < 10; i++) {
+      service.onAgentEvent('processing_start', 'job-2', { param5: COMPOSITE_PATH });
+    }
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+
+    warnSpy.mockClear();
+    // A matching event (completes job-1) resets the throttle flag.
+    service.onAgentEvent('processing_start', 'job-1', { param5: COMPOSITE_PATH });
+    expect(warnSpy).not.toHaveBeenCalled();
+
+    service.onAgentEvent('processing_start', 'job-2', { param5: COMPOSITE_PATH });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
 
     service.stop();
   });
