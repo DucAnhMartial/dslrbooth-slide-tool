@@ -7,10 +7,32 @@ export interface ApiResult {
 }
 
 export class DslrBoothClient {
+  /**
+   * `port` and `password` were `readonly` until plan 08-04, which was exactly
+   * correct for values that never changed — and exactly wrong the moment UI-02
+   * let an operator change them from the CMS. A `readonly` field here means a
+   * config update applied anywhere else has no effect on the instance that
+   * actually calls dslrBooth: the Agent keeps its boot-time credentials
+   * forever, with no error and no warning anywhere (08-RESEARCH Pitfall 4).
+   *
+   * Nothing else about this class changed: `call()` still reads `this.port` at
+   * request time and still takes the password as an explicit argument.
+   */
   constructor(
-    private readonly port: number,
-    private readonly password: string,
+    private port: number,
+    private password: string,
   ) {}
+
+  /**
+   * Replaces the credentials used by every SUBSEQUENT call. In-flight requests
+   * already hold their URL and are unaffected.
+   *
+   * Neither value is logged here or anywhere else in this class.
+   */
+  updateCredentials(port: number, password: string): void {
+    this.port = port
+    this.password = password
+  }
 
   call(action: string, password: string, params: Record<string, string> = {}): Promise<ApiResult> {
     const url = new URL(`http://127.0.0.1:${this.port}/api/${action}`)

@@ -8,6 +8,8 @@ import { DslrBoothClient } from './dslrbooth/client'
 import { WsConnection } from './websocket/connection'
 import { createTriggerServer } from './triggers/server'
 import { closeDisplayWindow, openDisplayWindow } from './display/launcher'
+import { LiveConfig } from './liveConfig'
+import { createServiceMessageHandler, requestConfig } from './agentMessages'
 
 async function main() {
   // 1. Load config
@@ -27,6 +29,14 @@ async function main() {
   // 3. dslrBooth client
   const dslrBooth = new DslrBoothClient(config.dslrBoothApiPort, config.dslrBoothPassword)
 
+  // 3b. The four remotely-tunable values (UI-02, D-16). Seeded from `.env` so
+  // an Agent that never hears from the CMS behaves exactly as it did before
+  // this phase, and updated in memory only — this process never rewrites its
+  // own `.env` and never restarts itself (D-17).
+  const live = new LiveConfig(config, logger, {
+    onCredentialsChange: (port, password) => dslrBooth.updateCredentials(port, password),
+  })
+
   // 4. WebSocket connection
   const ws = new WsConnection(
     {
@@ -43,26 +53,30 @@ async function main() {
   let triggerServer: ReturnType<typeof createTriggerServer> | null = null
   let activeJobId: string | undefined
 
+  // `config`, `reload_config` and `announcement` — everything that does not
+  // touch the dslrBooth Local API. See src/agentMessages.ts for why these live
+  // in their own module and the command branch below does not.
+  const handleServiceMessage = createServiceMessageHandler({
+    live,
+    logger,
+    send: (payload) => { ws.send(payload) },
+    updateDisplay: (patch) => { triggerServer?.updateDisplay(patch) },
+    openDisplay: () => openDisplayWindow(config.triggerServerPort, logger),
+  })
+
   ws.onStatusChange((status) => {
     wsConnected = status === 'connected'
     logger.info(`WebSocket status: ${status}`)
+    // D-17: the Agent PULLS. It asks for its configuration as soon as it has a
+    // live socket to be answered on, and again whenever the service tells it
+    // something changed. A service built before this phase answers with a
+    // warning and nothing else, which leaves the boot values in place.
+    if (status === 'connected') requestConfig((payload) => { ws.send(payload) })
   })
 
   // 5. Message handler: Extension Service → Agent (commands)
   ws.onMessage(async (msg) => {
-    if (msg.type === 'announcement') {
-      const data = (msg.data ?? {}) as Record<string, unknown>
-      triggerServer?.updateDisplay({
-        phase: 'announcing',
-        guestName: typeof data.guestName === 'string' ? data.guestName : 'Khách tiếp theo',
-        endsAt: typeof data.endsAt === 'number' ? data.endsAt : null,
-        queueLength: typeof data.queueLength === 'number' ? data.queueLength : 0,
-        upNext: Array.isArray(data.upNext) ? data.upNext as Array<{ jobId: string; name: string; position: number }> : [],
-      })
-      logger.info(`Next guest announcement received: ${typeof data.guestName === 'string' ? data.guestName : 'unknown'}`)
-      if (config.autoOpenDisplay) openDisplayWindow(config.triggerServerPort, logger)
-      return
-    }
+    if (handleServiceMessage(msg)) return
     if (msg.type !== 'command') return
 
     const jobId = msg.jobId as string | undefined
