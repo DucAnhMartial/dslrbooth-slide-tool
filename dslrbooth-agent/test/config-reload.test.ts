@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'fs'
 import http from 'http'
+import os from 'os'
+import path from 'path'
+import { Writable } from 'stream'
+import winston from 'winston'
 import type { Config } from '../src/config'
 import type { Logger } from '../src/logging/logger'
+import { createLogger } from '../src/logging/logger'
 import { LiveConfig, SAFE_AGENT_CONFIG_FIELDS, READ_ONLY_AGENT_CONFIG_FIELDS } from '../src/liveConfig'
 import { createServiceMessageHandler, requestConfig } from '../src/agentMessages'
 import { DslrBoothClient } from '../src/dslrbooth/client'
@@ -136,6 +141,182 @@ describe('LiveConfig — the Agent applies what it is given, in memory only (D-1
   })
 })
 
+describe('The four safe fields actually take effect (D-16)', () => {
+  it('pushes a new log level onto EVERY transport, not just the logger', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-agent-logs-'))
+    const logger = createLogger({ ...BOOT_CONFIG, logDir: dir })
+    // Closed, but the directory is deliberately left behind: the daily-rotate
+    // transport finishes its writes asynchronously after close(), and deleting
+    // the file out from under it surfaces as an unhandled ENOENT that would
+    // make this suite flaky for a reason that has nothing to do with the
+    // behaviour under test. It is one small file under the OS temp directory.
+    closers.push(async () => { logger.close() })
+    // createLogger() sets an explicit level on both the console transport and
+    // the rotating-file one, so a logger-level-only change is invisible.
+    expect(logger.transports.length).toBeGreaterThan(1)
+    expect(logger.transports.every((t) => t.level === 'info')).toBe(true)
+
+    new LiveConfig(BOOT_CONFIG, logger).apply({ logLevel: 'debug' })
+
+    expect(logger.level).toBe('debug')
+    expect(logger.transports.every((t) => t.level === 'debug')).toBe(true)
+  })
+
+  it('emits a debug line that was suppressed before the level was applied', () => {
+    const written: string[] = []
+    const sink = (): Writable =>
+      new Writable({
+        write(chunk, _enc, cb) { written.push(chunk.toString()); cb() },
+      })
+    const format = winston.format.printf(({ level, message }) => `${level}: ${message}`)
+    const logger = winston.createLogger({
+      transports: [
+        new winston.transports.Stream({ stream: sink(), level: 'info', format }),
+        new winston.transports.Stream({ stream: sink(), level: 'info', format }),
+      ],
+    }) as unknown as Logger
+
+    logger.debug('before-the-change')
+    expect(written.join('')).not.toContain('before-the-change')
+
+    new LiveConfig(BOOT_CONFIG, logger).apply({ logLevel: 'debug' })
+    logger.debug('after-the-change')
+
+    expect(written.join('')).toContain('after-the-change')
+  })
+
+  it('applies dslrBoothApiPort and dslrBoothPassword together — both reach the next API call', async () => {
+    const stub = await startBoothStub()
+    const client = new DslrBoothClient(BOOT_CONFIG.dslrBoothApiPort, BOOT_CONFIG.dslrBoothPassword)
+    const live = new LiveConfig(BOOT_CONFIG, makeLogger(), {
+      onCredentialsChange: (port, password) => client.updateCredentials(port, password),
+    })
+
+    live.apply({ dslrBoothApiPort: stub.port, dslrBoothPassword: 'rotated-password' })
+    await client.startSession('print')
+
+    expect(stub.urls[0]).toContain('password=rotated-password')
+    expect(stub.urls[0]).not.toContain('boot-password')
+  })
+
+  it('refuses an empty dslrBoothPassword rather than taking the booth offline', () => {
+    const logger = makeLogger()
+    const live = new LiveConfig(BOOT_CONFIG, logger)
+
+    live.apply({ dslrBoothPassword: '' })
+
+    expect(live.dslrBoothPassword).toBe('boot-password')
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('never puts the password itself into a log line', () => {
+    const logger = makeLogger()
+    const live = new LiveConfig(BOOT_CONFIG, logger)
+
+    live.apply({ dslrBoothPassword: 'super-secret-value', logDir: 'C:/nope' })
+
+    const everythingLogged = [...logger.info.mock.calls, ...logger.warn.mock.calls]
+      .flat()
+      .join(' ')
+    expect(everythingLogged).not.toContain('super-secret-value')
+    expect(everythingLogged).toContain('dslrBoothPassword')
+  })
+})
+
+describe('The four read-only fields are structurally unreachable from the wire (D-16, T-08-20)', () => {
+  // One case per non-editable field. Four fields, four ignored keys, four
+  // warnings, zero applications — written out rather than looped, so a failure
+  // names the field that stopped being protected.
+
+  it('ignores extensionServiceWsUrl and warns once, naming it', () => {
+    const logger = makeLogger()
+    const live = new LiveConfig(BOOT_CONFIG, logger)
+    const before = live.snapshot()
+
+    live.apply({ extensionServiceWsUrl: 'ws://evil.example/agent' })
+
+    // The holder never gains the key, and the boot config it was seeded from
+    // is untouched — the socket this message arrived on still points where it
+    // did before.
+    expect(live.snapshot()).toEqual(before)
+    expect(live.snapshot()).not.toHaveProperty('extensionServiceWsUrl')
+    expect(BOOT_CONFIG.extensionServiceWsUrl).toBe('ws://service.test:3002/agent')
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+    expect(String(logger.warn.mock.calls[0][0])).toContain('extensionServiceWsUrl')
+  })
+
+  it('ignores extensionServiceWsToken and warns once, naming it', () => {
+    const logger = makeLogger()
+    const live = new LiveConfig(BOOT_CONFIG, logger)
+    const before = live.snapshot()
+
+    live.apply({ extensionServiceWsToken: 'attacker-chosen-token' })
+
+    expect(live.snapshot()).toEqual(before)
+    expect(BOOT_CONFIG.extensionServiceWsToken).toBe('boot-token')
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+    expect(String(logger.warn.mock.calls[0][0])).toContain('extensionServiceWsToken')
+  })
+
+  it('ignores triggerServerPort and warns once, naming it', () => {
+    const logger = makeLogger()
+    const live = new LiveConfig(BOOT_CONFIG, logger)
+    const before = live.snapshot()
+
+    live.apply({ triggerServerPort: 9999 })
+
+    expect(live.snapshot()).toEqual(before)
+    expect(BOOT_CONFIG.triggerServerPort).toBe(3001)
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+    expect(String(logger.warn.mock.calls[0][0])).toContain('triggerServerPort')
+  })
+
+  it('ignores logDir and warns once, naming it (RESEARCH A1, adopted)', () => {
+    const logger = makeLogger()
+    const live = new LiveConfig(BOOT_CONFIG, logger)
+    const before = live.snapshot()
+
+    live.apply({ logDir: 'Z:/unwritable' })
+
+    expect(live.snapshot()).toEqual(before)
+    expect(BOOT_CONFIG.logDir).toBe('logs')
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+    expect(String(logger.warn.mock.calls[0][0])).toContain('logDir')
+  })
+
+  it('applies the allow-listed key and ignores the forbidden one in the SAME payload', () => {
+    const logger = makeLogger()
+    const live = new LiveConfig(BOOT_CONFIG, logger)
+
+    const applied = live.apply({ dslrBoothApiPort: 1600, triggerServerPort: 9999 })
+
+    expect(applied).toEqual(['dslrBoothApiPort'])
+    expect(live.dslrBoothApiPort).toBe(1600)
+    expect(live.snapshot()).not.toHaveProperty('triggerServerPort')
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('warns and drops an unrecognised key rather than merging it "just in case"', () => {
+    const logger = makeLogger()
+    const live = new LiveConfig(BOOT_CONFIG, logger)
+
+    const applied = live.apply({ somethingNobodyShipped: true })
+
+    expect(applied).toEqual([])
+    expect(live.snapshot()).not.toHaveProperty('somethingNobodyShipped')
+    expect(String(logger.warn.mock.calls[0][0])).toContain('somethingNobodyShipped')
+  })
+
+  it('keeps the allow-list at exactly four names and excludes every read-only one', () => {
+    expect(SAFE_AGENT_CONFIG_FIELDS).toHaveLength(4)
+    expect(READ_ONLY_AGENT_CONFIG_FIELDS).toHaveLength(4)
+    expect((SAFE_AGENT_CONFIG_FIELDS as readonly string[]).includes('extensionServiceWsUrl')).toBe(false)
+    expect((SAFE_AGENT_CONFIG_FIELDS as readonly string[]).includes('extensionServiceWsToken')).toBe(false)
+    expect((SAFE_AGENT_CONFIG_FIELDS as readonly string[]).includes('triggerServerPort')).toBe(false)
+    expect((SAFE_AGENT_CONFIG_FIELDS as readonly string[]).includes('logDir')).toBe(false)
+  })
+})
+
 describe('Service → Agent message handling (D-17 round trip)', () => {
   function build(overrides: Partial<Config> = {}) {
     const logger = makeLogger()
@@ -214,5 +395,50 @@ describe('Service → Agent message handling (D-17 round trip)', () => {
       { phase: 'announcing', guestName: 'Lan', endsAt: 123, queueLength: 2, upNext: [] },
     ])
     expect(h.opened).toHaveLength(1)
+  })
+
+  it('reads autoOpenDisplay through the LIVE holder — flipping it changes the display-open count', () => {
+    const h = build()
+    const announce = { type: 'announcement', data: { guestName: 'Lan' } }
+
+    h.handle(announce)
+    expect(h.opened).toHaveLength(1)
+
+    // The operator turns auto-open off from the CMS, mid-event.
+    h.live.apply({ autoOpenDisplay: false })
+    h.handle(announce)
+    h.handle(announce)
+    expect(h.opened).toHaveLength(1) // still 1 — nothing opened
+    // The display is still told what to show; only the window-opening stops.
+    expect(h.displayed).toHaveLength(3)
+
+    // And back on again.
+    h.live.apply({ autoOpenDisplay: true })
+    h.handle(announce)
+    expect(h.opened).toHaveLength(2)
+  })
+
+  it('applies a whole config message end to end, ignoring the forbidden keys riding on it', () => {
+    const h = build()
+
+    h.handle({
+      type: 'config',
+      data: {
+        logLevel: 'warn',
+        autoOpenDisplay: false,
+        dslrBoothApiPort: 1600,
+        dslrBoothPassword: 'from-the-cms',
+        triggerServerPort: 9999,
+        logDir: 'Z:/unwritable',
+      },
+    })
+
+    expect(h.live.snapshot()).toEqual({
+      logLevel: 'warn',
+      autoOpenDisplay: false,
+      dslrBoothApiPort: 1600,
+      dslrBoothPassword: 'from-the-cms',
+    })
+    expect(h.logger.warn).toHaveBeenCalledTimes(2)
   })
 })
