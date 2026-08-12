@@ -1342,3 +1342,90 @@ be dispatched for a real photo session with nobody present to run it.
   gap, not a defect this phase introduced — those legs were already
   verified independently in Phases 2-4 against a connected Agent; they
   have simply never been exercised together with this phase's live VIEW.
+
+## 11. Changing the log level without a redeploy (SC-5)
+
+`LOG_LEVEL` (§3) governs the process-wide sink threshold for every log line
+this service writes — `src/logging/logger.ts`'s single winston `Logger`
+instance and every `labelLogger()` child created from it. Before this
+section's mechanism, the only way to change it was to edit `.env` and
+restart the process, losing whatever in-flight state a restart discards.
+As of this phase, the running process can be raised or lowered **in
+place**, without a restart and without a redeploy.
+
+**This adds no new configuration key (D-12).** The mechanism reuses the
+existing `LOG_LEVEL` key exactly as `config.ts` already reads it at
+startup — see `07-02-PLAN.md`'s `<d12_reconciliation>` for the full
+reasoning. It also does not change what gets logged: the AGT-04 event
+lines are separately made unconditional `info` calls (plan 07-05); this
+section's SIGHUP reload only changes the threshold those lines are
+filtered against, exactly as setting `LOG_LEVEL=warn` at startup already
+does today.
+
+### How to change it
+
+1. Edit `LOG_LEVEL` in the deployed `.env` file (accepted values below).
+2. Send `SIGHUP` to the running process:
+   - **PM2:** `pm2 sendSignal SIGHUP <app-name>`
+   - **Raw process:** `kill -HUP <pid>`
+   - **Docker:** `docker kill --signal=HUP <container>`
+3. Watch the log for the confirmation line (see below). No restart, no
+   redeploy, no dropped connections.
+
+### Accepted values
+
+The seven winston npm levels, from least to most verbose:
+`error`, `warn`, `info`, `http`, `verbose`, `debug`, `silly` — the same
+`LOG_LEVELS` array `src/logging/logger.ts` exports and validates against.
+
+### What happens on an invalid or missing value
+
+An invalid value (a typo, an empty string, anything not in the list
+above) is rejected: the running level is left exactly as it was, and
+exactly one `warn` names the rejected value and the accepted vocabulary.
+The reload never throws and never terminates the process (T-07-09) — a
+malformed `.env` can only fail to change the level, never crash the
+service.
+
+### The confirmation line, and its one caveat
+
+Every `SIGHUP` reload — successful, unchanged, or rejected — writes exactly
+one confirmation line, at `warn`, quoted verbatim from
+`src/ops/logLevelControl.ts`:
+
+```
+Log level reload (SIGHUP): <previous> -> <current>
+```
+
+**Deliberately written at `warn`, not `info`:** the confirmation must stay
+visible even when the operator has already pinned the process above
+`info`. The one caveat this does not solve: pinning the level above `warn`
+(i.e. to `error`) silences this confirmation line **itself**, along with
+everything else at `warn` and below — that is standard logging semantics
+(a raised threshold silences its own announcement), not a bug in the
+handler. If you cannot see the confirmation after sending `SIGHUP`, check
+what the level actually is now (§6's read-only inspection pattern applies
+equally here, or simply `SIGHUP` again while watching at `debug`).
+
+### In-memory only
+
+The change made by a `SIGHUP` reload lives only in the running process's
+memory. It is **not** written back to `.env`. A process restart (whether
+from a crash, a deploy, or an intentional restart) returns to whatever
+`.env` holds at that moment — if you want a level change to survive a
+restart, edit `.env` and leave it edited; the `SIGHUP` reload is for
+observing the process **right now**, not for a permanent configuration
+change.
+
+### Why SIGHUP, not SIGUSR2
+
+`SIGUSR2` is claimed by common Node deployment tooling — PM2 uses it for
+log-file reopening, nodemon uses it for restart-on-signal — so binding the
+level reload to it would collide with the deployment's own signal use.
+`SIGHUP` was otherwise unused by this service and, left unhandled, would
+have terminated the process by default; registering a handler for it
+(`src/index.ts`, at startup) converts that default into the safe, in-place
+reload documented above.
+
+See §3's environment-variable table for `LOG_LEVEL`'s own row (the default
+it starts at, `info`, is unchanged by this section).

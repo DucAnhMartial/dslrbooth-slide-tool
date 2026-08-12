@@ -3,6 +3,7 @@ import express from 'express';
 import { getConfig } from './config';
 import { getStore } from './state/localStore';
 import { labelLogger } from './logging/logger';
+import { registerLogLevelSignalHandler } from './ops/logLevelControl';
 import { createMirrorReceiver } from './ingestion/mirrorReceiver';
 import { jsonWithRawBody } from './ingestion/webhookAuth';
 import { DBPoller } from './ingestion/dbPoller';
@@ -18,6 +19,11 @@ import { clientIp, isWhitelisted } from './security/ipAllowlist';
 
 const config = getConfig();
 const log = labelLogger('server');
+// SC-5's "without a redeploy" half (07-02-PLAN.md): registered once, at
+// startup, before the express app is built. SIGHUP reloads LOG_LEVEL from
+// .env in place — see src/ops/logLevelControl.ts for why SIGHUP and not
+// SIGUSR2.
+registerLogLevelSignalHandler();
 
 const app = express();
 app.use(jsonWithRawBody());
@@ -69,6 +75,9 @@ const probe = createViewHealthProbe(store);
 
 const server = app.listen(config.PORT, config.HOST, () => {
   log.info(`Extension Service ready on ${config.HOST}:${config.PORT}`);
+  log.info(
+    `Log level started at "${config.LOG_LEVEL}" — send SIGHUP to reload LOG_LEVEL from .env without a restart`
+  );
   poller.start();
   probe.start();
   try {
