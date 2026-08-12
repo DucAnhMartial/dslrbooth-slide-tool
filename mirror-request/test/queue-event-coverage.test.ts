@@ -103,6 +103,14 @@ function buildStore(boundJobId: string | null = 'job-x') {
     // cannot drift away from the SQL they stand in for (07-03).
     ...createPendingPrintRegistry().registry,
     getJobRegistration: () => undefined,
+    // Phase 8 plan 08-02: the photo-history write (D-10) reads these. This
+    // fixture deliberately keeps getJobRegistration returning undefined —
+    // this file is about the logging line, and the no-registration path is a
+    // real one — so the history write correctly declines and warns. That warn
+    // carries the jobId and no URL, which is exactly what the D-13
+    // no-fotoshare-URL-in-logs assertion below requires of it.
+    getActiveEventId: () => 'evt-fixture',
+    recordEventPhoto: vi.fn(() => true),
     ...NO_PHOTO_SWEEP_STUB,
   } as unknown as LocalStore;
   return { store, updateJobStatus, completeJob, getBooth: () => booth };

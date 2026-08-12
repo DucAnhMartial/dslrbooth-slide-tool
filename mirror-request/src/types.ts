@@ -133,6 +133,24 @@ export interface DisplaySnapshot {
   // existing snapshot rather than a per-screen URL or a second feed. It is
   // never null — see EventConfig above.
   eventConfig: EventConfig;
+  // D-09's hero moment: the guest who JUST finished shooting, distinct from
+  // `guestName` above (the guest being ANNOUNCED). At one instant those are
+  // two different people — one walking away from the booth, one walking
+  // towards it — and collapsing them onto one field is the D-09 failure mode.
+  //
+  // A two-key projection, never an `event_photo` row: the same D-15 shape
+  // discipline the header note above pins for `queue_job`.
+  //
+  // It is DERIVED inside buildSnapshot() on every evaluation from the newest
+  // capture's stored `captured_at` versus an injected TTL — it is not a field
+  // that anything sets or clears. See displayServer.ts for why that is the
+  // only implementation that survives a restart mid-hero-moment.
+  justCaptured: { photoUrl: string; name: string } | null;
+  // D-10: the slideshow's source, newest first, capped at
+  // `eventConfig.photoCount` at build time so the rendered DOM stays bounded
+  // however large the durable history grows (T-08-11). Same narrow projection
+  // rule as `justCaptured`.
+  photos: Array<{ photoUrl: string; name: string }>;
 }
 
 export interface EnvConfig {

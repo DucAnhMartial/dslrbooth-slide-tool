@@ -45,7 +45,13 @@ export function renderDisplayPage(): string {
     .count.pulse{animation:pulse .8s ease-out}.instruction{font-size:clamp(1.2rem,2vw,2rem);max-width:20ch;line-height:1.2}
     .idle{font-family:Didot,Georgia,serif;font-size:clamp(2.5rem,5vw,5rem);max-width:13ch;line-height:1.05}
     aside{border-left:1px solid var(--line);padding-left:2.5rem;display:flex;flex-direction:column}
-    aside h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.18em;margin:0 0:2.5rem}
+    /* margin is "0 0 2.5rem", not "0 0:2.5rem". The stray colon (pre-existing
+       since Phase 5, logged as deferred item D-1 during 08-01) made the whole
+       declaration invalid, so the sidebar heading silently had no bottom
+       margin at all. */
+    aside h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.18em;margin:0 0 2.5rem}
+    .heroShot{display:flex;flex-direction:column;gap:1.5rem;min-height:0}
+    .heroShot img{max-width:100%;max-height:52vh;object-fit:contain;border-radius:.5rem}
     ol{list-style:none;padding:0;margin:0}.guest{display:grid;grid-template-columns:2.4rem 1fr;gap:1rem;padding:1.15rem 0;border-top:1px solid var(--line);align-items:baseline}.guest:first-child{border-top:2px solid var(--ink)}
     .pos{color:var(--accent);font-weight:800}.name{font-family:Didot,Georgia,serif;font-size:clamp(1.25rem,2vw,1.8rem)}
     /* The two operational status colours are HARD-CODED, never var(--event-*),
@@ -96,7 +102,15 @@ export function renderDisplayPage(): string {
     meta.textContent=data.queueLength?data.queueLength+' khách đang chờ':'Chưa có khách trong hàng chờ';
     queue.innerHTML=(data.upNext||[]).map(g=>'<li class="guest"><span class="pos">'+String(g.position).padStart(2,'0')+'</span><span class="name"></span></li>').join('');
     [...queue.querySelectorAll('.name')].forEach((el,i)=>el.textContent=data.upNext[i].name);
-    if(data.boothState==='ANNOUNCING'&&data.guestName){
+    // D-09: the hero moment takes the stage. justCaptured is the guest who
+    // JUST finished shooting; guestName is the guest being announced. They
+    // are different people at this instant, so this branch reads its name
+    // from justCaptured and never from guestName.
+    if(data.justCaptured){
+      hero.innerHTML='<div class="heroShot"><img id="heroImg" alt=""><h1 id="heroName"></h1></div>';
+      hero.querySelector('#heroImg').src=data.justCaptured.photoUrl;
+      hero.querySelector('#heroName').textContent=data.justCaptured.name;
+    }else if(data.boothState==='ANNOUNCING'&&data.guestName){
       hero.innerHTML='<p class="label">Xin mời khách tiếp theo</p><h1 id="guest"></h1><div class="callout"><div class="count" id="count"></div><p class="instruction">Chuẩn bị trước máy ảnh — phiên chụp sắp bắt đầu.</p></div>';
       document.querySelector('#guest').textContent=data.guestName;const count=document.querySelector('#count');count.textContent=data.countdownSeconds??'';
       if(previousCount!==data.countdownSeconds){count.classList.add('pulse');previousCount=data.countdownSeconds}

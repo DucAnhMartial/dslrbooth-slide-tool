@@ -88,6 +88,12 @@ function buildStore() {
     requeueWithRetry: vi.fn(),
     requeueNoRetry: vi.fn(),
     failJob: vi.fn(),
+    // Phase 8 plan 08-02: a resolved print upload also writes photo history
+    // (D-10). Configured as a normal service — active event present — so the
+    // "zero warnings on a good session" assertion below stays a statement
+    // about the code rather than about a half-configured fixture.
+    getActiveEventId: () => 'evt-fixture',
+    recordEventPhoto: vi.fn(() => true),
     ...registry,
     ...NO_PHOTO_SWEEP_STUB,
   } as unknown as LocalStore;

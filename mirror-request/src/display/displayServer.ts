@@ -11,6 +11,21 @@ import type { DisplaySnapshot } from '../types';
 
 const DEFAULT_POLL_INTERVAL_MS = 250;
 
+/**
+ * D-09's hero window: how long after a capture the guest who just shot owns
+ * the whole screen. CONTEXT leaves the value to Claude's discretion within a
+ * 10-15 second range and defaults it to a constructor-injectable constant
+ * rather than a CMS field — long enough for a guest to turn around and see
+ * their own face, short enough that the room screen is back to being useful
+ * to everyone else before the next guest is called.
+ *
+ * Module constant + `opts` override, matching PENDING_PRINT_EXPIRY_MS in
+ * queueService.ts and pollIntervalMs directly below: never read from
+ * getConfig() inside a method body, because a timing value read at call time
+ * cannot be injected by a test.
+ */
+const DEFAULT_HERO_MOMENT_MS = 12_000;
+
 // Vietnamese naming: the given name is the trailing whitespace-separated
 // token (e.g. "Nguyễn Văn A" -> "A"), which is also how a person would
 // actually be addressed (D-14). Falls back to the whole string when there
@@ -27,6 +42,7 @@ export class DisplayServer {
   private store: LocalStore;
   private displayWhitelist: string[];
   private pollIntervalMs: number;
+  private heroMomentDurationMs: number;
   private broadcastTimer: NodeJS.Timeout | null = null;
   private wss: WebSocketServer | null = null;
   // The last snapshot message actually sent to clients, serialised. Change
@@ -38,13 +54,14 @@ export class DisplayServer {
     queue: QueueService,
     agent: AgentServer,
     store: LocalStore = getStore(),
-    opts: { displayWhitelist?: string[]; pollIntervalMs?: number } = {},
+    opts: { displayWhitelist?: string[]; pollIntervalMs?: number; heroMomentDurationMs?: number } = {},
   ) {
     this.queue = queue;
     this.agent = agent;
     this.store = store;
     this.displayWhitelist = opts.displayWhitelist ?? getConfig().DISPLAY_IP_WHITELIST;
     this.pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    this.heroMomentDurationMs = opts.heroMomentDurationMs ?? DEFAULT_HERO_MOMENT_MS;
   }
 
   start(httpServer: http.Server): void {
@@ -129,6 +146,45 @@ export class DisplayServer {
     // in storage; `getQueuedGuestSummaries()` itself is untouched.
     const upNext = upNextRaw.map((guest) => ({ ...guest, name: toGivenName(guest.name) }));
 
+    // D-09/D-10. `justCaptured` is COMPUTED here, on every evaluation, from a
+    // durable timestamp — never a field that something sets and a
+    // `setTimeout` clears. That is not a style preference; both alternatives
+    // fail silently (RESEARCH Pitfall 1):
+    //
+    //   - a callback-cleared field is lost with the process, so a restart
+    //     inside the window pins a departed guest's face on the wall for the
+    //     rest of the event, with nothing left to clear it;
+    //   - and because `maybeBroadcast()` below sends on a serialised diff, a
+    //     value that re-serialises every tick (a remaining-ms countdown, say)
+    //     would flood every TV in the venue at 4 Hz.
+    //
+    // Reading `capturedAt` off disk and comparing it to an injected TTL has
+    // neither failure: a restart mid-window either still shows the hero or
+    // correctly shows nothing, and the projection is byte-identical on every
+    // tick until it flips to null — exactly two broadcasts per capture. This
+    // is the same shape `countdownSeconds`/`announcementEndsAt` above already
+    // use, for the same reason.
+    //
+    // `getMostRecentEventPhoto()` and `listEventPhotos()` are purpose-built
+    // narrow projections, in keeping with this method's header note: no
+    // `event_photo` row reaches the wire.
+    const eventConfig = this.store.getActiveEventConfig();
+    const activeEventId = this.store.getActiveEventId();
+    const recentPhoto = activeEventId ? this.store.getMostRecentEventPhoto(activeEventId) : undefined;
+    const justCaptured =
+      recentPhoto && Date.now() - recentPhoto.capturedAt < this.heroMomentDurationMs
+        ? { photoUrl: recentPhoto.photoUrl, name: recentPhoto.guestName }
+        : null;
+
+    // T-08-11: bounded HERE, at render-feed assembly, because D-11 forbids any
+    // automatic expiry at the table level. History grows for the whole event;
+    // what reaches a browser does not.
+    const photos = activeEventId
+      ? this.store
+          .listEventPhotos(activeEventId, { limit: Math.max(0, eventConfig.photoCount), offset: 0 })
+          .map((photo) => ({ photoUrl: photo.photoUrl, name: photo.guestName }))
+      : [];
+
     return {
       queuePosition: upNextRaw[0]?.position ?? 0,
       queueLength: this.queue.getQueueLength(),
@@ -144,7 +200,9 @@ export class DisplayServer {
       // serialized-diff guard — no new broadcast wiring, no per-screen URL,
       // and no page reload. getActiveEventConfig() is a purpose-built
       // projection, never a raw `event` row (see this method's header note).
-      eventConfig: this.store.getActiveEventConfig(),
+      eventConfig,
+      justCaptured,
+      photos,
     };
   }
 

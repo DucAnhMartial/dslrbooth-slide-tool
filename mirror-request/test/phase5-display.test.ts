@@ -220,6 +220,14 @@ describe('DisplayServer — no PII-capable field can reach the wire (D-15)', () 
       // operator columns D-15 is about.
       'eventConfig',
       'guestName',
+      // Phase 8 plan 08-02, keys ten and eleven, admitted on the same terms
+      // and for the same reason the tripwire exists: both are two-key
+      // projections built by buildSnapshot() from purpose-built store
+      // getters (getMostRecentEventPhoto / listEventPhotos), never an
+      // `event_photo` row. Neither carries jobId, event_id or captured_at,
+      // so nothing internal rides out with them.
+      'justCaptured',
+      'photos',
       'queueLength',
       'queuePosition',
       'upNext',
@@ -258,6 +266,12 @@ describe('DisplayServer — no PII-capable field can reach the wire (D-15)', () 
       getEventConfig: () => {
         throw new Error('D-15 violation: getEventConfig() must never be called from the broadcast path');
       },
+      // Plan 08-02: the hero moment and slideshow reads. Both are narrow
+      // projections by construction, so supplying them keeps the trap intact
+      // — every raw-row getter above still throws.
+      getActiveEventId: () => undefined,
+      getMostRecentEventPhoto: () => undefined,
+      listEventPhotos: () => [],
     } as unknown as LocalStore;
 
     const server = http.createServer();

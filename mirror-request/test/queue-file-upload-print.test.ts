@@ -81,7 +81,19 @@ function buildStore(currentJobId: string | undefined = JOB, pending: PendingSeed
     closeJobNoPhoto: vi.fn(() => false),
     getJobsAwaitingNoPhotoClose: () => [],
     getQueuePosition: () => undefined,
-    getJobRegistration: () => undefined,
+    // Phase 8 plan 08-02: a resolved print upload now also writes a photo-
+    // history row (D-10), which needs the registration join and the active
+    // event. This fixture stands for a NORMALLY CONFIGURED service — an
+    // active event and a real registration — because that is what keeps the
+    // "zero print-related warnings on a good session" assertions below
+    // meaningful. A fixture with no active event would warn on every upload
+    // and those assertions would be measuring the fixture, not the code.
+    getJobRegistration: (id: string) => ({
+      job: { id },
+      registration: { id: 'reg-1', name: 'Guest One', email: '', phone: '', mode: 'standard', registered_at: '' },
+    }),
+    getActiveEventId: () => 'evt-fixture',
+    recordEventPhoto: vi.fn(() => true),
     ...registry,
   } as unknown as LocalStore;
   return { store, rows, updateJobStatus, completeJob, failJob };

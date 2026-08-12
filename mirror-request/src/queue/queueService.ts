@@ -957,6 +957,7 @@ export class QueueService {
         `Print upload for ${jobId} arrived ${Math.round(lateByMs / 1000)}s after its pending-print slot expired; delivering late and leaving the job status unchanged`,
       );
       if (this.store.resolvePendingPrint(jobId, Date.now())) {
+        this.recordPhotoHistory(jobId, photoUrl);
         void this.sendNotification(jobId, photoUrl);
       }
       return;
@@ -968,8 +969,70 @@ export class QueueService {
     // a no-op, so it has to land first. A false return means another delivery
     // already claimed this slot.
     if (this.store.resolvePendingPrint(jobId, Date.now())) {
+      this.recordPhotoHistory(jobId, photoUrl);
       void this.sendNotification(jobId, photoUrl);
     }
+  }
+
+  /**
+   * D-10: the durable photo-history write, called from inside the resolve on
+   * BOTH legitimate branches above — the ordinary 'awaiting' resolve and the
+   * late-but-legitimate 'expired' one. A real photo arriving late is still a
+   * real photo and still belongs on the wall.
+   *
+   * It is deliberately NOT called on the two no-op branches. `pending ===
+   * undefined` (D-04) means no session ever opened a slot for this job, so
+   * there is no guest to attribute the photo to; a `false` return from
+   * `resolvePendingPrint` means a duplicate or replayed upload, and the first
+   * write already recorded the real capture. Writing on either would fabricate
+   * history — the mirror image of losing a real capture, and just as silent.
+   *
+   * ADDITIVE, never a replacement (D-04): every `sendNotification()` call site
+   * is exactly where it was, and none of them is gated on this write
+   * succeeding. The guest is owed their photo whether or not the CMS has an
+   * event set up.
+   *
+   * The guest name comes from `getJobRegistration()` — the same join
+   * `statusRoute.ts` uses, and the one whose header there documents the live
+   * bug caused by reading `.registration` off a bare `queue_job` row. It is
+   * reused identically rather than re-derived.
+   */
+  private recordPhotoHistory(jobId: string, photoUrl: string): void {
+    try {
+      this.writePhotoHistory(jobId, photoUrl);
+    } catch (err) {
+      // D-04, enforced rather than merely intended. This write sits on the
+      // line between the resolve and `sendNotification()`, so an exception
+      // escaping it — a locked database, a full disk — would take the guest's
+      // photo delivery down with it, turning a cosmetic history gap into the
+      // exact failure D-04 exists to prevent. History is the strictly less
+      // important of the two; it fails alone.
+      queueLogger.warn(
+        `Print upload for ${jobId} could not be recorded to photo history: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  private writePhotoHistory(jobId: string, photoUrl: string): void {
+    const registration = this.store.getJobRegistration(jobId)?.registration;
+    const activeEventId = this.store.getActiveEventId();
+    if (activeEventId && registration) {
+      this.store.recordEventPhoto({
+        jobId,
+        eventId: activeEventId,
+        guestName: registration.name,
+        photoUrl,
+        capturedAt: Date.now(),
+      });
+      return;
+    }
+    // T-08-08: a template string, never an object. The winston masking
+    // formatters only run when `typeof message === 'string'` (see
+    // logging/logger.ts's debugRawPayload warning), so object-form logging
+    // here would push an unmasked guest contact detail into the log file.
+    queueLogger.warn(
+      `Print upload for ${jobId} resolved but no active event — photo not recorded to history`,
+    );
   }
 
   private async sendNotification(jobId: string, photoUrl: string): Promise<void> {
