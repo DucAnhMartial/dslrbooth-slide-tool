@@ -72,6 +72,33 @@ export class LocalStore {
         webhook_id TEXT PRIMARY KEY,
         received_at INTEGER NOT NULL
       );
+      -- D-07/D-08's pending-print registry: the durable slot for a photo that
+      -- has not arrived yet. A brand-new table, so it belongs here under
+      -- CREATE TABLE IF NOT EXISTS — this file's idempotency mechanism for new
+      -- tables — rather than in migrate(), which is for new columns on
+      -- existing ones.
+      --
+      -- The naming register is booth_state's, not notification_record's: a
+      -- camelCase jobId alongside snake_case timestamp columns, matching
+      -- booth_state's (state, updated_at) above.
+      --
+      -- The status vocabulary is exactly three words: 'awaiting', 'resolved',
+      -- 'expired'. An expired row is MARKED, NEVER DELETED, and no cleanup or
+      -- DELETE path may be added anywhere. That row is the only evidence that
+      -- distinguishes D-11's late-but-legitimate print (a slot was opened for
+      -- this job and expired — deliver it anyway, and warn) from D-04's
+      -- out-of-session photo (no slot was ever opened — drop it, and warn).
+      -- Deleting expired rows would collapse those two cases into one and make
+      -- it impossible to honour both decisions.
+      CREATE TABLE IF NOT EXISTS pending_print (
+        jobId          TEXT PRIMARY KEY,
+        composite_path TEXT,
+        status         TEXT NOT NULL DEFAULT 'awaiting',
+        opened_at      INTEGER NOT NULL,
+        expires_at     INTEGER NOT NULL,
+        resolved_at    INTEGER,
+        updated_at     TEXT NOT NULL DEFAULT 'now'
+      );
     `);
   }
 
@@ -527,6 +554,93 @@ export class LocalStore {
       WHERE jobId = ? AND status IN ('pending','retrying','sending') AND dueAt <= ?
     `).run(leaseUntil, new Date().toISOString(), jobId, now);
     return result.changes === 1;
+  }
+
+  // pending-print registry (D-07/D-08)
+  //
+  // The slot is opened at the print composite — the completion anchor — and
+  // resolved by the later `file_upload` that carries the guest's URL. It is
+  // durable, unlike the in-memory Set it replaces, because a restart
+  // mid-session is a documented event in this project's history: the fact
+  // that a photo is owed must survive one.
+  //
+  // ON CONFLICT(jobId) DO NOTHING, not an upsert. dslrBooth delivers the
+  // composite twice per session (processing_start then printing, both naming
+  // the same file), so the completion path fires twice — RESEARCH.md's
+  // Pitfall 2. This clause IS the idempotency guarantee that exactly one slot
+  // is opened; turning it into an upsert would let the second fire silently
+  // extend the first slot's deadline and reset its composite path.
+  openPendingPrint(entry: { jobId: string; compositePath: string; openedAt: number; expiresAt: number }): boolean {
+    const result = this.db.prepare(`
+      INSERT INTO pending_print (jobId, composite_path, status, opened_at, expires_at, resolved_at, updated_at)
+      VALUES (?, ?, 'awaiting', ?, ?, NULL, ?)
+      ON CONFLICT(jobId) DO NOTHING
+    `).run(entry.jobId, entry.compositePath, entry.openedAt, entry.expiresAt, new Date().toISOString());
+    return result.changes === 1;
+  }
+
+  // Deliberately unfiltered by status. The caller needs all three answers —
+  // 'awaiting', 'expired', and "no row at all" — because that three-way
+  // distinction is exactly what keeps D-04 and D-11 apart at the resolution
+  // site. Do NOT add a `WHERE status = 'awaiting'` or an expiry predicate
+  // here: filtering expired rows out would make a late-but-legitimate print
+  // indistinguishable from a photo produced with no session awaiting one, and
+  // the service would drop a real guest's photo.
+  getPendingPrint(jobId: string): { jobId: string; compositePath: string; status: string; openedAt: number; expiresAt: number } | undefined {
+    const row = this.db.prepare('SELECT jobId, composite_path, status, opened_at, expires_at FROM pending_print WHERE jobId = ?').get(jobId) as
+      | { jobId: string; composite_path: string | null; status: string; opened_at: number; expires_at: number }
+      | undefined;
+    return row
+      ? {
+          jobId: row.jobId,
+          compositePath: row.composite_path ?? '',
+          status: row.status,
+          openedAt: row.opened_at,
+          expiresAt: row.expires_at,
+        }
+      : undefined;
+  }
+
+  // Same omission-as-guarantee discipline as getDueNotifications() above:
+  // 'resolved' is deliberately ABSENT from this predicate, and that absence IS
+  // the guarantee that a repeated or replayed print upload cannot enqueue a
+  // second notification for the same job (T-07-12). There is no
+  // application-level `if (alreadySent)` anywhere for a later edit to delete —
+  // the second UPDATE simply matches zero rows and this returns false.
+  //
+  // 'expired' is deliberately PRESENT for the opposite reason: D-11 says a
+  // print that arrives after its slot expired is still delivered to the guest,
+  // so an expired row must remain resolvable. Getting the photo late beats not
+  // getting it.
+  resolvePendingPrint(jobId: string, resolvedAt: number): boolean {
+    const result = this.db.prepare(`
+      UPDATE pending_print
+      SET status = 'resolved', resolved_at = ?, updated_at = ?
+      WHERE jobId = ? AND status IN ('awaiting','expired')
+    `).run(resolvedAt, new Date().toISOString(), jobId);
+    return result.changes === 1;
+  }
+
+  // The select and the mark share ONE transaction, and that is not a
+  // performance detail: a row handed to the caller without also being marked
+  // would emit the `No print upload seen` warning on every 250 ms sweep,
+  // forever (T-07-14). Marking inside the same transaction is what bounds each
+  // slot to at most one warning ever, regardless of sweep frequency.
+  //
+  // Expired rows are marked, never deleted — see the table declaration.
+  expirePendingPrints(now: number): Array<{ jobId: string; compositePath: string }> {
+    const select = this.db.prepare(
+      "SELECT jobId, composite_path FROM pending_print WHERE status = 'awaiting' AND expires_at <= ?"
+    );
+    const mark = this.db.prepare(
+      "UPDATE pending_print SET status = 'expired', updated_at = ? WHERE status = 'awaiting' AND expires_at <= ?"
+    );
+    const sweep = this.db.transaction((cutoff: number) => {
+      const rows = select.all(cutoff) as Array<{ jobId: string; composite_path: string | null }>;
+      mark.run(new Date().toISOString(), cutoff);
+      return rows.map((row) => ({ jobId: row.jobId, compositePath: row.composite_path ?? '' }));
+    });
+    return sweep(now);
   }
 
   close(): void {
