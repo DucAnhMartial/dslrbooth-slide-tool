@@ -176,6 +176,31 @@ site-independent defaults that are correct out of the box, and — per
 D-09's own reasoning for `VIEW_PROBE_INTERVAL_MS` — no supported way
 exists to switch off the only signal that ingestion is dead.
 
+Session lifecycle variables added in Phase 7 (optional, working default —
+see §5 for the two anchors this governs):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BOOTH_RELEASE_TIMEOUT_MS` | `120000` (2 min) | How long the booth stays held for a job that has already **completed** at the print composite, waiting for the `session_end` that releases it. If that `session_end` never arrives, this fallback releases the booth anyway and the queue moves on. The effective value is clamped to at least `30000`. **If you set it too low, the deadline fires while the guest is still standing at the sharing screen** — the booth is handed to the next guest, who is announced and dispatched on top of a session that is visibly still running. It never charges a retry and never writes a `stall_reason` (§6), because the job it releases is already terminal — it is a booth-release deadline, not a stall timer. |
+
+### Phase 7 timing values that are deliberately NOT environment variables
+
+Two Phase 7 timing values look like configuration and are not. They are
+module constants in `src/queue/queueService.ts` with a constructor seam used
+only by tests — there is **no environment variable, no `.env` key and no
+runtime toggle for either**, by decision (Phase 7 D-12). Setting either name
+in `.env` or in the PM2 environment does nothing at all; the process will
+not warn you, because nothing reads it.
+
+| Constant | Default | Why it is not a knob, and what happens if it were set too low |
+|---|---|---|
+| `PENDING_PRINT_EXPIRY_MS` | `600000` (10 min) | How long a pending-print slot stays open before the sweep marks it `expired` and writes the `No print upload seen` warning (§8). Its floor is **derived, not chosen**: `SESSION_TIMEOUT_MS` + `NEXT_GUEST_COUNTDOWN_MS` = `307000`, and the value is clamped to at least that at construction. Below that floor a legitimately late print could expire before the next guest could even physically be dispatched — the service would drop a real guest's photo. Note that an expired slot still delivers the photo late (§8); the expiry governs the warning and the diagnosis, not the delivery. |
+| `NO_PHOTO_CLOSE_DELAY_MS` | `900000` (15 min) | How long an unbound `in_progress` job must sit before the tick sweep closes it as `no_photo` (§6). Clamped at runtime to this instance's `PENDING_PRINT_EXPIRY_MS` + `NEXT_GUEST_COUNTDOWN_MS`. The two failure directions are not symmetric, which is what sets the generous default: closing **late** costs an operator a delayed diagnostic line, while closing **early** writes a terminal, persisted, guest-visible outcome onto a session that was still alive. |
+
+Both are therefore absent from `.env.example` on purpose. If a future phase
+decides either genuinely needs to be tunable per site, that is a decision to
+reopen deliberately — not something to work around by adding a key here.
+
 See `.env.example` for the full list of environment variables this service
 reads.
 
@@ -211,13 +236,77 @@ The type `BoothState` in `src/types.ts` declares a fourth value,
 `TIMEOUT_RESET`, which no code path in this service ever writes. It is
 dead by design — do not look for it in the database.
 
+### Completion and release are two separate anchors (Phase 7)
+
+**Before Phase 7 there was one anchor: `session_end` both completed the job
+and released the booth. That was wrong, and it is the defect Phase 7
+exists to fix.** The two are now split, and an operator diagnosing a
+session has to know which of the two they are looking at.
+
+- **Completion happens at the print composite.** dslrBooth emits the
+  finished composite file in `processing_start.param5` and again in
+  `printing.param1` — measured pointing at the same file, about 30 seconds
+  *before* that session's `session_end`. Whichever arrives first completes
+  the job, scoped to `booth_state.current_job_id`; the second is absorbed
+  and completes nothing. Completion does **not** release the booth.
+- **Release happens at the first `session_end` after that**, or at the
+  `BOOTH_RELEASE_TIMEOUT_MS` fallback deadline (§3) if no `session_end`
+  ever arrives.
+
+**`session_end` fires on every exit from the sharing screen, not once per
+guest.** Measured on the real booth: three `session_end` events in 52
+seconds for a single photo session, because the operator browsed the photo
+gallery twice after the session had already finished. Its payload is empty
+`{}` — dslrBooth attaches no session identity to it whatsoever, so the
+server cannot tell a stray duplicate from a real one.
+
+**Duplicate `session_end` events are therefore normal machine behaviour,
+not an incident.** Do not open an investigation because you see several per
+guest in the log. What matters is that a stray one now has nothing to
+damage: it completes no job, and if no job is bound to the booth it is
+ignored outright (`session_end received with no job bound to the booth`).
+
+### The session summary line — one grep per session (Phase 7, D-14)
+
+Every job that closes writes exactly one line, at `info`, with a fixed
+leading token and a stable `key=value` field order:
+
+```
+SESSION_SUMMARY job=<jobId> outcome=<completed|no_photo> captures=<n|unknown> print_composite=<yes|no> duration_ms=<n|unknown>
+```
+
+To read a whole session, grep the job id and take this line — you do not
+need to reconstruct the session from the per-event lines:
+
+```bash
+grep "SESSION_SUMMARY job=<jobId>" logs/extension-service-*.log
+```
+
+| Field | What it tells you |
+|---|---|
+| `outcome` | `completed` — a print composite was seen and the job closed normally. `no_photo` — the session ended with no composite ever seen (§6). |
+| `captures` | How many `capture_start` events the session produced, which is the shot count **including retakes**. `unknown` means no counter entry existed — the count is held in memory only, so a service restart mid-session degrades it to `unknown` rather than to a wrong `0`. |
+| `print_composite` | Whether a composite was actually seen. |
+| `duration_ms` | Now minus `acknowledged_at`; `unknown` if the job never recorded one. |
+
+**The one combination worth alerting on is `outcome=no_photo` with
+`captures` greater than zero.** That is a session which photographed a
+guest and was closed as having produced nothing — see §6's note on the
+residual window. `outcome=no_photo captures=unknown` is the ordinary case
+of a guest who walked away, and is not interesting.
+
+The line is emitted from the **close** path, never the release path, so it
+is not written a second time when a duplicate `session_end` arrives.
+
 ### Transition table
 
 | From | To | Trigger | What happens to the job |
 |---|---|---|---|
 | IDLE | ANNOUNCING | The 250 ms tick finds a queued job and the booth is idle | The job stays `queued`; its guest name and countdown are broadcast to the display feed |
 | ANNOUNCING | BUSY | The countdown (`NEXT_GUEST_COUNTDOWN_MS`) elapses | The job is marked `dispatched`, `dispatched_at` is stamped, and the dispatch command is sent to the Agent |
-| BUSY | IDLE | The Agent reports `session_end` | The in-progress job is marked `completed`, `session_ended_at`/`completed_at` are stamped, and the tick immediately looks for the next guest |
+| BUSY | BUSY (unchanged) | The Agent reports a print composite (`processing_start` / `printing`) | **The completion anchor since Phase 7.** The job named by `booth_state.current_job_id` is marked `completed` and `completed_at` is stamped; a pending-print slot is opened for it (§8) and the summary line is written. The booth is **not** released and the queue does **not** advance |
+| BUSY | IDLE | The Agent reports `session_end` | **Release only since Phase 7 — this completes nothing.** The booth is released, `current_job_id` is cleared, and the tick immediately looks for the next guest. If no job is bound to the booth (a stray duplicate), nothing happens at all |
+| BUSY | IDLE | The `BOOTH_RELEASE_TIMEOUT_MS` fallback deadline fires for a completed job whose `session_end` never arrived | The booth is released with a warning naming the job, and the tick looks for the next guest. **No retry is charged and no `stall_reason` is written** — the job is already terminal (§6) |
 | BUSY | BUSY (timer re-armed) | The Agent acknowledges the session (`session_start` or a positive ack) | The job is marked `in_progress`, `acknowledged_at` is stamped, and the busy timer restarts for a full `SESSION_TIMEOUT_MS` |
 | BUSY | IDLE | The Agent rejects the session (a negative ack / NAK) | The job is requeued under the bounded retry policy (`stall_reason = 'agent_nak'`, see §6) or failed if retries are exhausted, and the tick immediately looks for the next guest |
 | BUSY | IDLE | The busy timer fires — no acknowledgement or `session_end` arrived within `SESSION_TIMEOUT_MS` | The job is requeued under the bounded retry policy (`stall_reason = 'session_ack_timeout'`, see §6) or failed if retries are exhausted, and the tick immediately looks for the next guest |
@@ -268,6 +357,54 @@ fixed, server-authored `stall_reason` values — never guest-supplied text:
 | `restart_recovery_timeout` | The service restarted and found this job still in flight with a booth state too old to trust as live (§5's startup-BUSY-stale row) |
 | `session_ack_timeout` | The Agent was dispatched a session but never acknowledged it (and never sent `session_end`) within `SESSION_TIMEOUT_MS` |
 | `agent_nak` | The Agent explicitly rejected the dispatched session |
+
+**An empty `stall_reason` on a terminal job is now meaningful, not a bug.**
+Two Phase 7 paths deliberately write no `stall_reason` at all, because
+neither is a stall and `stall_reason` is a closed, server-authored
+vocabulary that must not gain a value for them: the `no_photo` close below,
+and the `BOOTH_RELEASE_TIMEOUT_MS` release fallback (§3, §5). If you find a
+terminal job with no reason recorded, read its status and its
+`SESSION_SUMMARY` line (§5) rather than treating the empty field as missing
+data.
+
+### `no_photo` — the sixth job status (Phase 7)
+
+`queue_job.status` now has six values: `queued`, `dispatched`,
+`in_progress`, `completed`, `failed`, and **`no_photo`**.
+
+**What it means operationally:** the session ran but ended with **no print
+composite ever seen** — the guest was called, the booth went busy, and
+nothing was produced. The commonest cause is a guest who walked away
+without accepting a shot.
+
+**What it deliberately does NOT do:**
+
+- **No retry is charged.** The guest is not called back to the camera.
+  Nothing about this outcome is the guest's fault or a system fault, so it
+  never routes through the bounded retry policy above.
+- **No `stall_reason` is written** (see the note above).
+- **The guest is not re-dispatched.** `no_photo` is terminal; a stray
+  `session_start` naming a `no_photo` job is refused rather than
+  resurrecting it.
+
+**What the guest sees:** `see_staff`, with a failed photo-delivery state.
+
+**How it is decided:** not at `session_end` — that event cannot be
+attributed to a job (empty payload, fires on every sharing-screen exit,
+§5). Instead a sweep on the 250 ms tick closes a job that is
+`in_progress`, is **not** the job currently bound to the booth, has **no**
+pending-print row of any status, and whose `acknowledged_at` is older than
+`NO_PHOTO_CLOSE_DELAY_MS` (§3, default 15 minutes).
+
+**The residual, stated plainly:** those four predicates narrow the window
+in which a live session could be wrongly closed; they do not eliminate it.
+A session still genuinely running 15 minutes after acknowledgement, with no
+composite produced and the booth already rebound to someone else, would be
+closed as `no_photo` while the guest was still present. **This is what the
+summary line makes visible**: such a case appears as `outcome=no_photo`
+with `captures` greater than zero (§5). If you ever see that combination in
+production, it is worth reporting — it is the one shape this design
+knowingly did not rule out.
 
 ### Retries and failure
 
@@ -536,6 +673,41 @@ This is the third published contract this service owns, alongside §1's
 webhook signing contract and §7's Agent auth contract — the last leg of the
 guest's journey: when a photo finishes processing, this service tells the
 slideshow so the guest sees their own picture appear on screen.
+
+### What Phase 7 changed here: the trigger, not the mechanism
+
+**The delivery mechanism below is unchanged** — the same payload contract,
+the same `notification_record` sweeper, the same retry budget, the same
+status and failure vocabularies. Only the question "**which job is this
+photo for?**" is answered differently, and the change matters because the
+old answer was wrong whenever a queue existed.
+
+Previously a print upload was attributed to whichever job happened to own
+the booth at the moment the upload arrived. But a print upload's ordering
+relative to `session_end` is not fixed — measured 26 seconds *before* it on
+one session and about one second *after* it on another — so in the second
+ordering the booth had already been released and rebound, and a real
+guest's photo would have been sent to the **next** guest's email and phone.
+
+Uploads are now resolved against a durable **pending-print registry**. A
+slot is opened for the job at the completion anchor (§5), before the upload
+exists, so the record of who is owed the photo survives the booth moving on.
+Three outcomes, and all three are deliberate:
+
+| Registry state | What happens | What you see in the log |
+|---|---|---|
+| `awaiting` — a slot is open | The ordinary path. The photo is delivered to that job's guest and the slot moves to `resolved`. | Nothing unusual |
+| `expired` — the slot's deadline passed before the upload arrived | **The photo is still delivered.** Getting it late beats not getting it. The job's own status is deliberately left untouched. | A `warn` naming the job and how late it was. **A recurring one means `PENDING_PRINT_EXPIRY_MS` (§3) is set too tight** |
+| no slot was ever opened | **The photo is dropped and reaches nobody.** No session was awaiting a print for that job — this is the case where a stranger pressing start on the booth's own screen would otherwise have their photo sent to the last real guest, because the Agent stamps a stale job id on every event and never clears it. | A `warn`: `Print upload for <job> dropped: no session was awaiting a print for it` |
+
+Expired slots are **marked, never deleted**, which is what keeps the second
+and third rows distinguishable after the fact.
+
+One warning also moved. `No print upload seen` used to be evaluated at
+`session_end`, where it fired on every successful session and told an
+operator nothing (WINDOWS ledger item 9). It is now written once per slot
+at registry expiry — the only anchor at which it can be correct — and the
+literal token is unchanged, so existing greps keep working.
 
 ### The published payload contract
 
@@ -1319,6 +1491,14 @@ sqlite3 ./data/extension-service.sqlite \
 **Take a backup first**, per §6's own instruction. If this is skipped, the
 first time an Agent connects and the booth goes live, this test guest will
 be dispatched for a real photo session with nobody present to run it.
+
+**This action is also a prerequisite of Phase 7's live booth gate**, which
+exercises a retake end to end with a second guest genuinely queued. That
+gate connects an Agent against a live booth, which is exactly the condition
+under which this queued job gets dispatched — so it must be marked `failed`
+**before** any Agent connects, not afterwards. The gate's other prerequisite
+is the Phase 3 Agent-auth cutover (§7), deployed server and Agent together,
+both-or-neither.
 
 ### Known gaps, honestly, as of this writing
 
