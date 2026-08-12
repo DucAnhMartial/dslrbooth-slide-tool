@@ -6,6 +6,17 @@ import path from 'node:path';
 import { WebSocket } from 'ws';
 import { AgentServer } from '../src/agent/agentServer';
 import { LocalStore } from '../src/state/localStore';
+import { logger } from '../src/logging/logger';
+// The Agent's own allow-list, imported across the repository boundary. This is
+// the only import in this suite that leaves `mirror-request/`, and it is the
+// point of the consistency case at the bottom of the file: two hand-maintained
+// lists in two repositories drift, and the drift direction that matters is a
+// forbidden field quietly becoming applicable (T-08-24). `liveConfig.ts` has no
+// runtime imports of its own, precisely so this stays possible.
+import {
+  SAFE_AGENT_CONFIG_FIELDS as AGENT_SAFE_FIELDS,
+  READ_ONLY_AGENT_CONFIG_FIELDS as AGENT_READ_ONLY_FIELDS,
+} from '../../dslrbooth-agent/src/liveConfig';
 import {
   SAFE_AGENT_CONFIG_FIELDS,
   READ_ONLY_AGENT_CONFIG_FIELDS,
@@ -237,5 +248,67 @@ describe('Agent configuration over the existing WS link (UI-02, D-16, D-17)', ()
     });
 
     expect(Object.keys(projected).sort()).toEqual(['dslrBoothApiPort', 'logLevel']);
+  });
+
+  it('warns once per dropped key, naming it, so a polluted row is visible rather than silently trimmed', () => {
+    const warned: string[] = [];
+    // labelLogger() children resolve their level methods through this logger,
+    // so one spy here catches the contract module's warnings too.
+    vi.spyOn(logger, 'warn').mockImplementation(((message: string) => {
+      warned.push(String(message));
+      return logger;
+    }) as never);
+
+    pickSafeAgentConfig({
+      logLevel: 'info',
+      extensionServiceWsUrl: 'ws://evil.example/agent',
+      triggerServerPort: 3001,
+    });
+
+    expect(warned).toHaveLength(2);
+    expect(warned.join(' ')).toContain('extensionServiceWsUrl');
+    expect(warned.join(' ')).toContain('triggerServerPort');
+  });
+
+  it('never lets a forbidden field reach the wire, even from a polluted stored row', async () => {
+    const store = makeStore();
+    // A row written by some future bug, or by a hand-edited database.
+    store.saveAgentConfig({
+      logLevel: 'info',
+      dslrBoothApiPort: 1500,
+      extensionServiceWsToken: 'leaked-token',
+      triggerServerPort: 9999,
+      logDir: 'Z:/unwritable',
+    });
+    agentServer?.registerConfigRequestHandler(() => readAgentConfigForAgent(store));
+
+    const ws = await connect();
+    const seen = collect(ws);
+    ws.send(JSON.stringify({ type: 'config_request' }));
+    await settle();
+
+    const data = seen[0].data as Record<string, unknown>;
+    expect(Object.keys(data).sort()).toEqual(['dslrBoothApiPort', 'logLevel']);
+    for (const forbidden of READ_ONLY_AGENT_CONFIG_FIELDS) {
+      expect(data).not.toHaveProperty(forbidden);
+    }
+    expect(JSON.stringify(seen[0])).not.toContain('leaked-token');
+  });
+
+  it('keeps the allow-list at exactly four names and excludes every read-only one', () => {
+    expect(SAFE_AGENT_CONFIG_FIELDS).toHaveLength(4);
+    expect(READ_ONLY_AGENT_CONFIG_FIELDS).toHaveLength(4);
+    expect((SAFE_AGENT_CONFIG_FIELDS as readonly string[]).includes('extensionServiceWsUrl')).toBe(false);
+    expect((SAFE_AGENT_CONFIG_FIELDS as readonly string[]).includes('extensionServiceWsToken')).toBe(false);
+    expect((SAFE_AGENT_CONFIG_FIELDS as readonly string[]).includes('triggerServerPort')).toBe(false);
+    expect((SAFE_AGENT_CONFIG_FIELDS as readonly string[]).includes('logDir')).toBe(false);
+  });
+
+  it('the service allow-list and the Agent allow-list name exactly the same four fields', () => {
+    // If these two ever disagree, one side sends a field the other refuses —
+    // or worse, applies one the other thought it had forbidden. That failure is
+    // silent in production and red here.
+    expect([...AGENT_SAFE_FIELDS].sort()).toEqual([...SAFE_AGENT_CONFIG_FIELDS].sort());
+    expect([...AGENT_READ_ONLY_FIELDS].sort()).toEqual([...READ_ONLY_AGENT_CONFIG_FIELDS].sort());
   });
 });
