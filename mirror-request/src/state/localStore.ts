@@ -256,6 +256,49 @@ export class LocalStore {
         event_id   TEXT,
         updated_at TEXT NOT NULL DEFAULT 'now'
       );
+      -- D-10: the per-event photo history. Keyed by jobId because
+      -- onFileUpload()'s own comment establishes that exactly one print
+      -- composite exists per session — the natural key is already unique, so
+      -- a surrogate id would only create a second way to say the same thing
+      -- and a way for a replayed upload to land twice.
+      --
+      -- photo_url is a URL, not bytes: D-10 stores a reference and never
+      -- downloads the image, so this table stays small and the photo's real
+      -- home stays wherever the delivery webhook put it.
+      --
+      -- NO AUTOMATIC DELETE PATH MAY BE ADDED HERE. D-11 is explicit: photo
+      -- history is kept per event and removed ONLY by a hand-confirmed CMS
+      -- action (deleteEventPhotos, wired to a typed confirmation in plan
+      -- 08-05). No auto-expiry, no row cap, no scheduled cleanup, no
+      -- delete-on-event-switch. This is the same discipline pending_print's
+      -- header above states for expired rows, and for a related reason: these
+      -- rows are a guest-facing record, and the operator — not a timer — owns
+      -- when a wedding's photos stop existing.
+      CREATE TABLE IF NOT EXISTS event_photo (
+        jobId       TEXT PRIMARY KEY,
+        event_id    TEXT NOT NULL,
+        guest_name  TEXT NOT NULL,
+        photo_url   TEXT NOT NULL,
+        captured_at INTEGER NOT NULL
+      );
+      -- D-18: the Agent's remotely-editable configuration, plus ONE step of
+      -- history. Single row, booth_state's CHECK (id = 1) idiom again.
+      --
+      -- Two JSON blobs rather than a column per field, deliberately: the safe
+      -- field set is the Agent's contract (D-16), not this service's, and
+      -- pinning it into columns here would mean a schema migration every time
+      -- the Agent gains a tunable. The server validates the allow-list on the
+      -- way in (plan 08-04); this table just holds what was agreed.
+      --
+      -- previous_json is one step, not a log. It is cleared by a restore, so
+      -- "restore previous" can never walk backwards through a history that
+      -- D-18 says does not exist.
+      CREATE TABLE IF NOT EXISTS agent_config (
+        id            INTEGER PRIMARY KEY CHECK (id = 1),
+        current_json  TEXT NOT NULL,
+        previous_json TEXT,
+        updated_at    TEXT NOT NULL DEFAULT 'now'
+      );
     `);
   }
 
@@ -995,6 +1038,160 @@ export class LocalStore {
       return { ...DEFAULT_EVENT_CONFIG };
     }
     return config;
+  }
+
+  // ---------------------------------------------------------------------
+  // Phase 8 — photo history (D-10, D-11)
+  // ---------------------------------------------------------------------
+
+  /**
+   * Records one capture. Returns false when a row for this jobId already
+   * exists.
+   *
+   * INSERT OR IGNORE, not OR REPLACE: a duplicate here means a replayed
+   * file_upload event, and the FIRST write is the real capture. Replacing
+   * would let a replay rewrite `captured_at`, which is the timestamp the hero
+   * moment is computed from (plan 08-02) — a replayed upload could otherwise
+   * re-trigger a guest's hero moment minutes after they left the booth.
+   */
+  recordEventPhoto(photo: {
+    jobId: string;
+    eventId: string;
+    guestName: string;
+    photoUrl: string;
+    capturedAt: number;
+  }): boolean {
+    const result = this.db.prepare(
+      `INSERT OR IGNORE INTO event_photo (jobId, event_id, guest_name, photo_url, captured_at)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(photo.jobId, photo.eventId, photo.guestName, photo.photoUrl, photo.capturedAt);
+    return result.changes === 1;
+  }
+
+  /**
+   * The newest capture for one event, as a NARROW projection — no jobId, no
+   * event_id, no raw row. `buildSnapshot()` calls this for the hero moment
+   * (plan 08-02), and the same reasoning that keeps `getNextQueuedJob()` out
+   * of the broadcast path applies: a getter that returned the whole row would
+   * make it trivially easy for a future snapshot field to read an internal
+   * column straight off it.
+   */
+  getMostRecentEventPhoto(
+    eventId: string,
+  ): { photoUrl: string; guestName: string; capturedAt: number } | undefined {
+    const row = this.db.prepare(
+      `SELECT photo_url, guest_name, captured_at FROM event_photo
+       WHERE event_id = ? ORDER BY captured_at DESC LIMIT 1`
+    ).get(eventId) as { photo_url: string; guest_name: string; captured_at: number } | undefined;
+    if (!row) return undefined;
+    return { photoUrl: row.photo_url, guestName: row.guest_name, capturedAt: row.captured_at };
+  }
+
+  /** Newest first, for the CMS photo-history page (paginated at 50/page). */
+  listEventPhotos(
+    eventId: string,
+    opts: { limit: number; offset: number },
+  ): Array<{ jobId: string; photoUrl: string; guestName: string; capturedAt: number }> {
+    const rows = this.db.prepare(
+      `SELECT jobId, photo_url, guest_name, captured_at FROM event_photo
+       WHERE event_id = ? ORDER BY captured_at DESC LIMIT ? OFFSET ?`
+    ).all(eventId, opts.limit, opts.offset) as Array<{
+      jobId: string; photo_url: string; guest_name: string; captured_at: number;
+    }>;
+    return rows.map((row) => ({
+      jobId: row.jobId,
+      photoUrl: row.photo_url,
+      guestName: row.guest_name,
+      capturedAt: row.captured_at,
+    }));
+  }
+
+  countEventPhotos(eventId: string): number {
+    const row = this.db
+      .prepare('SELECT COUNT(*) AS n FROM event_photo WHERE event_id = ?')
+      .get(eventId) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * The ONLY delete path for photo history, and it exists solely so an
+   * operator can invoke it deliberately (D-11). Scoped to one event id —
+   * never a global purge — and returns the count so the CMS can report what
+   * it actually removed rather than claiming success blindly.
+   *
+   * Nothing in this service calls this on a timer, a row cap, an event
+   * switch, or a schedule. If a future change adds such a caller, it is
+   * reversing a locked decision, not tidying up.
+   */
+  deleteEventPhotos(eventId: string): number {
+    return this.db.prepare('DELETE FROM event_photo WHERE event_id = ?').run(eventId).changes;
+  }
+
+  // ---------------------------------------------------------------------
+  // Phase 8 — Agent configuration with one step of history (D-18)
+  // ---------------------------------------------------------------------
+
+  getAgentConfig(): Record<string, unknown> | undefined {
+    const row = this.db.prepare('SELECT current_json FROM agent_config WHERE id = 1').get() as
+      | { current_json: string }
+      | undefined;
+    if (!row) return undefined;
+    try {
+      return JSON.parse(row.current_json) as Record<string, unknown>;
+    } catch {
+      // A corrupt blob must not take the CMS down; the operator re-saves.
+      logger.warn('agent_config.current_json is not valid JSON — treating as unset');
+      return undefined;
+    }
+  }
+
+  /**
+   * Writes `next` as current and rotates the OLD current into previous.
+   *
+   * The read and the write share one statement (the UPSERT's excluded/target
+   * reference), so there is no window in which previous has been overwritten
+   * but current has not — a crash between two separate statements would
+   * otherwise leave both slots holding the same value and silently destroy
+   * the one step back D-18 promises.
+   */
+  saveAgentConfig(next: Record<string, unknown>): void {
+    this.db.prepare(
+      `INSERT INTO agent_config (id, current_json, previous_json, updated_at)
+       VALUES (1, ?, NULL, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         previous_json = agent_config.current_json,
+         current_json  = excluded.current_json,
+         updated_at    = excluded.updated_at`
+    ).run(JSON.stringify(next), new Date().toISOString());
+  }
+
+  /**
+   * D-18's one-step "restore previous". Returns the restored configuration,
+   * or undefined when there is nothing to step back to.
+   *
+   * previous_json is CLEARED by the restore, which is what makes this one
+   * step rather than a two-entry ring. Without that, a second restore would
+   * hand back the configuration the operator had just rejected — the same
+   * button doing the opposite thing on the second press, with no indication
+   * it had.
+   */
+  restorePreviousAgentConfig(): Record<string, unknown> | undefined {
+    const row = this.db.prepare('SELECT previous_json FROM agent_config WHERE id = 1').get() as
+      | { previous_json: string | null }
+      | undefined;
+    if (!row?.previous_json) return undefined;
+
+    const restored = row.previous_json;
+    this.db.prepare(
+      `UPDATE agent_config SET current_json = ?, previous_json = NULL, updated_at = ? WHERE id = 1`
+    ).run(restored, new Date().toISOString());
+
+    try {
+      return JSON.parse(restored) as Record<string, unknown>;
+    } catch {
+      logger.warn('agent_config.previous_json is not valid JSON — restored value is unusable');
+      return undefined;
+    }
   }
 
   close(): void {
