@@ -13,6 +13,9 @@ import {
   PHOTOS_PER_PAGE,
   PHOTO_HISTORY_EMPTY_HEADING,
   PHOTO_HISTORY_EMPTY_BODY,
+  CLEAR_HISTORY_ACTION,
+  CLEAR_HISTORY_CONFIRM,
+  THUMB_MISSING_LABEL,
 } from '../src/cms/cmsPhotoPages';
 import { QueueService } from '../src/queue/queueService';
 import { mask } from '../src/logging/logger';
@@ -423,5 +426,225 @@ describe('CMS photo history — every log line is a masked template string (AUTH
       // nothing phone- or email-shaped in it to begin with.
       expect(mask(line)).toBe(line);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D-11 — deletion is a deliberate act, and the ONLY one in the system
+// ---------------------------------------------------------------------------
+
+describe('CMS photo history — clearing is a confirmed operator action and nothing else (D-11)', () => {
+  it('renders the confirmation view and deletes NOTHING when the clear action arrives unconfirmed', async () => {
+    const h = build();
+    const eventId = makeEvent(h.store, 'Tiệc cưới A', true);
+    seedPhotos(h.store, eventId, 3);
+
+    const noField = await request(h.app).post('/cms/api/photos/clear').set('Cookie', h.cookie).send({ eventId });
+    const wrongName = await request(h.app)
+      .post('/cms/api/photos/clear')
+      .set('Cookie', h.cookie)
+      .send({ eventId, confirmName: 'Tiệc cưới B' });
+
+    for (const res of [noField, wrongName]) {
+      expect(res.status).toBe(400);
+      // The confirmation VIEW comes back, carrying the UI-SPEC question, so the
+      // operator is asked rather than told "no".
+      expect(res.text).toContain(CLEAR_HISTORY_CONFIRM);
+      expect(CLEAR_HISTORY_CONFIRM).toBe('Xóa toàn bộ lịch sử ảnh của sự kiện này? Không thể hoàn tác.');
+      expect(CLEAR_HISTORY_ACTION).toBe('Xóa lịch sử ảnh');
+    }
+    // The load-bearing assertion: every row is still there.
+    expect(h.store.countEventPhotos(eventId)).toBe(3);
+  });
+
+  it('clears exactly the confirmed event, reports the count, and leaves a second event untouched', async () => {
+    const h = build();
+    const weddingA = makeEvent(h.store, 'Tiệc cưới A', true);
+    const weddingB = makeEvent(h.store, 'Tiệc cưới B');
+    seedPhotos(h.store, weddingA, 4);
+    seedPhotos(h.store, weddingB, 6);
+
+    const res = await request(h.app)
+      .post('/cms/api/photos/clear')
+      .set('Cookie', h.cookie)
+      .send({ eventId: weddingA, confirmName: 'Tiệc cưới A' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ cleared: true, deleted: 4 });
+    expect(h.store.countEventPhotos(weddingA)).toBe(0);
+    // One wedding's operator error must never cost another wedding its photos.
+    expect(h.store.countEventPhotos(weddingB)).toBe(6);
+  });
+
+  it('clears an already-empty history successfully, reporting zero rather than failing', async () => {
+    const h = build();
+    const eventId = makeEvent(h.store, 'Tiệc cưới chưa chụp', true);
+
+    const res = await request(h.app)
+      .post('/cms/api/photos/clear')
+      .set('Cookie', h.cookie)
+      .send({ eventId, confirmName: 'Tiệc cưới chưa chụp' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ cleared: true, deleted: 0 });
+  });
+
+  it('answers an unknown event with a 404 and clears nothing', async () => {
+    const h = build();
+    const eventId = makeEvent(h.store, 'Tiệc cưới A', true);
+    seedPhotos(h.store, eventId, 2);
+
+    const res = await request(h.app)
+      .post('/cms/api/photos/clear')
+      .set('Cookie', h.cookie)
+      .send({ eventId: 'no-such-event', confirmName: 'no-such-event' });
+
+    expect(res.status).toBe(404);
+    // The route's OWN refusal, not Express's default 404 — without this the
+    // case would pass against a service that has no clear route at all.
+    expect(res.body).toEqual({ error: 'Event not found' });
+    expect(h.store.countEventPhotos(eventId)).toBe(2);
+  });
+
+  it('serves a confirmation page whose destructive control carries the shared in-flight contract', async () => {
+    const h = build();
+    const eventId = makeEvent(h.store, 'Tiệc cưới A', true);
+    seedPhotos(h.store, eventId, 7);
+
+    const res = await request(h.app).get(`/cms/photos/clear?event=${eventId}`).set('Cookie', h.cookie);
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain(CLEAR_HISTORY_CONFIRM);
+    // The operator is told what they are about to destroy, in numbers.
+    expect(res.text).toContain('7');
+    // UI-SPEC G1: the destructive submit and the logout form, and nothing else.
+    expect((res.text.match(/data-mutating/g) ?? []).length).toBe(2);
+    expect(res.text).toContain('data-inflight-label');
+    expect(res.text).toContain('cmsBusy');
+    // A typed confirmation, checked by the server — see the route's comment.
+    expect(res.text).toContain('confirmName');
+  });
+
+  it('logs exactly one line per clear, carrying the event id and the count and no guest name', async () => {
+    const info = vi.spyOn(cmsPhotoLogger, 'info');
+    const h = build();
+    const eventId = makeEvent(h.store, 'Tiệc cưới A', true);
+    const guestName = 'Khách VIP 0912345678';
+    captureThroughUpload(h.store, { jobId: 'job-clear-log', guestName });
+
+    await request(h.app)
+      .post('/cms/api/photos/clear')
+      .set('Cookie', h.cookie)
+      .send({ eventId, confirmName: 'Tiệc cưới A' });
+
+    const lines = info.mock.calls.filter((call) => String(call[0]).includes(eventId));
+    expect(lines).toHaveLength(1);
+    const line = String(lines[0][0]);
+    expect(typeof lines[0][0]).toBe('string');
+    expect(line).toContain('1');
+    expect(line).not.toContain(guestName);
+    expect(line).not.toContain('0912345678');
+  });
+
+  it('has no timer, no schedule and no self-pruning identifier anywhere in the photo surface (D-11)', () => {
+    // D-11 stated as a property of the SOURCE, not of one run: photo history is
+    // removed by hand and by nothing else. A future edit that reintroduces a
+    // retention sweep would delete real guests' photographs silently, and would
+    // pass every behavioural case in this file — so the check is here.
+    const forbidden = /setInterval|setTimeout|node-cron|autoDelete|pruneOldest|cleanupOld|retention/;
+    for (const file of ['src/cms/cmsPhotoRoutes.ts', 'src/cms/cmsPhotoPages.ts']) {
+      const source = fs
+        .readFileSync(path.join(process.cwd(), file), 'utf8')
+        .split('\n')
+        .filter((line) => !line.trim().startsWith('*') && !line.trim().startsWith('//') && !line.trim().startsWith('/*'))
+        .join('\n');
+      expect(source).not.toMatch(forbidden);
+    }
+  });
+
+  it('never trims history as a side effect of reading it — 500 rows survive being listed', async () => {
+    const h = build();
+    const eventId = makeEvent(h.store, 'Tiệc cưới rất dài', true);
+    seedPhotos(h.store, eventId, 500);
+
+    for (const pageNumber of [1, 2, 5, 10]) {
+      const res = await request(h.app)
+        .get(`/cms/photos?event=${eventId}&page=${pageNumber}`)
+        .set('Cookie', h.cookie);
+      expect(res.status).toBe(200);
+      expect(countRows(res.text)).toBe(50);
+    }
+
+    // The incumbent capped at 50 entries and dropped the rest. This table has no
+    // cap at all, and reading it is not a write.
+    expect(h.store.countEventPhotos(eventId)).toBe(500);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G4 — a missing image is a designed state, never a broken glyph
+// ---------------------------------------------------------------------------
+
+describe('CMS photo history — a thumbnail that cannot load falls back to the G4 placeholder', () => {
+  it('ships the placeholder tile, its warning icon and its visible Vietnamese label with every row', async () => {
+    const h = build();
+    const eventId = makeEvent(h.store, 'Tiệc cưới A', true);
+    seedPhotos(h.store, eventId, 1);
+
+    const res = await request(h.app).get(`/cms/photos?event=${eventId}`).set('Cookie', h.cookie);
+
+    expect(res.text).toContain('thumb-missing');
+    expect(res.text).toContain(THUMB_MISSING_LABEL);
+    expect(THUMB_MISSING_LABEL).toBe('Ảnh không tải được');
+
+    // The icon ships WITH its label, and is hidden from assistive technology
+    // because the label beside it is the accessible name (UI-SPEC: no icon-only
+    // control, ever).
+    const tile = res.text.slice(res.text.indexOf('thumb-missing'), res.text.indexOf(THUMB_MISSING_LABEL) + 40);
+    expect(tile).toContain('<svg');
+    expect(tile).toContain('aria-hidden="true"');
+    expect(tile).toContain(THUMB_MISSING_LABEL);
+
+    // And the swap really is wired: an error on the image, or an image that
+    // finished loading with no pixels, reveals the tile. Without this the
+    // markup above would be decoration and the browser's broken-image glyph
+    // would still be what the operator sees.
+    expect(res.text).toContain('cmsPhotoMissing');
+    expect(res.text).toContain("addEventListener('error'");
+    expect(res.text).toContain('naturalWidth');
+  });
+
+  it('renders the placeholder server-side for a URL no browser should be asked to load, and KEEPS the row', async () => {
+    const h = build();
+    const eventId = makeEvent(h.store, 'Tiệc cưới A', true);
+    h.store.recordEventPhoto({
+      jobId: 'job-hostile',
+      eventId,
+      guestName: 'Trần Bảo Long',
+      photoUrl: 'javascript:alert(1)',
+      capturedAt: Date.now(),
+    });
+
+    const res = await request(h.app).get(`/cms/photos?event=${eventId}`).set('Cookie', h.cookie);
+
+    // Never emitted as an <img src>, at all.
+    expect(res.text).not.toContain('javascript:alert(1)');
+    expect(res.text).not.toContain('src="javascript:');
+    // The row survives: a photo whose URL cannot be rendered is a display
+    // state, and this surface has exactly one way to delete a row (D-11).
+    expect(countRows(res.text)).toBe(1);
+    expect(res.text).toContain('Trần Bảo Long');
+    expect(res.text).toContain(THUMB_MISSING_LABEL);
+    expect(h.store.countEventPhotos(eventId)).toBe(1);
+  });
+
+  it('still renders an ordinary https thumbnail as an image — the refusal above is not a blanket one', async () => {
+    const h = build();
+    const eventId = makeEvent(h.store, 'Tiệc cưới A', true);
+    seedPhotos(h.store, eventId, 1);
+
+    const res = await request(h.app).get(`/cms/photos?event=${eventId}`).set('Cookie', h.cookie);
+
+    expect(res.text).toContain(`src="${PHOTO_URL}-0"`);
   });
 });
