@@ -1,6 +1,7 @@
 import { getStore, type LocalStore } from '../state/localStore';
 import { getConfig } from '../config';
 import { labelLogger } from '../logging/logger';
+import { resolveDisplayableImageUrl } from './resolveImageUrl';
 
 const config = getConfig();
 
@@ -135,6 +136,21 @@ export class NotificationService {
 
     const { registration } = recordWithRegistration;
     try {
+      // dslrBooth reports the photo's SHARE PAGE, not the photo. The receiver
+      // renders this value with `<img src>`, so an unresolved share URL is a
+      // broken image for every guest — measured live 2026-08-12. Resolved here,
+      // at delivery time rather than at enqueue time, so a transient outage at
+      // the share host is retried by this same sweeper instead of being baked
+      // into the stored record; the record keeps the booth's own URL, which is
+      // the honest account of what the booth said. Never throws and never
+      // returns empty — see resolveImageUrl.ts.
+      const resolved = await resolveDisplayableImageUrl(row.photoUrl, {
+        timeoutMs: this.fetchTimeoutMs,
+      });
+      if (resolved.warning) {
+        notifyLogger.warn(`Image resolve for ${row.jobId}: ${resolved.warning}; sending the booth's own URL`);
+      }
+
       // Exactly the five keys the slideshow needs: the receiver performs no
       // lookup of any kind, so everything it will display must be in this
       // body (D-01). No contact details are sent (D-02, D-03) — see
@@ -142,7 +158,7 @@ export class NotificationService {
       const payload = {
         jobId: row.jobId,
         guestName: registration.name,
-        photoUrl: row.photoUrl,
+        photoUrl: resolved.url,
         timestamp: new Date().toISOString(),
         mode: registration.mode,
       };
