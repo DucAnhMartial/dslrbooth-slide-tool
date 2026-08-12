@@ -450,4 +450,178 @@ describe('LocalStore persistence — webhook replay + poll cursor', () => {
       expect(store.getJob('job-C')?.status).toBe('failed');
     });
   });
+
+  // D-07/D-08's pending-print registry (07-03-PLAN.md Task 1), proven against
+  // a real temp-file database rather than a mock, because the two things this
+  // block exists to pin — that the table's migration is idempotent, and that a
+  // slot survives a restart — are properties of SQLite, not of the accessor
+  // signatures. Every guarantee named here lives in a WHERE clause or an ON
+  // CONFLICT, matching the register of the 'persisted-queue SQL contract'
+  // block above.
+  //
+  // The three-status vocabulary is load-bearing and expired rows are never
+  // deleted: "a row exists but expired" (D-11's late-but-legitimate print) and
+  // "no row was ever opened" (D-04's out-of-session photo) are different
+  // answers to a caller, and deleting expired rows would collapse them into
+  // one.
+  describe('D-07/D-08 pending_print registry — the durable slot for a photo that has not arrived yet', () => {
+    const COMPOSITE = 'C:\\dslrBooth\\Test_event\\Prints\\20260812_143526_970.jpg';
+
+    it('openPendingPrint on a fresh database returns true and the row reads back as awaiting', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+
+      const opened = store.openPendingPrint({
+        jobId: 'job-P1', compositePath: COMPOSITE, openedAt: now, expiresAt: now + 600_000,
+      });
+
+      expect(opened).toBe(true);
+      const row = store.getPendingPrint('job-P1');
+      expect(row).toBeDefined();
+      expect(row?.jobId).toBe('job-P1');
+      expect(row?.compositePath).toBe(COMPOSITE);
+      expect(row?.status).toBe('awaiting');
+      expect(row?.openedAt).toBe(now);
+      expect(row?.expiresAt).toBe(now + 600_000);
+    });
+
+    it('getPendingPrint returns undefined for a jobId no slot was ever opened for — D-04 must stay distinguishable', () => {
+      store = new LocalStore(dbPath);
+      expect(store.getPendingPrint('job-never-opened')).toBeUndefined();
+    });
+
+    // RESEARCH.md Pitfall 2: processing_start and printing both carry the same
+    // composite, so the completion path fires twice for one session. The ON
+    // CONFLICT DO NOTHING is what absorbs that — it must never become an
+    // upsert, or the second fire would silently extend the first slot's
+    // deadline.
+    it('a second openPendingPrint for the same jobId returns false and overwrites neither composite_path nor expires_at', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.openPendingPrint({ jobId: 'job-P2', compositePath: COMPOSITE, openedAt: now, expiresAt: now + 600_000 });
+
+      const second = store.openPendingPrint({
+        jobId: 'job-P2', compositePath: 'C:\\other\\path.jpg', openedAt: now + 5_000, expiresAt: now + 999_999,
+      });
+
+      expect(second).toBe(false);
+      const row = store.getPendingPrint('job-P2');
+      expect(row?.compositePath).toBe(COMPOSITE);
+      expect(row?.expiresAt).toBe(now + 600_000);
+      expect(row?.openedAt).toBe(now);
+      expect(row?.status).toBe('awaiting');
+    });
+
+    it('resolvePendingPrint moves an awaiting row to resolved once, and a second call matches zero rows', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.openPendingPrint({ jobId: 'job-P3', compositePath: COMPOSITE, openedAt: now, expiresAt: now + 600_000 });
+
+      expect(store.resolvePendingPrint('job-P3', now + 1_000)).toBe(true);
+      expect(store.getPendingPrint('job-P3')?.status).toBe('resolved');
+
+      // T-07-12: the absence of 'resolved' from the predicate IS the guarantee
+      // that a replayed file_upload cannot enqueue a second notification.
+      expect(store.resolvePendingPrint('job-P3', now + 2_000)).toBe(false);
+      expect(store.getPendingPrint('job-P3')?.status).toBe('resolved');
+    });
+
+    it('resolvePendingPrint moves an EXPIRED row to resolved — D-11s late arrival is still resolvable', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.openPendingPrint({ jobId: 'job-P4', compositePath: COMPOSITE, openedAt: now - 10, expiresAt: now - 1 });
+      store.expirePendingPrints(now);
+      expect(store.getPendingPrint('job-P4')?.status).toBe('expired');
+
+      expect(store.resolvePendingPrint('job-P4', now + 1_000)).toBe(true);
+      expect(store.getPendingPrint('job-P4')?.status).toBe('resolved');
+    });
+
+    it('resolvePendingPrint on a jobId with no row returns false', () => {
+      store = new LocalStore(dbPath);
+      expect(store.resolvePendingPrint('job-no-row', Date.now())).toBe(false);
+    });
+
+    it('expirePendingPrints returns only awaiting rows already past expires_at, and returns each of them exactly once', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.openPendingPrint({ jobId: 'job-due', compositePath: COMPOSITE, openedAt: now - 10, expiresAt: now });
+      store.openPendingPrint({ jobId: 'job-not-due', compositePath: COMPOSITE, openedAt: now, expiresAt: now + 600_000 });
+      store.openPendingPrint({ jobId: 'job-already-resolved', compositePath: COMPOSITE, openedAt: now - 10, expiresAt: now });
+      store.resolvePendingPrint('job-already-resolved', now);
+
+      const first = store.expirePendingPrints(now);
+
+      expect(first.map((r) => r.jobId)).toEqual(['job-due']);
+      expect(first[0].compositePath).toBe(COMPOSITE);
+      expect(store.getPendingPrint('job-due')?.status).toBe('expired');
+      expect(store.getPendingPrint('job-not-due')?.status).toBe('awaiting');
+      expect(store.getPendingPrint('job-already-resolved')?.status).toBe('resolved');
+
+      // The select and the mark share one transaction, so a row can never be
+      // handed to the caller without also being marked — otherwise the
+      // no-print warning would fire on every sweep, forever.
+      const second = store.expirePendingPrints(now);
+      expect(second).toEqual([]);
+    });
+
+    it('an expired row is marked, never deleted — the evidence that separates D-11 from D-04 survives', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.openPendingPrint({ jobId: 'job-P5', compositePath: COMPOSITE, openedAt: now - 10, expiresAt: now - 1 });
+      store.expirePendingPrints(now);
+
+      const row = store.getPendingPrint('job-P5');
+      expect(row).toBeDefined();
+      expect(row?.status).toBe('expired');
+      expect(row?.compositePath).toBe(COMPOSITE);
+    });
+
+    it('a slot written before close() is still present, unexpired, with the same status and expires_at after reopening the same file (D-08)', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.openPendingPrint({ jobId: 'job-P6', compositePath: COMPOSITE, openedAt: now, expiresAt: now + 600_000 });
+      store.close();
+
+      store = new LocalStore(dbPath);
+      const row = store.getPendingPrint('job-P6');
+      expect(row?.status).toBe('awaiting');
+      expect(row?.expiresAt).toBe(now + 600_000);
+      expect(row?.compositePath).toBe(COMPOSITE);
+      // Still unexpired: a mid-session restart no longer loses the fact that a
+      // photo is owed.
+      expect(store.expirePendingPrints(now + 1_000)).toEqual([]);
+    });
+
+    it('the pending_print migration is idempotent: constructing LocalStore twice against the same file neither throws nor loses rows', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.openPendingPrint({ jobId: 'job-P7', compositePath: COMPOSITE, openedAt: now, expiresAt: now + 600_000 });
+      store.close();
+
+      expect(() => {
+        store = new LocalStore(dbPath);
+      }).not.toThrow();
+
+      const row = store!.getPendingPrint('job-P7');
+      expect(row?.status).toBe('awaiting');
+      expect(row?.openedAt).toBe(now);
+      expect(row?.expiresAt).toBe(now + 600_000);
+      expect(row?.compositePath).toBe(COMPOSITE);
+      store!.close();
+      store = undefined;
+
+      // Throwaway raw introspection handle — the same pattern this file
+      // already uses for notification_record and booth_state.
+      const introspect = new Database(dbPath);
+      const columns = introspect.prepare('PRAGMA table_info(pending_print)').all() as Array<{ name: string }>;
+      introspect.close();
+
+      const columnNames = columns.map((c) => c.name);
+      expect(columnNames).toHaveLength(7);
+      for (const expected of ['jobId', 'composite_path', 'status', 'opened_at', 'expires_at', 'resolved_at', 'updated_at']) {
+        expect(columnNames).toContain(expected);
+      }
+    });
+  });
 });
