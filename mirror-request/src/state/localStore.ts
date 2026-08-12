@@ -103,6 +103,36 @@ function toEventConfig(row: EventRow): EventConfig {
   };
 }
 
+/**
+ * Every `event` column the CMS may write, and the complete SET-clause
+ * vocabulary of updateEvent(). `id`, `created_at` and `updated_at` are absent
+ * deliberately: an event's identity and its bookkeeping are the store's, not
+ * the operator's.
+ */
+const EVENT_UPDATABLE_COLUMNS = [
+  'name',
+  'logo_url',
+  'background_url',
+  'color_dominant',
+  'color_secondary',
+  'color_accent',
+  'color_text',
+  'color_text_muted',
+  'font_choice',
+  'idle_heading',
+  'idle_sub',
+  'qr_image_url',
+  'qr_cta_text',
+  'photo_count',
+  'photo_duration_ms',
+  'layout_style',
+] as const;
+
+export type EventUpdatableColumn = (typeof EVENT_UPDATABLE_COLUMNS)[number];
+
+/** A partial patch over the writable event columns. */
+export type EventUpdatePatch = Partial<Record<EventUpdatableColumn, string | number | null>>;
+
 /** The operator-facing summary the CMS event list renders. */
 export interface EventSummary {
   id: string;
@@ -978,6 +1008,39 @@ export class LocalStore {
       `INSERT INTO event (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`
     ).run(id, input.name, now, now);
     return { id, name: input.name, createdAt: now, updatedAt: now };
+  }
+
+  /**
+   * Applies one validated patch to an event row (plan 08-03, CMS-01).
+   *
+   * The column allow-list is a module constant, and a key that is not in it is
+   * DROPPED rather than interpolated — the SET clause is assembled from
+   * EVENT_UPDATABLE_COLUMNS, never from the caller's key names, so no caller
+   * string ever reaches the SQL text. Values always travel as bound
+   * parameters.
+   *
+   * `null` is a meaningful value here and is written as NULL: it means "this
+   * event no longer customizes this field", and the read-time coalescing in
+   * toEventConfig() then resolves it back to the shipped default. That is what
+   * lets an operator clear a logo, or revert an idle heading, without the CMS
+   * having to know what the current default happens to be.
+   *
+   * Validation of the VALUES — length caps, colour syntax, enumerated fonts and
+   * layouts, numeric ranges, the /uploads/ URL shape — is the route's job, not
+   * this method's. The store enforces the schema; the CMS enforces the policy.
+   */
+  updateEvent(id: string, patch: EventUpdatePatch): boolean {
+    const columns = EVENT_UPDATABLE_COLUMNS.filter((column) =>
+      Object.prototype.hasOwnProperty.call(patch, column),
+    );
+    if (columns.length === 0) return false;
+
+    const assignments = columns.map((column) => `${column} = ?`).join(', ');
+    const values = columns.map((column) => patch[column] ?? null);
+    const result = this.db
+      .prepare(`UPDATE event SET ${assignments}, updated_at = ? WHERE id = ?`)
+      .run(...values, Date.now(), id);
+    return result.changes === 1;
   }
 
   /** The full projection for one event, or undefined when it does not exist. */
