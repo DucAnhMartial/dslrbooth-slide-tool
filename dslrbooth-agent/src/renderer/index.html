@@ -16,6 +16,16 @@
 <main>
   <h1>dslrBooth Agent</h1>
 
+  <section id="import-panel" aria-label="Import existing configuration" hidden>
+    <h2>Import existing configuration</h2>
+    <p>
+      A configuration file was found at <code id="legacy-path"></code>.
+      Import it instead of retyping the values.
+    </p>
+    <button type="button" id="import-button">Import</button>
+    <p id="import-result" role="status"></p>
+  </section>
+
   <section id="status-panel" aria-label="Relay status">
     <h2>Status</h2>
     <dl>
@@ -43,6 +53,7 @@
         <label for="extensionServiceWsToken">Extension Service token</label>
         <input type="password" id="extensionServiceWsToken" name="extensionServiceWsToken" placeholder="Leave blank to keep the stored value" />
         <p class="field-error" id="error-extensionServiceWsToken"></p>
+        <p class="field-hint" id="hint-extensionServiceWsToken"></p>
       </div>
 
       <div class="field">
@@ -55,6 +66,7 @@
         <label for="dslrBoothPassword">dslrBooth password</label>
         <input type="password" id="dslrBoothPassword" name="dslrBoothPassword" placeholder="Leave blank to keep the stored value" />
         <p class="field-error" id="error-dslrBoothPassword"></p>
+        <p class="field-hint" id="hint-dslrBoothPassword"></p>
       </div>
 
       <div class="field">
@@ -88,9 +100,13 @@
           <input type="checkbox" id="autoOpenDisplay" name="autoOpenDisplay" />
           Auto-open the booth display window
         </label>
+        <p class="field-error" id="error-autoOpenDisplay"></p>
       </div>
 
-      <p id="restart-required-notice" hidden>Some changes need a restart of the relay to take effect.</p>
+      <p id="restart-required-notice" hidden>
+        Some changes need a restart of the relay to take effect.
+        <button type="button" id="restart-button">Restart relay</button>
+      </p>
       <p id="save-error" role="alert"></p>
       <button type="submit" id="save-button">Save</button>
     </form>

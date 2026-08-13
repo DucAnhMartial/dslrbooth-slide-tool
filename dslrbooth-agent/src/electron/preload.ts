@@ -19,6 +19,7 @@ import { STATUS_PUSH_CHANNEL } from './ipcHandlers'
 const api = {
   getConfig: () => ipcRenderer.invoke('config:get'),
   setConfig: (patch: Record<string, unknown>) => ipcRenderer.invoke('config:set', patch),
+  importLegacyEnv: () => ipcRenderer.invoke('config:import-legacy'),
   start: () => ipcRenderer.invoke('agent:start'),
   stop: () => ipcRenderer.invoke('agent:stop'),
   getStatus: () => ipcRenderer.invoke('agent:status'),

@@ -1,9 +1,9 @@
 'use strict'
 
-// The first-run form and a status light — not the finished operator surface;
-// per-field polish, `.env` import and a log pane are plan 10-03. Every value
-// written into the document below goes through `textContent`/`.value`, never
-// `innerHTML`, so nothing here can turn a stored string into markup.
+// The operator surface (plan 10-02's tracer, plan 10-03's polish, import,
+// status/log pane and tray). Every value written into the document below
+// goes through `textContent`/`.value`, never `innerHTML`, so nothing here can
+// turn a stored string — or a log line, or a legacy `.env` path — into markup.
 
 const FIELDS = [
   'extensionServiceWsUrl',
@@ -45,6 +45,17 @@ function showFieldErrors(errors) {
   if (generic.length > 0) byId('save-error').textContent = generic.join(' ')
 }
 
+function renderImportOffer(snapshot) {
+  const panel = byId('import-panel')
+  if (!panel) return
+  if (snapshot.isFirstRun && snapshot.legacyEnvPath) {
+    byId('legacy-path').textContent = snapshot.legacyEnvPath
+    panel.hidden = false
+  } else {
+    panel.hidden = true
+  }
+}
+
 async function loadConfigIntoForm() {
   const snapshot = await window.agentDesktop.getConfig()
   for (const field of FIELDS) {
@@ -60,10 +71,15 @@ async function loadConfigIntoForm() {
     const el = byId(field)
     if (!el) continue
     el.value = ''
-    el.placeholder = snapshot[SECRET_PRESENCE_KEY[field]]
+    const present = Boolean(snapshot[SECRET_PRESENCE_KEY[field]])
+    el.placeholder = present
       ? 'Stored — leave blank to keep it'
       : 'Required'
+    const hint = byId('hint-' + field)
+    if (hint) hint.textContent = present ? 'Currently set.' : 'Not set.'
   }
+  renderImportOffer(snapshot)
+  return snapshot
 }
 
 function formatTimestamp(value) {
@@ -115,6 +131,16 @@ function init() {
   })
   refreshStatus().catch(() => {})
 
+  byId('import-button')?.addEventListener('click', async () => {
+    const result = await window.agentDesktop.importLegacyEnv()
+    if (!result || result.ok !== true) {
+      showFieldErrors(result && result.errors)
+      return
+    }
+    byId('import-result').textContent = 'Imported: ' + result.importedFields.join(', ')
+    await loadConfigIntoForm()
+  })
+
   byId('settings-form').addEventListener('submit', async (event) => {
     event.preventDefault()
     clearFieldErrors()
@@ -129,6 +155,15 @@ function init() {
       byId('restart-required-notice').hidden = false
     }
     await loadConfigIntoForm()
+  })
+
+  byId('restart-button')?.addEventListener('click', async () => {
+    await window.agentDesktop.stop()
+    const result = await window.agentDesktop.start()
+    if (result && result.ok === true) {
+      byId('restart-required-notice').hidden = true
+    }
+    await refreshStatus()
   })
 
   byId('start-button').addEventListener('click', async () => {

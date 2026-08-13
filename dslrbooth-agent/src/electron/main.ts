@@ -5,6 +5,7 @@ import { createAgent, type AgentHandle, type AgentStatus } from '../agent'
 import { createLogger } from '../logging/logger'
 import { createConfigStore } from './configStore'
 import { createSafeStorageEncryptor } from './safeStorageEncryptor'
+import { findLegacyEnvFile } from './envImport'
 import { createIpcHandlers, IPC_CHANNELS, STATUS_PUSH_CHANNEL, type IpcChannel } from './ipcHandlers'
 
 /**
@@ -68,10 +69,21 @@ if (!gotLock) {
       autoOpenDisplay: true,
     })
 
+    // D10-02's migration note: a booth PC that already has a working `.env`
+    // should not require retyping a token by hand. Beside the executable, the
+    // working directory, then the user-data directory — the first one found
+    // wins (envImport.ts, no import of electron itself).
+    const legacyEnvPath = findLegacyEnvFile([
+      path.dirname(app.getPath('exe')),
+      process.cwd(),
+      userDataDir,
+    ])
+
     const store = createConfigStore({
       filePath: configPath,
       encryptor: createSafeStorageEncryptor(),
       logger: bootLogger,
+      legacyEnvPath,
     })
 
     let agent: AgentHandle | null = null

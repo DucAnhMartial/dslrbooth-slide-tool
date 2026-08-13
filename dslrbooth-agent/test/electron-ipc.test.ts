@@ -162,7 +162,7 @@ describe('config store — first run and the redacted snapshot (T-10-08)', () =>
     expect(snapshot.autoOpenDisplay).toBe(true)
   })
 
-  it('the snapshot key set is exactly the six non-secret fields plus the two presence flags, and contains no secret', () => {
+  it('the snapshot key set is exactly the six non-secret fields plus the two presence flags plus the two import-migration fields (10-03), and contains no secret', () => {
     const configPath = makeConfigPath()
     const store = createConfigStore({ filePath: configPath, encryptor: makeFakeEncryptor(), logger: makeLogger() })
     store.applyPatch({
@@ -177,6 +177,8 @@ describe('config store — first run and the redacted snapshot (T-10-08)', () =>
       'dslrBoothApiPort',
       'hasDslrBoothPassword',
       'hasExtensionServiceWsToken',
+      'isFirstRun',
+      'legacyEnvPath',
       'logDir',
       'logLevel',
       'triggerServerPort',

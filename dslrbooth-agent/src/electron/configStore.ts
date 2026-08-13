@@ -1,6 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { parseConfigValues, type ConfigValues, type ConfigFieldErrors, type ParseConfigResult } from '../config'
+import { parseLegacyEnvFile } from './envImport'
 import type { Logger } from '../logging/logger'
 
 /**
@@ -79,12 +80,20 @@ export interface ConfigSnapshot {
   autoOpenDisplay: boolean
   hasExtensionServiceWsToken: boolean
   hasDslrBoothPassword: boolean
+  /** Whether this is the very first run — no config file exists yet. */
+  isFirstRun: boolean
+  /** The discovered legacy `.env` path (D10-02 migration note), or null when none was found. */
+  legacyEnvPath: string | null
 }
 
 export type PatchFieldErrors = Record<string, string>
 
 export type ApplyPatchResult =
   | { ok: true }
+  | { ok: false; errors: PatchFieldErrors }
+
+export type ImportLegacyResult =
+  | { ok: true; snapshot: ConfigSnapshot; importedFields: string[] }
   | { ok: false; errors: PatchFieldErrors }
 
 interface StoredSecret {
@@ -113,12 +122,26 @@ export interface ConfigStore {
   /** Builds a full `Config` through `parseConfigValues` — the shared validator, not a second copy. */
   buildConfig(): ParseConfigResult
   applyPatch(patch: Record<string, unknown>): ApplyPatchResult
+  /**
+   * Parses the discovered legacy `.env` file (if any), maps it, validates it
+   * through the same `applyPatch` path a settings-form save uses, and
+   * persists it on success. Runs entirely in the main process; the result
+   * never carries a secret value under any key (T-10-16).
+   */
+  importLegacy(): ImportLegacyResult
 }
 
 export interface ConfigStoreOptions {
   filePath: string
   encryptor: SecretEncryptor
   logger: Logger
+  /**
+   * The discovered legacy `.env` path (D10-02 migration note), or null/absent
+   * when none was found. Computed by the caller via
+   * `envImport.findLegacyEnvFile` — this store does not search the
+   * filesystem for it, it only carries the answer.
+   */
+  legacyEnvPath?: string | null
 }
 
 function isConfigField(key: string): key is ConfigField {
@@ -163,7 +186,7 @@ function loadSecret(
 }
 
 export function createConfigStore(options: ConfigStoreOptions): ConfigStore {
-  const { filePath, encryptor, logger } = options
+  const { filePath, encryptor, logger, legacyEnvPath = null } = options
 
   function readFile(): { doc: ConfigFileV1; firstRun: boolean } {
     if (!fs.existsSync(filePath)) {
@@ -223,76 +246,105 @@ export function createConfigStore(options: ConfigStoreOptions): ConfigStore {
     }
   }
 
-  return {
-    isFirstRun(): boolean {
-      return readFile().firstRun
-    },
+  function isFirstRun(): boolean {
+    return readFile().firstRun
+  }
 
-    getSnapshot(): ConfigSnapshot {
-      const { doc, presence } = currentValues()
-      return {
-        extensionServiceWsUrl: doc.extensionServiceWsUrl,
-        dslrBoothApiPort: doc.dslrBoothApiPort,
-        triggerServerPort: doc.triggerServerPort,
-        logLevel: doc.logLevel,
-        logDir: doc.logDir,
-        autoOpenDisplay: doc.autoOpenDisplay,
-        hasExtensionServiceWsToken: presence.extensionServiceWsToken,
-        hasDslrBoothPassword: presence.dslrBoothPassword,
-      }
-    },
+  function getSnapshot(): ConfigSnapshot {
+    const { doc, presence } = currentValues()
+    return {
+      extensionServiceWsUrl: doc.extensionServiceWsUrl,
+      dslrBoothApiPort: doc.dslrBoothApiPort,
+      triggerServerPort: doc.triggerServerPort,
+      logLevel: doc.logLevel,
+      logDir: doc.logDir,
+      autoOpenDisplay: doc.autoOpenDisplay,
+      hasExtensionServiceWsToken: presence.extensionServiceWsToken,
+      hasDslrBoothPassword: presence.dslrBoothPassword,
+      isFirstRun: isFirstRun(),
+      legacyEnvPath,
+    }
+  }
 
-    buildConfig(): ParseConfigResult {
-      const { values } = currentValues()
-      return parseConfigValues(values)
-    },
+  function buildConfig(): ParseConfigResult {
+    const { values } = currentValues()
+    return parseConfigValues(values)
+  }
 
-    applyPatch(patch: Record<string, unknown>): ApplyPatchResult {
-      // Refused by name, before anything else, so a mistyped or forbidden key
-      // is reported as itself rather than silently dropped or coerced.
-      const unknown: PatchFieldErrors = {}
-      for (const key of Object.keys(patch)) {
-        if (!isConfigField(key)) unknown[key] = `Unknown configuration field: ${key}`
-      }
-      if (Object.keys(unknown).length > 0) return { ok: false, errors: unknown }
+  function applyPatch(patch: Record<string, unknown>): ApplyPatchResult {
+    // Refused by name, before anything else, so a mistyped or forbidden key
+    // is reported as itself rather than silently dropped or coerced.
+    const unknown: PatchFieldErrors = {}
+    for (const key of Object.keys(patch)) {
+      if (!isConfigField(key)) unknown[key] = `Unknown configuration field: ${key}`
+    }
+    if (Object.keys(unknown).length > 0) return { ok: false, errors: unknown }
 
-      const { values } = currentValues()
-      const merged: ConfigValues = { ...values }
-      for (const [key, value] of Object.entries(patch)) {
-        const field = key as ConfigField
-        if (isSecretField(field)) {
-          // Absent or empty leaves the stored secret in place — the same
-          // refusal-of-emptiness rule LiveConfig.assign() already applies to
-          // the password arriving over the wire.
-          if (typeof value === 'string' && value.length > 0) {
-            ;(merged as Record<string, unknown>)[field] = value
-          }
-          continue
+    const { values } = currentValues()
+    const merged: ConfigValues = { ...values }
+    for (const [key, value] of Object.entries(patch)) {
+      const field = key as ConfigField
+      if (isSecretField(field)) {
+        // Absent or empty leaves the stored secret in place — the same
+        // refusal-of-emptiness rule LiveConfig.assign() already applies to
+        // the password arriving over the wire.
+        if (typeof value === 'string' && value.length > 0) {
+          ;(merged as Record<string, unknown>)[field] = value
         }
-        ;(merged as Record<string, unknown>)[field] = value
+        continue
       }
+      ;(merged as Record<string, unknown>)[field] = value
+    }
 
-      const result = parseConfigValues(merged)
-      if (!result.ok) return { ok: false, errors: result.errors as ConfigFieldErrors }
+    const result = parseConfigValues(merged)
+    if (!result.ok) return { ok: false, errors: result.errors as ConfigFieldErrors }
 
-      const nextDoc: ConfigFileV1 = {
-        version: 1,
-        extensionServiceWsUrl: result.config.extensionServiceWsUrl,
-        dslrBoothApiPort: result.config.dslrBoothApiPort,
-        triggerServerPort: result.config.triggerServerPort,
-        logLevel: result.config.logLevel,
-        logDir: result.config.logDir,
-        autoOpenDisplay: result.config.autoOpenDisplay,
-        secrets: {
-          // `warnOnUnavailable` fires on the first of the two calls only — one
-          // save wraps two secrets, and availability cannot change between
-          // them, so one warning is the whole truth (T-10-14).
-          extensionServiceWsToken: wrapSecret(result.config.extensionServiceWsToken, true),
-          dslrBoothPassword: wrapSecret(result.config.dslrBoothPassword, false),
-        },
-      }
-      writeFile(nextDoc)
-      return { ok: true }
-    },
+    const nextDoc: ConfigFileV1 = {
+      version: 1,
+      extensionServiceWsUrl: result.config.extensionServiceWsUrl,
+      dslrBoothApiPort: result.config.dslrBoothApiPort,
+      triggerServerPort: result.config.triggerServerPort,
+      logLevel: result.config.logLevel,
+      logDir: result.config.logDir,
+      autoOpenDisplay: result.config.autoOpenDisplay,
+      secrets: {
+        // `warnOnUnavailable` fires on the first of the two calls only — one
+        // save wraps two secrets, and availability cannot change between
+        // them, so one warning is the whole truth (T-10-14).
+        extensionServiceWsToken: wrapSecret(result.config.extensionServiceWsToken, true),
+        dslrBoothPassword: wrapSecret(result.config.dslrBoothPassword, false),
+      },
+    }
+    writeFile(nextDoc)
+    return { ok: true }
+  }
+
+  /**
+   * Parses the discovered legacy file, maps it onto a patch and runs it
+   * through the exact same `applyPatch` a settings-form save uses — not a
+   * second validation/persistence path. Returns the redacted snapshot plus
+   * the list of imported field NAMES only; the parsed values themselves
+   * (which may include a plaintext secret) never leave this function (T-10-16).
+   */
+  function importLegacy(): ImportLegacyResult {
+    if (!legacyEnvPath) {
+      return { ok: false, errors: { _: 'No legacy configuration file was found.' } }
+    }
+    const parsed = parseLegacyEnvFile(legacyEnvPath)
+    const patch: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(parsed.values)) {
+      if (value !== undefined) patch[key] = value
+    }
+    const result = applyPatch(patch)
+    if (!result.ok) return result
+    return { ok: true, snapshot: getSnapshot(), importedFields: parsed.fieldsPresent }
+  }
+
+  return {
+    isFirstRun,
+    getSnapshot,
+    buildConfig,
+    applyPatch,
+    importLegacy,
   }
 }

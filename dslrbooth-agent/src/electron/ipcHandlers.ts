@@ -2,7 +2,7 @@ import type { AgentHandle, AgentStatus } from '../agent'
 import type { Config, ConfigFieldErrors } from '../config'
 import type { Logger } from '../logging/logger'
 import { isSafeAgentConfigField } from '../liveConfig'
-import type { ConfigStore, ConfigSnapshot, PatchFieldErrors } from './configStore'
+import type { ConfigStore, ConfigSnapshot, PatchFieldErrors, ImportLegacyResult } from './configStore'
 
 /**
  * The IPC surface (plan 10-02).
@@ -24,6 +24,7 @@ import type { ConfigStore, ConfigSnapshot, PatchFieldErrors } from './configStor
 export const IPC_CHANNELS = [
   'config:get',
   'config:set',
+  'config:import-legacy',
   'agent:start',
   'agent:stop',
   'agent:status',
@@ -39,6 +40,7 @@ export type IpcChannel = (typeof IPC_CHANNELS)[number]
 export const IPC_CHANNEL_FUNCTION_NAMES: Record<IpcChannel, string> = {
   'config:get': 'getConfig',
   'config:set': 'setConfig',
+  'config:import-legacy': 'importLegacyEnv',
   'agent:start': 'start',
   'agent:stop': 'stop',
   'agent:status': 'getStatus',
@@ -79,6 +81,7 @@ export interface IpcHandlersOptions {
 export interface IpcHandlerMap {
   'config:get': () => Promise<ConfigSnapshot>
   'config:set': (patch: Record<string, unknown>) => Promise<ConfigSetResult>
+  'config:import-legacy': () => Promise<ImportLegacyResult>
   'agent:start': () => Promise<StartResult>
   'agent:stop': () => Promise<{ ok: true }>
   'agent:status': () => Promise<AgentStatus>
@@ -89,6 +92,8 @@ export function createIpcHandlers(options: IpcHandlersOptions): IpcHandlerMap {
 
   return {
     'config:get': async () => store.getSnapshot(),
+
+    'config:import-legacy': async (): Promise<ImportLegacyResult> => store.importLegacy(),
 
     'config:set': async (patch: Record<string, unknown>): Promise<ConfigSetResult> => {
       const result = store.applyPatch(patch)

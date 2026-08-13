@@ -60,6 +60,16 @@ dd {
   min-height: 1em;
 }
 
+.field-hint {
+  color: rgba(127, 127, 127, 0.9);
+  font-size: 0.8rem;
+  margin: 0;
+}
+
+#import-panel code {
+  font-size: 0.85rem;
+}
+
 #save-error {
   color: #c0392b;
   min-height: 1em;
