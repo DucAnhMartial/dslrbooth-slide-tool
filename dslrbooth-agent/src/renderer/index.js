@@ -91,6 +91,14 @@ function formatTimestamp(value) {
   }
 }
 
+function formatDuration(ms) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  return [hours, minutes, seconds].map((n) => String(n).padStart(2, '0')).join(':')
+}
+
 function renderStatus(status) {
   if (!status) return
   byId('status-running').textContent = status.running ? 'running' : 'stopped'
@@ -98,11 +106,42 @@ function renderStatus(status) {
   byId('status-trigger-port').textContent = status.triggerPort == null ? '-' : String(status.triggerPort)
   byId('status-dslrbooth').textContent = status.dslrBoothReachable
   byId('status-last-event').textContent = formatTimestamp(status.lastEventAt)
+  byId('status-uptime').textContent =
+    status.running && status.startedAt ? formatDuration(Date.now() - status.startedAt) : '-'
   byId('status-last-error').textContent = status.lastError || '-'
 }
 
 async function refreshStatus() {
   renderStatus(await window.agentDesktop.getStatus())
+}
+
+// The DOM-side log pane cap (T-10-20): an unbounded node list in a window
+// left open for a whole event is a slow leak nobody would attribute to the
+// log pane. Matches the retained-buffer cap `logTail.ts` applies on the main
+// side, applied again here to the DOM itself.
+const LOG_LINE_CAP = 500
+const logLineNodePairs = []
+
+function appendLogLine(line) {
+  const pre = byId('log-lines')
+  if (!pre) return
+  // Text nodes only (T-10-19): a log line that happens to contain markup
+  // (e.g. from a guest name) can never become markup on this page.
+  const lineNode = document.createTextNode(line)
+  const breakNode = document.createTextNode('\n')
+  pre.appendChild(lineNode)
+  pre.appendChild(breakNode)
+  logLineNodePairs.push([lineNode, breakNode])
+  if (logLineNodePairs.length > LOG_LINE_CAP) {
+    const [oldLine, oldBreak] = logLineNodePairs.shift()
+    pre.removeChild(oldLine)
+    pre.removeChild(oldBreak)
+  }
+}
+
+async function loadRecentLogLines() {
+  const lines = await window.agentDesktop.getRecentLogLines()
+  for (const line of lines || []) appendLogLine(line)
 }
 
 function collectPatch() {
@@ -130,6 +169,7 @@ function init() {
     byId('save-error').textContent = String((err && err.message) || err)
   })
   refreshStatus().catch(() => {})
+  loadRecentLogLines().catch(() => {})
 
   byId('import-button')?.addEventListener('click', async () => {
     const result = await window.agentDesktop.importLegacyEnv()
@@ -181,6 +221,7 @@ function init() {
   })
 
   window.agentDesktop.onStatus((status) => renderStatus(status))
+  window.agentDesktop.onLogLine((line) => appendLogLine(line))
 }
 
 document.addEventListener('DOMContentLoaded', init)

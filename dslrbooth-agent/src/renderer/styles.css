@@ -70,6 +70,15 @@ dd {
   font-size: 0.85rem;
 }
 
+#log-lines {
+  max-height: 12rem;
+  overflow-y: auto;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+}
+
 #save-error {
   color: #c0392b;
   min-height: 1em;

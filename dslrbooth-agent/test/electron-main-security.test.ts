@@ -132,7 +132,7 @@ describe('the preload exposes exactly the channel surface and nothing else (T-10
     )
     const exposedNames = [...apiBlock.matchAll(/^\s*(\w+):/gm)].map((m) => m[1])
 
-    const expectedNames = [...Object.values(IPC_CHANNEL_FUNCTION_NAMES), 'onStatus', 'offStatus']
+    const expectedNames = [...Object.values(IPC_CHANNEL_FUNCTION_NAMES), 'onStatus', 'offStatus', 'onLogLine', 'offLogLine']
 
     expect(exposedNames.sort()).toEqual([...expectedNames].sort())
   })

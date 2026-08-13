@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import { STATUS_PUSH_CHANNEL } from './ipcHandlers'
+import { STATUS_PUSH_CHANNEL, LOG_LINE_PUSH_CHANNEL } from './ipcHandlers'
 
 /**
  * The preload — the only door between the renderer and the main process
@@ -23,6 +23,7 @@ const api = {
   start: () => ipcRenderer.invoke('agent:start'),
   stop: () => ipcRenderer.invoke('agent:stop'),
   getStatus: () => ipcRenderer.invoke('agent:status'),
+  getRecentLogLines: () => ipcRenderer.invoke('log:recent'),
 
   // The two subscription helpers, for the one push channel `main.ts` sends
   // status snapshots on. `onStatus` also returns an unsubscribe function
@@ -35,6 +36,19 @@ const api = {
   },
   offStatus: () => {
     ipcRenderer.removeAllListeners(STATUS_PUSH_CHANNEL)
+  },
+
+  // The matching pair for the log-line push channel — each already-masked
+  // line `logTail.ts` emits, pushed one at a time (T-10-19: always as data,
+  // never rendered by this file itself; the renderer decides how to place it
+  // in the DOM, and does so as text only — see index.js).
+  onLogLine: (callback: (line: string) => void) => {
+    const listener = (_event: unknown, line: string) => callback(line)
+    ipcRenderer.on(LOG_LINE_PUSH_CHANNEL, listener as never)
+    return () => ipcRenderer.removeListener(LOG_LINE_PUSH_CHANNEL, listener as never)
+  },
+  offLogLine: () => {
+    ipcRenderer.removeAllListeners(LOG_LINE_PUSH_CHANNEL)
   },
 }
 

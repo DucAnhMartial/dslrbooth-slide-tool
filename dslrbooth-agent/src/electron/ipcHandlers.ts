@@ -28,6 +28,7 @@ export const IPC_CHANNELS = [
   'agent:start',
   'agent:stop',
   'agent:status',
+  'log:recent',
 ] as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[number]
@@ -44,10 +45,14 @@ export const IPC_CHANNEL_FUNCTION_NAMES: Record<IpcChannel, string> = {
   'agent:start': 'start',
   'agent:stop': 'stop',
   'agent:status': 'getStatus',
+  'log:recent': 'getRecentLogLines',
 }
 
 /** The push channel `main.ts` sends `AgentStatus` snapshots on. Not in `IPC_CHANNELS` — it is main→renderer, never invoked. */
 export const STATUS_PUSH_CHANNEL = 'agent:status-push'
+
+/** The push channel `main.ts` sends each masked log line on. Not in `IPC_CHANNELS` — it is main→renderer, never invoked. */
+export const LOG_LINE_PUSH_CHANNEL = 'log:line-push'
 
 const IDLE_STATUS: AgentStatus = {
   running: false,
@@ -76,6 +81,8 @@ export interface IpcHandlersOptions {
   createAgent: (config: Config, logger: Logger) => AgentHandle
   /** Called with every status change, including the idle snapshot on stop. */
   pushStatus: (status: AgentStatus) => void
+  /** The log tail's retained buffer, newest last. Defaults to an empty list when not supplied. */
+  getRecentLogLines?: () => string[]
 }
 
 export interface IpcHandlerMap {
@@ -85,15 +92,18 @@ export interface IpcHandlerMap {
   'agent:start': () => Promise<StartResult>
   'agent:stop': () => Promise<{ ok: true }>
   'agent:status': () => Promise<AgentStatus>
+  'log:recent': () => Promise<string[]>
 }
 
 export function createIpcHandlers(options: IpcHandlersOptions): IpcHandlerMap {
-  const { store, logger, getAgent, setAgent, createAgent, pushStatus } = options
+  const { store, logger, getAgent, setAgent, createAgent, pushStatus, getRecentLogLines } = options
 
   return {
     'config:get': async () => store.getSnapshot(),
 
     'config:import-legacy': async (): Promise<ImportLegacyResult> => store.importLegacy(),
+
+    'log:recent': async () => (getRecentLogLines ? getRecentLogLines() : []),
 
     'config:set': async (patch: Record<string, unknown>): Promise<ConfigSetResult> => {
       const result = store.applyPatch(patch)

@@ -6,7 +6,14 @@ import { createLogger } from '../logging/logger'
 import { createConfigStore } from './configStore'
 import { createSafeStorageEncryptor } from './safeStorageEncryptor'
 import { findLegacyEnvFile } from './envImport'
-import { createIpcHandlers, IPC_CHANNELS, STATUS_PUSH_CHANNEL, type IpcChannel } from './ipcHandlers'
+import { createLogTail } from './logTail'
+import {
+  createIpcHandlers,
+  IPC_CHANNELS,
+  STATUS_PUSH_CHANNEL,
+  LOG_LINE_PUSH_CHANNEL,
+  type IpcChannel,
+} from './ipcHandlers'
 
 /**
  * The Electron main entry (10-RESEARCH Pattern 2; D10-01, D10-02).
@@ -107,6 +114,23 @@ if (!gotLock) {
     })
     mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
 
+    // The log tail (SC-3, Task 2). Reads the exact file `bootLogger`'s
+    // sibling `DailyRotateFile` transport already writes — nothing here
+    // re-plumbs the logger (10-CONTEXT's explicit instruction). The
+    // directory is resolved from the STORE's current snapshot at every poll,
+    // not captured once, for the same "read live, not once" reason
+    // `agent.ts`'s reachability probe reads `live.dslrBoothApiPort`.
+    const logTail = createLogTail({
+      resolveLogDir: () => store.getSnapshot().logDir,
+      emit: (line) => {
+        mainWindow?.webContents.send(LOG_LINE_PUSH_CHANNEL, line)
+      },
+      secrets: () => {
+        const built = store.buildConfig()
+        return built.ok ? [built.config.extensionServiceWsToken, built.config.dslrBoothPassword] : []
+      },
+    })
+
     const handlers = createIpcHandlers({
       store,
       logger: bootLogger,
@@ -118,7 +142,27 @@ if (!gotLock) {
       pushStatus: (status: AgentStatus) => {
         mainWindow?.webContents.send(STATUS_PUSH_CHANNEL, status)
       },
+      getRecentLogLines: () => logTail.getRecentLines(),
     })
+
+    // The tail runs only while the relay runs (T-10-20): start it right
+    // after a successful `agent:start`, stop it on every `agent:stop`. Both
+    // the renderer's Start/Stop buttons (through `ipcMain.handle` below) and
+    // any future in-process caller of `handlers['agent:start']`/`['agent:stop']`
+    // (Task 3's launch auto-start) go through this same pair, so the tail's
+    // lifecycle can never drift from the relay's.
+    const rawAgentStart = handlers['agent:start']
+    handlers['agent:start'] = async () => {
+      const result = await rawAgentStart()
+      if (result.ok) logTail.start()
+      return result
+    }
+    const rawAgentStop = handlers['agent:stop']
+    handlers['agent:stop'] = async () => {
+      const result = await rawAgentStop()
+      logTail.stop()
+      return result
+    }
 
     for (const channel of IPC_CHANNELS as readonly IpcChannel[]) {
       ipcMain.handle(channel, (_event, ...args: unknown[]) => {
