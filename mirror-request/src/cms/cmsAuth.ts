@@ -108,11 +108,42 @@ export interface SessionStore {
  * There is no inactivity timeout, deliberately — an event runs for hours and
  * ejecting the operator to a login screen mid-event is operationally worse
  * than a lingering session on an IP-allow-listed LAN. Logout is manual.
+ *
+ * THE CAP BELOW IS NOT A TIMEOUT AND MUST NOT BECOME ONE (Phase 8 code
+ * review, WR-02). The Map grew by one entry per successful login and shrank
+ * only on an explicit /logout, so a browser restart, a private window, a
+ * second device — anything that loses the cookie without logging out — left a
+ * token behind for the life of the process. That is unbounded growth, and it
+ * is a different problem from session lifetime. Bounding the SIZE fixes it
+ * without touching D-14; adding an expiry would fix it by breaking D-14.
+ * `local-store-persistence`-style memory pressure is the concern here, not
+ * stale credentials.
  */
+export const MAX_SESSIONS = 100;
+
 export function createSessionStore(): SessionStore {
   const sessions = new Map<string, { username: string; createdAt: number }>();
   return {
     create(username: string): string {
+      // Oldest-first eviction. With a single operator account the realistic
+      // ceiling is a handful of live sessions, so reaching 100 already means
+      // something unusual is happening and the oldest token is the one least
+      // likely to be the tab currently in front of the operator.
+      //
+      // Insertion order would give the same answer far more cheaply, but
+      // createdAt is asserted on rather than assumed: a Map that ever gained
+      // a re-insertion would silently change what "oldest" means.
+      if (sessions.size >= MAX_SESSIONS) {
+        let oldestToken: string | undefined;
+        let oldestAt = Infinity;
+        for (const [token, entry] of sessions) {
+          if (entry.createdAt < oldestAt) {
+            oldestAt = entry.createdAt;
+            oldestToken = token;
+          }
+        }
+        if (oldestToken !== undefined) sessions.delete(oldestToken);
+      }
       const token = randomBytes(SESSION_TOKEN_BYTES).toString('hex');
       sessions.set(token, { username, createdAt: Date.now() });
       return token;
