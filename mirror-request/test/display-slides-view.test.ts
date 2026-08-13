@@ -478,24 +478,33 @@ describe('Cross-page invariant — the two screens cannot drift on what they mus
 });
 
 // ---------------------------------------------------------------------------
-// Plan 09-02 Task 2 — the design pass: full-width contained photo, name
-// over a scrim, one-column idle composition, fault-only Agent signal, and
-// the Room Screen typography envelope (clamp() sizing, weights 400/700
-// only). The default page's own half of D1/D5 (09-01's coverage table) is
+// Plan 09-02 Task 2 — the design pass, as REVISED at the human gate. The
+// executor's first cut (full-bleed photo, name over a scrim) was judged by
+// the operator on 2026-08-13 — "ảnh đang bị to quá", then "slide ở phase
+// trước (port 3002 cũ) kiểu như thế ok hơn" — so the shipped design is the
+// default screen's own stage tile: bounded flat card, name BELOW the photo
+// in theme ink at display size. These cases pin the operator's version;
+// the scrim assertions they replace pinned a design that no longer exists.
+// The default page's own half of D1/D5 (09-01's coverage table) is
 // unaffected — this file is not touched by this plan's design pass.
 // ---------------------------------------------------------------------------
 
 describe('Slides screen — the design pass (UI-01, SC-1)', () => {
-  it('declares an image containment rule and a scrim behind the name, keeping the shrink-to-fit rule', () => {
+  it('keeps the containment rule, bounds the card, and drops the scrim treatment', () => {
     expect(SLIDES_HTML).toMatch(/\.frame img\{[^}]*object-fit:contain/);
-    expect(SLIDES_HTML).toContain('.scrim{');
+    // The operator-chosen bounds: the card must not be free to swallow the
+    // viewport again — a height cap and a width cap must both exist.
+    expect(SLIDES_HTML).toMatch(/\.frame\{[^}]*height:min\(/);
+    expect(SLIDES_HTML).toMatch(/\.shot\{[^}]*max-width:min\(/);
+    expect(SLIDES_HTML).not.toContain('.scrim{');
     expect(SLIDES_HTML).toMatch(/\.shotname\{[^}]*overflow-wrap:anywhere/);
   });
 
-  it('appends the name element INSIDE the frame (over the photo), not beside it', () => {
+  it('appends the name element BELOW the frame, exactly as the default screen does', () => {
     const shotTileFn = SLIDES_HTML.slice(SLIDES_HTML.indexOf('function shotTile'));
     const shotTileBody = shotTileFn.slice(0, shotTileFn.indexOf('/* D-10/D-12 slideshow state'));
-    expect(shotTileBody).toMatch(/frame\.appendChild\(scrim\)/);
+    expect(shotTileBody).toMatch(/if\s*\(\s*guestNameEnabled\s*\)\s*\{[\s\S]{0,300}wrap\.appendChild\(name\)/);
+    expect(shotTileBody).not.toMatch(/scrim/);
   });
 
   it('uses only clamp() sizing and only the two permitted weights', () => {

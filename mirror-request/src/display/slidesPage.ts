@@ -83,26 +83,20 @@ export function renderSlidesPage(): string {
     .hero.idle-compose{text-align:center;display:block}
     .hero.idle-compose .idle,.hero.idle-compose .label{margin-left:auto;margin-right:auto}
 
-    /* D-09 hero moment, and D-10 slideshow: the same tile as the default
-       screen, at the default screen's SCALE. The width cap mirrors what the
-       stage column measures once the 23rem sidebar and its gap are taken out
-       of a TV-sized viewport; the height cap leaves the themed background
-       breathing above and below instead of letting the card touch both
-       edges. */
-    .shot{display:flex;flex-direction:column;gap:1.25rem;width:100%;max-width:min(86vw,68rem)}
-    .frame{height:min(66vh,42rem);display:grid;place-items:center;background:var(--surface);
-      border:1px solid var(--line);border-radius:1rem;overflow:hidden;position:relative;
-      box-shadow:0 30px 80px -24px rgba(0,0,0,.55)}
+    /* D-09 hero moment, and D-10 slideshow: the SAME tile the default screen
+       draws, rule for rule — flat surface, .75rem radius, no border, no
+       shadow, and the guest's name BELOW the photo in the theme's own ink at
+       display size. Second operator design pass at the 09-02 gate
+       (2026-08-13): the first full-bleed cut was "too big", the bordered
+       centred card that replaced it was still not it — "slide ở phase trước
+       (port 3002 cũ) kiểu như thế ok hơn". The reference is the Phase 8
+       stage tile itself, so this now IS that tile; the only difference left
+       is the width cap below, standing in for the sidebar that used to
+       bound the column. */
+    .shot{display:flex;flex-direction:column;gap:1.5rem;min-height:0;width:100%;max-width:min(88vw,80rem)}
+    .frame{height:min(70vh,48rem);display:grid;place-items:center;background:var(--surface);border-radius:.75rem;overflow:hidden;position:relative}
     .frame img{max-width:100%;max-height:100%;object-fit:contain}
-    /* UI-01: the guest's name is drawn OVER the photo, against a scrim, so
-       it stays legible over a bright image. The scrim's colours are fixed
-       (never var(--event-*)): legibility over an arbitrary guest photo
-       cannot depend on an event's own theme choices. The name is sized a
-       step below the display size — at card scale the display clamp reads
-       as a caption shouting over the photo (same operator feedback). */
-    .scrim{position:absolute;left:0;right:0;bottom:0;padding:2.5rem 1.75rem 1.5rem;
-      background:linear-gradient(to top,rgba(0,0,0,.78),rgba(0,0,0,0));pointer-events:none}
-    .shotname{font-size:clamp(1.5rem,3.2vw,3.25rem);font-weight:700;line-height:1.05;margin:0;max-width:16ch;overflow-wrap:anywhere;color:#fff}
+    .shotname{font-size:var(--t-display);font-weight:700;line-height:1.05;margin:0;max-width:16ch;overflow-wrap:anywhere}
     .badge{position:absolute;top:1rem;left:1rem;background:var(--accent);color:var(--paper);font-size:var(--t-caption);font-weight:700;letter-spacing:.08em;text-transform:uppercase;padding:.35rem 1rem;border-radius:2rem}
     .dots{display:flex;gap:.5rem;justify-content:center;padding-top:1rem}
     .pip{width:.5rem;height:.5rem;border-radius:50%;background:var(--line)}
@@ -220,16 +214,14 @@ export function renderSlidesPage(): string {
     // both in step with the latest snapshot without threading a parameter
     // through the rotation timer.
     //
-    // UI-01: the name is appended INSIDE the frame, inside a scrim, so it
-    // draws OVER the photo rather than beside it — see the '.scrim' rule.
+    // The name goes BELOW the frame, exactly as the default screen places
+    // it — the over-photo overlay treatment was replaced at the operator's
+    // second design pass ("kiểu như phase trước ok hơn").
     if(guestNameEnabled){
-      var scrim=document.createElement('div');
-      scrim.className='scrim';
       var name=document.createElement('p');
       name.className='shotname';
       name.textContent=(photo&&photo.name)||'';
-      scrim.appendChild(name);
-      frame.appendChild(scrim);
+      wrap.appendChild(name);
     }
     // Zero-one-many: a single slide draws NO rotation indicator at all.
     if(pipCount>1){
