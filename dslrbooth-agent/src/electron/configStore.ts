@@ -188,11 +188,17 @@ export function createConfigStore(options: ConfigStoreOptions): ConfigStore {
    * separate "upgrade" code path, because every save re-derives `wrapped`
    * from `encryptor.isAvailable()` at that moment.
    */
-  function wrapSecret(plaintext: string): StoredSecret {
+  function wrapSecret(plaintext: string, warnOnUnavailable: boolean): StoredSecret {
     if (encryptor.isAvailable()) {
       return { value: encryptor.encrypt(plaintext), wrapped: true }
     }
-    logger.warn('Platform key store unavailable; storing configuration secrets unencrypted on disk.')
+    // `warnOnUnavailable` lets the caller log this exactly once per save
+    // even though a save wraps two secrets — availability cannot change
+    // between the two calls that make up one save, so one warning is the
+    // whole truth, not a second copy of it.
+    if (warnOnUnavailable) {
+      logger.warn('Platform key store unavailable; storing configuration secrets unencrypted on disk.')
+    }
     return { value: plaintext, wrapped: false }
   }
 
@@ -278,8 +284,11 @@ export function createConfigStore(options: ConfigStoreOptions): ConfigStore {
         logDir: result.config.logDir,
         autoOpenDisplay: result.config.autoOpenDisplay,
         secrets: {
-          extensionServiceWsToken: wrapSecret(result.config.extensionServiceWsToken),
-          dslrBoothPassword: wrapSecret(result.config.dslrBoothPassword),
+          // `warnOnUnavailable` fires on the first of the two calls only — one
+          // save wraps two secrets, and availability cannot change between
+          // them, so one warning is the whole truth (T-10-14).
+          extensionServiceWsToken: wrapSecret(result.config.extensionServiceWsToken, true),
+          dslrBoothPassword: wrapSecret(result.config.dslrBoothPassword, false),
         },
       }
       writeFile(nextDoc)

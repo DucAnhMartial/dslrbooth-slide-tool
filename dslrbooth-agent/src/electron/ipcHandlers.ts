@@ -1,15 +1,25 @@
 import type { AgentHandle, AgentStatus } from '../agent'
 import type { Config, ConfigFieldErrors } from '../config'
 import type { Logger } from '../logging/logger'
-import type { ConfigStore, ConfigSnapshot, ApplyPatchResult } from './configStore'
+import { isSafeAgentConfigField } from '../liveConfig'
+import type { ConfigStore, ConfigSnapshot, PatchFieldErrors } from './configStore'
 
 /**
- * The IPC surface (plan 10-02, Task 1; live-editing wired in Task 2).
+ * The IPC surface (plan 10-02).
  *
  * No import of `electron` — same reason as `configStore.ts`: this returns a
  * plain map of channel name to plain async function, and `main.ts` is the
  * only file that ever calls `ipcMain.handle()` with it. Nothing here reaches
  * for a window, a menu or a tray; that is the entry file's business.
+ *
+ * `config:set`'s two halves (D10-02, D10-03, Task 2): the four CMS-safe
+ * fields, imported from `liveConfig.ts` rather than restated, apply to a
+ * running relay through the identical `LiveConfig.apply()` the wire uses —
+ * so a port change reaches the dslrBooth client through the hook that
+ * already exists, and nothing is reimplemented. The other four are exactly
+ * the four the wire may never write (`READ_ONLY_AGENT_CONFIG_FIELDS`):
+ * persisted, and reported as needing a restart, because the running Agent
+ * captured them at its own construction time and has no live path for them.
  */
 export const IPC_CHANNELS = [
   'config:get',
@@ -52,6 +62,10 @@ export type StartResult =
   | { ok: false; errors: ConfigFieldErrors }
   | { ok: false; error: string }
 
+export type ConfigSetResult =
+  | { ok: true; restartRequired: boolean }
+  | { ok: false; errors: PatchFieldErrors }
+
 export interface IpcHandlersOptions {
   store: ConfigStore
   logger: Logger
@@ -64,7 +78,7 @@ export interface IpcHandlersOptions {
 
 export interface IpcHandlerMap {
   'config:get': () => Promise<ConfigSnapshot>
-  'config:set': (patch: Record<string, unknown>) => Promise<ApplyPatchResult>
+  'config:set': (patch: Record<string, unknown>) => Promise<ConfigSetResult>
   'agent:start': () => Promise<StartResult>
   'agent:stop': () => Promise<{ ok: true }>
   'agent:status': () => Promise<AgentStatus>
@@ -76,7 +90,38 @@ export function createIpcHandlers(options: IpcHandlersOptions): IpcHandlerMap {
   return {
     'config:get': async () => store.getSnapshot(),
 
-    'config:set': async (patch: Record<string, unknown>) => store.applyPatch(patch),
+    'config:set': async (patch: Record<string, unknown>): Promise<ConfigSetResult> => {
+      const result = store.applyPatch(patch)
+      if (!result.ok) return result
+
+      const patchedKeys = Object.keys(patch)
+      const safeKeysInPatch = patchedKeys.filter((key) => isSafeAgentConfigField(key))
+      const bootstrapKeysInPatch = patchedKeys.filter((key) => !isSafeAgentConfigField(key))
+
+      const agent = getAgent()
+      let restartRequired = false
+
+      if (agent && agent.isRunning()) {
+        if (safeKeysInPatch.length > 0) {
+          const built = store.buildConfig()
+          if (built.ok) {
+            const liveSubset: Record<string, unknown> = {}
+            for (const key of safeKeysInPatch) {
+              liveSubset[key] = (built.config as unknown as Record<string, unknown>)[key]
+            }
+            // The identical LiveConfig.apply() the wire uses (D10-02) — the
+            // port change reaches DslrBoothClient through the existing
+            // onCredentialsChange hook, the log level reaches every
+            // transport through the existing applier, nothing reimplemented.
+            agent.live.apply(liveSubset)
+            pushStatus(agent.getStatus())
+          }
+        }
+        if (bootstrapKeysInPatch.length > 0) restartRequired = true
+      }
+
+      return { ok: true, restartRequired }
+    },
 
     'agent:start': async (): Promise<StartResult> => {
       const existing = getAgent()
