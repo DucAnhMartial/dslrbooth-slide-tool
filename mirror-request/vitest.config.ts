@@ -32,6 +32,13 @@ export default defineConfig({
         '787573058ca13b1fccd1066f920d3277:9f4c0257894e8a206c18c88bd9dfa13179f31ff28797230aa8b66acca9a5efec3e95bf87ae1b8876b014d43cb8d2457d7f9c85f0b2448fa25126d8e4af43e5ac',
       CMS_IP_WHITELIST: '',
       CMS_SESSION_COOKIE_NAME: 'cms_session',
+      // Pinned for the reason the comment above already gives, and it was the
+      // one allow-list left out. A real deployment configuring
+      // DISPLAY_IP_WHITELIST in `.env` turned config-validation.test.ts red
+      // on that machine alone — the suite must not depend on a developer's
+      // own .env. Suites that need a non-empty list still set it themselves
+      // in `vi.hoisted`, which runs after this block is applied.
+      DISPLAY_IP_WHITELIST: '',
     },
   },
 });

@@ -127,6 +127,13 @@ describe('loadConfig() — production-strict validation and Phase 1 defaults', (
     process.env.DB_PASSWORD = 'real-db-password';
     delete process.env.WEBHOOK_HMAC_SECRET;
     delete process.env.PROXY_IP_WHITELIST;
+    // Deleted for the same reason as the two above, and it was missing: this
+    // case asserts the SHIPPED DEFAULT, so it must not read whatever the
+    // developer's own `.env` happens to hold. Without this line the case
+    // passed only on machines whose .env had no DISPLAY_IP_WHITELIST, and
+    // went red the day a real deployment configured one — a test failing
+    // because production was configured correctly.
+    delete process.env.DISPLAY_IP_WHITELIST;
 
     const config = loadConfig();
     expect(config.WEBHOOK_HMAC_SECRET).toBe('');
