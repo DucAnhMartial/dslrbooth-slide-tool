@@ -5,8 +5,35 @@ import { closeDisplayWindow, openDisplayWindow } from './display/launcher'
 import { LiveConfig } from './liveConfig'
 import { createServiceMessageHandler, requestConfig } from './agentMessages'
 import { createCommandHandler, type CommandMessage } from './commands'
+import { probeTcp } from './health/reachability'
 import type { Config } from './config'
 import type { Logger } from './logging/logger'
+
+/**
+ * The snapshot a window can draw and an IPC channel can carry (plan 10-01,
+ * Task 3, SC-3 groundwork). Assembled field by field from state the factory
+ * owns — never spread from `config` or `live` — so there is no object spread
+ * that could carry the WS token or the dslrBooth password along with it.
+ */
+export interface AgentStatus {
+  running: boolean
+  socketState: 'connected' | 'disconnected'
+  /** The bound trigger port, or null while stopped. */
+  triggerPort: number | null
+  dslrBoothReachable: 'unknown' | 'reachable' | 'unreachable'
+  /** Timestamp of the most recent trigger event forwarded to the service, or null. */
+  lastEventAt: number | null
+  /** Timestamp of the most recent successful start(), or null. */
+  startedAt: number | null
+  lastError: string | null
+}
+
+export interface AgentOptions {
+  /** Defaults to 10 seconds. Injectable so a test can drive the probe directly. */
+  reachabilityIntervalMs?: number
+  /** Defaults to `probeTcp`. Injectable so a test does not have to open real sockets. */
+  reachabilityProbe?: (port: number) => Promise<boolean>
+}
 
 /**
  * The relay's explicit lifecycle (plan 10-01, D10-01, 10-RESEARCH Pattern 1).
@@ -29,9 +56,15 @@ export interface AgentHandle {
   isRunning(): boolean
   /** The most recent `start()` failure, or null once a start has succeeded. */
   getLastError(): string | null
+  /** The snapshot a window can draw. Never contains the WS token or the dslrBooth password. */
+  getStatus(): AgentStatus
+  /** Registers a subscriber called on every status change. Returns an unsubscribe function. */
+  onStatus(cb: (status: AgentStatus) => void): () => void
 }
 
-export function createAgent(config: Config, logger: Logger): AgentHandle {
+export function createAgent(config: Config, logger: Logger, options: AgentOptions = {}): AgentHandle {
+  const reachabilityIntervalMs = options.reachabilityIntervalMs ?? 10_000
+  const reachabilityProbe = options.reachabilityProbe ?? probeTcp
   const dslrBooth = new DslrBoothClient(config.dslrBoothApiPort, config.dslrBoothPassword)
 
   // The four remotely-tunable values (UI-02, D-16), seeded from boot config so
@@ -63,6 +96,52 @@ export function createAgent(config: Config, logger: Logger): AgentHandle {
   let lastError: string | null = null
   let starting: Promise<void> | null = null
 
+  // Status state (Task 3, SC-3 groundwork). `getStatus()` assembles its
+  // snapshot from exactly these fields, field by field — never from a spread
+  // of `config` or `live`, so there is no path by which the WS token or the
+  // dslrBooth password could ride along.
+  let socketState: 'connected' | 'disconnected' = 'disconnected'
+  let dslrBoothReachable: 'unknown' | 'reachable' | 'unreachable' = 'unknown'
+  let lastEventAt: number | null = null
+  let startedAt: number | null = null
+  let reachabilityTimer: ReturnType<typeof setInterval> | null = null
+  const statusSubscribers: Array<(status: AgentStatus) => void> = []
+
+  function getStatus(): AgentStatus {
+    return {
+      running,
+      socketState,
+      triggerPort: running ? config.triggerServerPort : null,
+      dslrBoothReachable,
+      lastEventAt,
+      startedAt,
+      lastError,
+    }
+  }
+
+  // Wrapped the way `WsConnection`'s own `notifyStatus` already is: one bad
+  // subscriber must not stop the others from being called and must not
+  // propagate into any collaborator's callback loop.
+  function notifyStatusSubscribers(): void {
+    const snapshot = getStatus()
+    for (const cb of statusSubscribers) {
+      try { cb(snapshot) } catch {}
+    }
+  }
+
+  async function runReachabilityProbe(): Promise<void> {
+    // Read through the LIVE holder, not the boot config: dslrBoothApiPort is
+    // one of the four CMS-tunable fields, and a captured boot value would
+    // report reachability for a port nobody uses the moment it changed
+    // (08-RESEARCH Pitfall 4, in a new place).
+    const reachable = await reachabilityProbe(live.dslrBoothApiPort)
+    const next = reachable ? 'reachable' : 'unreachable'
+    if (next !== dslrBoothReachable) {
+      dslrBoothReachable = next
+      notifyStatusSubscribers()
+    }
+  }
+
   // `config`, `reload_config` and `announcement` — everything that does not
   // touch the dslrBooth Local API. See src/agentMessages.ts.
   const handleServiceMessage = createServiceMessageHandler({
@@ -89,6 +168,8 @@ export function createAgent(config: Config, logger: Logger): AgentHandle {
   // later restart, so it cannot be re-registered inside start().
   ws.onStatusChange((status) => {
     logger.info(`WebSocket status: ${status}`)
+    socketState = status
+    notifyStatusSubscribers()
     if (status === 'connected') requestConfig((payload) => { ws.send(payload) })
   })
 
@@ -104,6 +185,7 @@ export function createAgent(config: Config, logger: Logger): AgentHandle {
       {
         port: config.triggerServerPort,
         onEvent: (eventType, params) => {
+          lastEventAt = Date.now()
           if (eventType === 'session_end') {
             triggerServer?.updateDisplay({ phase: 'idle', guestName: null, endsAt: null })
           }
@@ -133,6 +215,7 @@ export function createAgent(config: Config, logger: Logger): AgentHandle {
       await server.close()
       triggerServer = null
       running = false
+      notifyStatusSubscribers()
       return
     }
 
@@ -140,13 +223,31 @@ export function createAgent(config: Config, logger: Logger): AgentHandle {
     // opened (T-10-02).
     lastError = null
     running = true
+    startedAt = Date.now()
     ws.connect()
+
+    // The probe runs only while the Agent is running: an immediate first
+    // reading (so a subscriber does not wait a full interval for the first
+    // answer) plus a recurring one on `reachabilityIntervalMs`, both stopped
+    // in `stop()` — a stopped Agent leaves no timer behind.
+    void runReachabilityProbe()
+    reachabilityTimer = setInterval(() => { void runReachabilityProbe() }, reachabilityIntervalMs)
+
+    notifyStatusSubscribers()
   }
 
   return {
     live,
     isRunning: () => running,
     getLastError: () => lastError,
+    getStatus,
+    onStatus(cb: (status: AgentStatus) => void): () => void {
+      statusSubscribers.push(cb)
+      return () => {
+        const index = statusSubscribers.indexOf(cb)
+        if (index !== -1) statusSubscribers.splice(index, 1)
+      }
+    },
     start(): Promise<void> {
       if (running) return Promise.resolve()
       if (starting) return starting
@@ -157,12 +258,23 @@ export function createAgent(config: Config, logger: Logger): AgentHandle {
       if (starting) await starting
       if (!running && !triggerServer) return
       running = false
+      if (reachabilityTimer) {
+        clearInterval(reachabilityTimer)
+        reachabilityTimer = null
+      }
+      dslrBoothReachable = 'unknown'
       ws.disconnect()
+      // `disconnect()` removes the socket's own listeners before closing it,
+      // so the `close` event that would otherwise flip `socketState` through
+      // `onStatusChange` never fires here — this is the one place that must
+      // set it directly.
+      socketState = 'disconnected'
       await closeDisplayWindow(logger)
       if (triggerServer) {
         await triggerServer.close()
         triggerServer = null
       }
+      notifyStatusSubscribers()
     },
   }
 }
