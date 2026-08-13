@@ -240,6 +240,14 @@ export interface EnvConfig {
   STATUS_RATE_LIMIT_WINDOW_MS: number;
   STATUS_RATE_LIMIT_MAX: number;
   STATUS_RATE_LIMIT_MAX_KEYS: number;
+  // Phase 8 code review, WR-01: the same control applied to POST /cms/login,
+  // whose credential is a single scrypt hash at N=2^14 (a measured ceiling,
+  // not a preference — see SCRYPT_PARAMS in cmsAuth.ts). D-13's IP allow-list
+  // is the first line, but an allow-list entry is commonly a whole venue
+  // subnet, and inside one an attacker had unlimited online guesses.
+  CMS_LOGIN_RATE_LIMIT_WINDOW_MS: number;
+  CMS_LOGIN_RATE_LIMIT_MAX: number;
+  CMS_LOGIN_RATE_LIMIT_MAX_KEYS: number;
   NOTIFY_WEBHOOK_URL: string;
   LOCAL_STORE_PATH: string;
   LOG_LEVEL: string;

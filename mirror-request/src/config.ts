@@ -170,6 +170,22 @@ export function loadConfig(): EnvConfig {
     STATUS_RATE_LIMIT_WINDOW_MS: toNum('STATUS_RATE_LIMIT_WINDOW_MS', 60_000),
     STATUS_RATE_LIMIT_MAX: toNum('STATUS_RATE_LIMIT_MAX', 30),
     STATUS_RATE_LIMIT_MAX_KEYS: toNum('STATUS_RATE_LIMIT_MAX_KEYS', 10_000),
+    // Phase 8 code review, WR-01. Same three-key shape as STATUS_RATE_LIMIT_*
+    // above, deliberately — a second pattern for the same kind of knob is how
+    // a codebase ends up with two ways to configure one idea.
+    //
+    // 10 attempts per 15 minutes per source address. An operator who has
+    // fumbled the password ten times in a quarter of an hour is not going to
+    // succeed on the eleventh, and the wait is short enough to sit out; an
+    // attacker inside a whitelisted venue subnet is reduced from unlimited
+    // online guesses to roughly 960 a day from one address.
+    //
+    // No production fail-fast check: these have site-independent defaults
+    // that are correct out of the box, matching the reasoning recorded for
+    // STATUS_RATE_LIMIT_* directly above.
+    CMS_LOGIN_RATE_LIMIT_WINDOW_MS: toNum('CMS_LOGIN_RATE_LIMIT_WINDOW_MS', 900_000),
+    CMS_LOGIN_RATE_LIMIT_MAX: toNum('CMS_LOGIN_RATE_LIMIT_MAX', 10),
+    CMS_LOGIN_RATE_LIMIT_MAX_KEYS: toNum('CMS_LOGIN_RATE_LIMIT_MAX_KEYS', 1_000),
     NOTIFY_WEBHOOK_URL: get('NOTIFY_WEBHOOK_URL') ?? '',
     LOCAL_STORE_PATH: get('LOCAL_STORE_PATH') ?? './data/extension-service.sqlite',
     LOG_LEVEL: get('LOG_LEVEL') ?? 'info',

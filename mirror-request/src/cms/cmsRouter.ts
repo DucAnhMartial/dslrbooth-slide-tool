@@ -1,6 +1,12 @@
-import express, { Router, Request, Response } from 'express';
+import express, { Router, Request, Response, NextFunction } from 'express';
 import { labelLogger } from '../logging/logger';
 import { clientIp } from '../security/ipAllowlist';
+import {
+  createRateLimitState,
+  checkRateLimit,
+  pruneExpired,
+  RATE_LIMITED_STATUS,
+} from '../security/rateLimiter';
 import type { EnvConfig } from '../types';
 import {
   createSessionStore,
@@ -18,7 +24,44 @@ import { createCmsPhotoRoutes, type CmsPhotoStore } from './cmsPhotoRoutes';
 
 const log = labelLogger('cms');
 
-export type CmsConfig = Pick<EnvConfig, 'CMS_USERNAME' | 'CMS_PASSWORD_HASH' | 'CMS_SESSION_COOKIE_NAME'>;
+/**
+ * The three rate-limit keys are OPTIONAL, with the defaults below applied in
+ * the factory. Making them required would have been the tidier type and would
+ * have broken every existing suite that hands this factory a three-key
+ * literal — for want of a value, not for any defect. Production always passes
+ * the full `EnvConfig`, so the defaults are a test-ergonomics affordance and
+ * never the shipped configuration.
+ */
+export type CmsConfig = Pick<
+  EnvConfig,
+  'CMS_USERNAME' | 'CMS_PASSWORD_HASH' | 'CMS_SESSION_COOKIE_NAME'
+> &
+  Partial<
+    Pick<
+      EnvConfig,
+      | 'CMS_LOGIN_RATE_LIMIT_WINDOW_MS'
+      | 'CMS_LOGIN_RATE_LIMIT_MAX'
+      | 'CMS_LOGIN_RATE_LIMIT_MAX_KEYS'
+    >
+  >;
+
+const DEFAULT_LOGIN_RATE_LIMIT = {
+  windowMs: 900_000,
+  max: 10,
+  maxKeys: 1_000,
+} as const;
+
+/**
+ * The message a locked-out operator sees. Distinct from LOGIN_ERROR on
+ * purpose, and that is NOT an oracle: it is reached without the credential
+ * being examined at all, so it cannot vary with whether the guess was right.
+ * The anti-oracle test asserts exactly that — a correct password and a wrong
+ * one produce byte-identical responses while throttled.
+ *
+ * Telling the operator to wait is the whole point. A generic "wrong password"
+ * here would send them hunting for a credential problem they do not have.
+ */
+const LOGIN_THROTTLED = 'Quá nhiều lần thử đăng nhập. Vui lòng đợi ít phút rồi thử lại.';
 
 /**
  * The single login-failure message, in one place. UI-SPEC's copy table pins
@@ -54,10 +97,28 @@ export function createCmsRouter(
   store: CmsEventStore & CmsAgentStore & CmsPhotoStore,
   cfg: CmsConfig,
   agent: CmsAgentLink,
+  opts: { now?: () => number } = {},
 ): ReturnType<typeof Router> {
   const router = Router();
   const sessions = createSessionStore();
   const cookieName = cfg.CMS_SESSION_COOKIE_NAME || 'cms_session';
+
+  // WR-01's limiter, built INSIDE the factory for the same reason the session
+  // store is (and the same reason statusRoute.ts builds its own inside its
+  // factory): two routers in one process — which is exactly what a test suite
+  // makes — must not share throttle state, or one case's lockout leaks into
+  // the next.
+  //
+  // `now` is injected rather than read from Date.now() internally, matching
+  // rateLimiter.ts's own rule, so a test can close a 15-minute window without
+  // waiting 15 minutes or installing fake timers.
+  const loginLimit = {
+    windowMs: cfg.CMS_LOGIN_RATE_LIMIT_WINDOW_MS ?? DEFAULT_LOGIN_RATE_LIMIT.windowMs,
+    max: cfg.CMS_LOGIN_RATE_LIMIT_MAX ?? DEFAULT_LOGIN_RATE_LIMIT.max,
+    maxKeys: cfg.CMS_LOGIN_RATE_LIMIT_MAX_KEYS ?? DEFAULT_LOGIN_RATE_LIMIT.maxKeys,
+  };
+  const loginLimitState = createRateLimitState();
+  const now = opts.now ?? Date.now;
 
   // Body parsing for the login form and the JSON dashboard calls. Both
   // parsers are no-ops when a body has already been parsed upstream
@@ -71,7 +132,44 @@ export function createCmsRouter(
     res.type('html').send(renderCmsLoginPage());
   });
 
-  router.post('/login', (req: Request, res: Response) => {
+  /**
+   * WR-01's throttle, mounted as the FIRST handler on this route rather than
+   * inlined into the body below. That placement is the guarantee, not a
+   * style choice — it is the same rule statusRoute.ts states for its own
+   * limiter, and it buys two things here:
+   *
+   *  1. A throttled request never reaches `verifyPassword`, so the scrypt
+   *     work an attacker is trying to make this service do is never done.
+   *     A check placed after verification would bound the guess RATE while
+   *     still paying for every guess.
+   *  2. The refusal cannot vary with the credential, because the credential
+   *     has not been looked at. That is asserted directly: a correct password
+   *     and a wrong one produce byte-identical responses while throttled.
+   *
+   * Counting every attempt rather than only the failures is deliberate. A
+   * success-exempt counter lets an attacker who has already guessed the
+   * password refresh their own budget, and with a single operator account the
+   * legitimate rate is a few logins a day — nowhere near ten per quarter hour.
+   */
+  router.post('/login', (req: Request, res: Response, next: NextFunction) => {
+    const key = clientIp(req) || 'unknown';
+    const currentTime = now();
+    const { limited } = checkRateLimit(key, currentTime, loginLimitState, loginLimit);
+
+    // Pruned after the decision so the bound holds at the end of every
+    // request, including the last of a burst — rateLimiter.ts's reasoning,
+    // reused rather than re-derived.
+    if (loginLimitState.entries.size > loginLimit.maxKeys) {
+      pruneExpired(loginLimitState, currentTime, loginLimit.windowMs, loginLimit.maxKeys);
+    }
+
+    if (limited) {
+      log.warn(`CMS login throttled for ${key}`);
+      res.status(RATE_LIMITED_STATUS).type('html').send(renderCmsLoginPage({ error: LOGIN_THROTTLED }));
+      return;
+    }
+    next();
+  }, (req: Request, res: Response) => {
     const body = (req.body ?? {}) as { username?: unknown; password?: unknown };
     const username = typeof body.username === 'string' ? body.username : '';
     const password = typeof body.password === 'string' ? body.password : '';
