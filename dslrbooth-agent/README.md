@@ -2,6 +2,21 @@
 
 Stateless relay agent between **dslrBooth Local API** (Windows) and **Extension Service** (WebSocket).
 
+## Running the Agent on a booth PC (current)
+
+As of Phase 10, the way this Agent actually runs on a booth PC is the
+**desktop application** — install it, import the existing `.env` on first
+run, click Start. The command-line ritual below is still exactly right for
+the machine that *builds* this project, but a booth operator should not
+need a terminal at all anymore.
+
+**See [`docs/OPS-RUNBOOK-AGENT.md`](docs/OPS-RUNBOOK-AGENT.md)** for the
+full installation walkthrough: which artifact to use, the unsigned-application
+warning every artifact triggers (there is no code-signing certificate in
+scope), Smart App Control, where configuration and logs live, the tray and
+auto-start behavior, and the rollback to the executable a booth already
+runs today.
+
 ## Architecture
 
 ```
