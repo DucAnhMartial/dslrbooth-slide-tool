@@ -4,6 +4,14 @@ dist/
 logs/
 .env
 
+# Timestamped copies of .env, made before editing it (OPS-RUNBOOK section 3's
+# rotation steps). A backup is a FULL copy — DB_PASSWORD, WEBHOOK_HMAC_SECRET,
+# AGENT_WS_TOKEN and CMS_PASSWORD_HASH all ride along — so ignoring `.env`
+# while leaving `.env.bak-20260813-042225` tracked protects nothing. Same
+# reasoning as data/backups/ below: the copy inherits the original's
+# sensitivity, and one `git add -A` puts it in history permanently.
+.env.bak*
+
 # Local SQLite state — runtime artifact, not source
 data/*.sqlite
 data/*.sqlite-shm
