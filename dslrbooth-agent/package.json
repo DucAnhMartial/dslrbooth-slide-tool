@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc",
     "build:exe": "npm run build && pkg dist/index.js --targets node18-win-x64 --output dslrbooth-agent.exe",
+    "typecheck": "tsc --noEmit",
     "dev": "ts-node -r dotenv/config src/index.ts",
     "start": "node -r dotenv/config dist/index.js",
     "service:install": "node -r dotenv/config service/install-service.js",
