@@ -2088,7 +2088,7 @@ path.
 
 | Route | Gate | Purpose |
 |---|---|---|
-| `GET /display-screen` | `DISPLAY_IP_WHITELIST` | The room screen. One URL for every TV. |
+| `GET /display-screen` | `DISPLAY_IP_WHITELIST` | The room screen. `?view=slides` selects the slides-only variant (§13); any other or missing value renders the default layout. |
 | `WS /display` | `DISPLAY_IP_WHITELIST` | The feed that drives it (§9). |
 | `GET /assets/fonts/*` | none | The three self-hosted screen fonts. Deliberately ungated: a font carries no event or guest data, and a TV that could not fetch one would render everything in a fallback face. |
 | `GET /uploads/:filename` | union of the display and CMS allow-lists | Uploaded branding assets, typed from their bytes. No session — a TV has no session and cannot get one. |
@@ -2098,3 +2098,70 @@ path.
 | `POST /cms/api/assets` | IP + session | Image upload. |
 | `GET /cms/agent`, `POST /cms/api/agent`, `POST /cms/api/agent/restore`, `POST /cms/api/agent/test` | IP + session | Agent configuration, one step back, and a liveness read. |
 | `GET /cms/photos`, `GET /cms/photos/clear`, `POST /cms/api/photos/clear` | IP + session | Photo history and its one deletion path. |
+
+## 13. The slides-only screen, and the two display toggles (Phase 9)
+
+Phase 9 added a second way to view the room screen and two per-event settings
+that change what both views draw. Nothing about how screens are pointed at
+this service changed — see §12's "Screen URL is one fixed path for every
+event": that is still true, generalized to two fixed paths, one per screen
+TYPE.
+
+### The two URLs
+
+| URL | Renders |
+|---|---|
+| `GET /display-screen` | The default layout — stage, slideshow/hero and the up-next queue sidebar. Unchanged by this phase, byte for byte, and pinned by a regression test. |
+| `GET /display-screen?view=slides` | The slides-only layout — the same photo surface at full width, with no queue column and no queue metadata anywhere in the page. |
+
+Both are gated by the same `DISPLAY_IP_WHITELIST` (§3), both are fed by the
+same `WS /display` feed (§9), and both always render whichever event is
+currently active (D-12 — see §12). There is still no per-screen identity: a
+TV is pointed at one of these two URLs by typing it, once, and stays there.
+Nothing is registered anywhere, and there is no CMS listing of "screens" —
+re-pointing a TV means retyping its URL, and changing what every TV shows is
+still a CMS action (activating a different event), exactly as before.
+
+**An unrecognized `?view=` value falls back to the default layout, never an
+error.** `?view=queue`, an empty value, wrong case, a trailing space, and a
+repeated `?view=` parameter (which Express turns into an array) all render
+`GET /display-screen`'s default page. The comparison is strict equality
+against the one literal `'slides'`, so nothing about this can be tricked into
+serving the wrong page or crashing.
+
+The CMS event page's fixed screen-address card (§12) shows both URLs,
+labeled as two types: **"Loại 1 — Thứ tự + slide"** for the default screen and
+**"Loại 2 — Chỉ slide"** for the slides-only screen. This is presentation
+only — copy the label that matches what you want on a given TV.
+
+### The two toggles
+
+Every event carries two additional settings, both defaulting **ON**, editable
+on the same `/cms/events/:id` form every other CMS-01 field lives on:
+
+| Setting | Column | Default | Effect when OFF |
+|---|---|---|---|
+| Hiển thị tên khách trên ảnh | `show_guest_name` | ON | The guest's name is not drawn on any photo tile, on either screen. |
+| Hiệu ứng "ảnh vừa chụp" phóng to | `hero_enabled` | ON | A new capture joins the slideshow rotation directly — no enlarged just-captured takeover — on either screen. The photo itself is never dropped or delayed, only the takeover presentation. |
+
+**Both toggles are event configuration, not view configuration.** They
+change what BOTH `/display-screen` and `/display-screen?view=slides` render
+for the currently active event — there is no way to turn a toggle on for one
+screen type and off for the other, by design (D9-04): a TV showing the
+slides-only view and a TV showing the default view are always looking at the
+same event's same choices.
+
+A save is applied exactly like every other CMS-01 field: the whole patch is
+refused, with the standard save-error copy, if either toggle is not a real
+boolean; nothing is written if a save is refused. A saved value reaches every
+connected screen on the next `WS /display` snapshot, with no reload.
+
+### What did not change
+
+The queue, the booth state machine, the Agent, and `NOTIFY_WEBHOOK_URL` are
+untouched by this phase (same posture as §12's "what moved, and what did
+not"). The booth kiosk popup at the Agent is not retired by any code in this
+service — it is turned off with the Agent's own `autoOpenDisplay` setting
+(`AUTO_OPEN_DISPLAY=false` in the booth `.env`, or live from `/cms/agent`),
+because the room screen this section documents already serves the purpose
+the popup used to.

@@ -63,19 +63,35 @@ export function renderSlidesPage(): string {
 
     /* SC-1: one full-width column. No sidebar, no second grid track — the
        photo surface reclaims the whole viewport (UI-01: this is a design
-       task, not display:none on an aside that never existed here). */
-    main{min-height:100vh;display:grid;grid-template-columns:minmax(0,1fr);padding:4.5vw}
+       task, not display:none on an aside that never existed here). Margin is
+       3vw rather than the default page's 4.5vw: that larger value exists to
+       separate the stage column from the sidebar column, and there is no
+       sidebar here to separate from. */
+    main{min-height:100vh;display:grid;grid-template-columns:minmax(0,1fr);padding:3vw}
     .stage{display:flex;flex-direction:column;justify-content:center;min-width:0;min-height:0}
 
     .label{font-size:var(--t-label);color:var(--muted);margin:0 0 1rem}
     .idle{font-size:var(--t-display);font-weight:700;max-width:13ch;line-height:1.05;margin:0;overflow-wrap:anywhere}
+    /* UI-01: the idle composition is centred as a single unit in the one
+       column this view has — the two-column default page can leave its idle
+       heading flush left because the sidebar visually balances it; nothing
+       here would balance a left-aligned heading against empty space. */
+    .hero.idle-compose{text-align:center}
+    .hero.idle-compose .idle,.hero.idle-compose .label{margin-left:auto;margin-right:auto}
 
     /* D-09 hero moment, and D-10 slideshow: the same tile, exactly as on the
        default screen — the same photo seen at different ages. */
     .shot{display:flex;flex-direction:column;gap:1.5rem;min-height:0;flex:1}
     .frame{flex:1;min-height:0;display:grid;place-items:center;background:var(--surface);border-radius:.75rem;overflow:hidden;position:relative}
     .frame img{max-width:100%;max-height:100%;object-fit:contain}
-    .shotname{font-size:var(--t-display);font-weight:700;line-height:1.05;margin:0;max-width:16ch;overflow-wrap:anywhere}
+    /* UI-01: the guest's name is drawn OVER the photo, against a scrim, so
+       it stays legible over a bright image — never beside it, which is what
+       the two-column default page does. The scrim's colours are fixed
+       (never var(--event-*)): legibility over an arbitrary guest photo
+       cannot depend on an event's own theme choices. */
+    .scrim{position:absolute;left:0;right:0;bottom:0;padding:3rem 2rem 2rem;
+      background:linear-gradient(to top,rgba(0,0,0,.78),rgba(0,0,0,0));pointer-events:none}
+    .shotname{font-size:var(--t-display);font-weight:700;line-height:1.05;margin:0;max-width:16ch;overflow-wrap:anywhere;color:#fff}
     .badge{position:absolute;top:1rem;left:1rem;background:var(--accent);color:var(--paper);font-size:var(--t-caption);font-weight:700;letter-spacing:.08em;text-transform:uppercase;padding:.35rem 1rem;border-radius:2rem}
     .dots{display:flex;gap:.5rem;justify-content:center;padding-top:1rem}
     .pip{width:.5rem;height:.5rem;border-radius:50%;background:var(--line)}
@@ -93,24 +109,36 @@ export function renderSlidesPage(): string {
     #banner{position:fixed;top:0;left:0;right:0;z-index:9;display:none;background:#a33127;color:#fff;
       font-size:var(--t-label);font-weight:700;text-align:center;padding:.9rem 1rem}
     #banner.show{display:block}
+
+    /* T-09-13: the Agent-offline signal, rendered ONLY on the fault — a
+       photo wall carries no chrome the operator did not ask for, but hiding
+       the one operational signal unconditionally would let a new view mask
+       a real fault. Fixed destructive colour, unreachable from
+       applyEventConfig() below, same discipline as #banner. */
+    #agentOffline{position:fixed;bottom:1.5rem;right:1.5rem;z-index:8;
+      background:rgba(10,10,15,.72);color:#a33127;font-size:var(--t-caption);
+      font-weight:700;letter-spacing:.04em;padding:.5rem 1.1rem;border-radius:2rem}
   </style>
 </head>
 <body data-view="slides">
 <div id="banner" role="status">Mất kết nối — đang thử kết nối lại…</div>
+<div id="agentOffline" role="status" hidden>● Agent mất kết nối</div>
 <main>
   <section class="stage" id="stage">
     <!-- UI-01: server-rendered idle backstop, in the first bytes the browser
          receives — not injected by the first snapshot, not preceded by a
          spinner. Shipped-default copy; an event's own CTA replaces it on the
-         first snapshot. -->
-    <div class="hero" id="hero">
+         first snapshot. Carries idle-compose from the first byte too, so the
+         centred one-column composition holds before any WS message. -->
+    <div class="hero idle-compose" id="hero">
       <p class="idle" id="idleHeading">Sẵn sàng chụp ảnh cùng bạn</p>
       <p class="label" id="idleSub">Quét mã QR bên dưới để đăng ký</p>
     </div>
   </section>
 </main>
 <script>
-  var hero=document.querySelector('#hero'),banner=document.querySelector('#banner');
+  var hero=document.querySelector('#hero'),banner=document.querySelector('#banner'),
+      agentOffline=document.querySelector('#agentOffline');
 
   // CMS-01: same explicit five-colour-role-plus-font allow-list as the
   // default screen's applier, run on every snapshot rather than once at load
@@ -173,17 +201,24 @@ export function renderSlidesPage(): string {
   function shotTile(photo,badgeText,pipCount,pipIndex){
     var wrap=document.createElement('div');
     wrap.className='shot';
-    wrap.appendChild(photoFrame(photo,badgeText));
+    var frame=photoFrame(photo,badgeText);
+    wrap.appendChild(frame);
     // D9-04: guestNameEnabled is read here, not passed in — this is called
     // from both render() (the hero tile) and drawSlide()'s own setInterval
     // callback (the slideshow tile), and the module-level flag is what keeps
     // both in step with the latest snapshot without threading a parameter
     // through the rotation timer.
+    //
+    // UI-01: the name is appended INSIDE the frame, inside a scrim, so it
+    // draws OVER the photo rather than beside it — see the '.scrim' rule.
     if(guestNameEnabled){
+      var scrim=document.createElement('div');
+      scrim.className='scrim';
       var name=document.createElement('p');
       name.className='shotname';
       name.textContent=(photo&&photo.name)||'';
-      wrap.appendChild(name);
+      scrim.appendChild(name);
+      frame.appendChild(scrim);
     }
     // Zero-one-many: a single slide draws NO rotation indicator at all.
     if(pipCount>1){
@@ -234,6 +269,7 @@ export function renderSlidesPage(): string {
   var currentStageState='idle';
 
   function renderIdle(cfg){
+    hero.classList.add('idle-compose');
     hero.innerHTML='<p class="idle" id="idleHeading"></p><p class="label" id="idleSub"></p>';
     hero.querySelector('#idleHeading').textContent=cfg.idleHeading||'Sẵn sàng chụp ảnh cùng bạn';
     hero.querySelector('#idleSub').textContent=cfg.qrCtaText||cfg.idleSub||'Quét mã QR bên dưới để đăng ký';
@@ -253,6 +289,11 @@ export function renderSlidesPage(): string {
     // deploy rather than silently losing the hero moment or the guest name.
     heroTakeoverEnabled=cfg.heroEnabled!==false;
     guestNameEnabled=cfg.showGuestName!==false;
+    // T-09-13: the fault-only Agent signal, re-derived every snapshot like
+    // every other guard above — compared against the literal false, never
+    // truthiness, so an absent field (a snapshot from a not-yet-restarted
+    // server) reads as online rather than falsely alarming.
+    agentOffline.hidden=data.agentOnline!==false;
     syncSlides(data);
 
     // D9-04: heroTakeoverEnabled only gates whether this first branch is
@@ -261,10 +302,12 @@ export function renderSlidesPage(): string {
     // (buildSnapshot() does not read this flag), so it still joins rotation.
     if(heroTakeoverEnabled&&data.justCaptured){
       currentStageState='hero';
+      hero.classList.remove('idle-compose');
       hero.innerHTML='';
       hero.appendChild(shotTile(data.justCaptured,'Ảnh vừa chụp',1,0));
     }else if(slides.length>=1){
       currentStageState='slideshow';
+      hero.classList.remove('idle-compose');
       drawSlide();
     }else{
       currentStageState='idle';

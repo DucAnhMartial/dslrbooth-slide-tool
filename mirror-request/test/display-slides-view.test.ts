@@ -418,3 +418,114 @@ describe('Wire — both toggles, applied at the buildSnapshot() level (D9-04)', 
     expect(snapshot.photos[0]?.name).toBe('Khách ẩn tên');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Plan 09-02 Task 2 — the cross-page invariant block.
+//
+// slidesPage.ts is a deliberately STANDALONE duplicate of displayPage.ts
+// (09-01's summary records why: the cheapest way to guarantee the bare route
+// never changes is to not restructure it). That duplication is only an
+// acceptable trade because drift between the two files on anything they must
+// never disagree about fails HERE, in a red suite, rather than on a wall.
+// This block is that compensating control.
+// ---------------------------------------------------------------------------
+
+describe('Cross-page invariant — the two screens cannot drift on what they must never disagree on', () => {
+  const FONT_FILES = ['be-vietnam-pro-400', 'be-vietnam-pro-700', 'lora-400', 'lora-700'];
+
+  it('both pages declare the identical four self-hosted font file paths', () => {
+    for (const file of FONT_FILES) {
+      const fontPath = `/assets/fonts/${file}.woff2`;
+      expect(SLIDES_HTML).toContain(fontPath);
+      expect(DEFAULT_HTML).toContain(fontPath);
+    }
+  });
+
+  function applierProperties(html: string): string[] {
+    const applier = html.slice(html.indexOf('function applyEventConfig'));
+    const body = applier.slice(0, applier.indexOf('function getInitials'));
+    return [...body.matchAll(/setProperty\('([^']+)'/g)].map((m) => m[1]);
+  }
+
+  it('both config appliers write the exact same set of custom properties, and only event-scoped ones', () => {
+    const slidesProps = applierProperties(SLIDES_HTML);
+    const defaultProps = applierProperties(DEFAULT_HTML);
+    expect(slidesProps.length).toBeGreaterThan(0);
+    expect([...slidesProps].sort()).toEqual([...defaultProps].sort());
+    for (const property of slidesProps) {
+      expect(property.startsWith('--event-')).toBe(true);
+    }
+  });
+
+  it('both pages declare the same reconnect banner copy and a backoff that grows', () => {
+    const banner = 'Mất kết nối — đang thử kết nối lại…';
+    expect(SLIDES_HTML).toContain(banner);
+    expect(DEFAULT_HTML).toContain(banner);
+    expect(SLIDES_HTML).toMatch(/Math\.min\(/);
+    expect(DEFAULT_HTML).toMatch(/Math\.min\(/);
+    expect(SLIDES_HTML).toMatch(/retryDelay/);
+    expect(DEFAULT_HTML).toMatch(/retryDelay/);
+  });
+
+  it('neither page links an external stylesheet or font host of any kind', () => {
+    for (const html of [SLIDES_HTML, DEFAULT_HTML]) {
+      expect(html).not.toContain('fonts.googleapis.com');
+      expect(html).not.toContain('fonts.gstatic.com');
+      expect(html).not.toMatch(/cdn\./);
+      expect(html).not.toMatch(/<link[^>]+href=["']https?:/);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plan 09-02 Task 2 — the design pass: full-width contained photo, name
+// over a scrim, one-column idle composition, fault-only Agent signal, and
+// the Room Screen typography envelope (clamp() sizing, weights 400/700
+// only). The default page's own half of D1/D5 (09-01's coverage table) is
+// unaffected — this file is not touched by this plan's design pass.
+// ---------------------------------------------------------------------------
+
+describe('Slides screen — the design pass (UI-01, SC-1)', () => {
+  it('declares an image containment rule and a scrim behind the name, keeping the shrink-to-fit rule', () => {
+    expect(SLIDES_HTML).toMatch(/\.frame img\{[^}]*object-fit:contain/);
+    expect(SLIDES_HTML).toContain('.scrim{');
+    expect(SLIDES_HTML).toMatch(/\.shotname\{[^}]*overflow-wrap:anywhere/);
+  });
+
+  it('appends the name element INSIDE the frame (over the photo), not beside it', () => {
+    const shotTileFn = SLIDES_HTML.slice(SLIDES_HTML.indexOf('function shotTile'));
+    const shotTileBody = shotTileFn.slice(0, shotTileFn.indexOf('/* D-10/D-12 slideshow state'));
+    expect(shotTileBody).toMatch(/frame\.appendChild\(scrim\)/);
+  });
+
+  it('uses only clamp() sizing and only the two permitted weights', () => {
+    expect(SLIDES_HTML).toMatch(/clamp\(/);
+    const weights = new Set([...SLIDES_HTML.matchAll(/font-weight:\s*(\d{3})/g)].map((m) => m[1]));
+    expect([...weights].sort()).toEqual(['400', '700']);
+  });
+
+  it('carries the fixed destructive hex, and the hex never appears inside the config applier body', () => {
+    expect(SLIDES_HTML).toContain('#a33127');
+    const applier = SLIDES_HTML.slice(SLIDES_HTML.indexOf('function applyEventConfig'));
+    const applierBody = applier.slice(0, applier.indexOf('function getInitials'));
+    expect(applierBody).not.toContain('#a33127');
+  });
+
+  it('renders the Agent-offline signal hidden by default, in the fixed destructive colour, never a --event-* property', () => {
+    expect(SLIDES_HTML).toMatch(/<div id="agentOffline"[^>]*hidden>/);
+    const agentRule = SLIDES_HTML.slice(SLIDES_HTML.indexOf('#agentOffline{'));
+    const ruleBody = agentRule.slice(0, agentRule.indexOf('}'));
+    expect(ruleBody).toContain('#a33127');
+    expect(ruleBody).not.toMatch(/var\(--event-/);
+  });
+
+  it('re-derives the Agent-offline flag by explicit comparison against false, every render() call', () => {
+    expect(SLIDES_HTML).toMatch(/agentOffline\.hidden\s*=\s*data\.agentOnline\s*!==\s*false/);
+  });
+
+  it('composes the idle state for a single centred column, distinct from the hero/slideshow branches', () => {
+    expect(SLIDES_HTML).toMatch(/\.hero\.idle-compose\{[^}]*text-align:center/);
+    expect(SLIDES_HTML).toMatch(/hero\.classList\.add\('idle-compose'\)/);
+    expect(SLIDES_HTML).toMatch(/hero\.classList\.remove\('idle-compose'\)/);
+  });
+});
