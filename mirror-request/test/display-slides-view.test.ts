@@ -489,22 +489,37 @@ describe('Cross-page invariant — the two screens cannot drift on what they mus
 // unaffected — this file is not touched by this plan's design pass.
 // ---------------------------------------------------------------------------
 
-describe('Slides screen — the design pass (UI-01, SC-1)', () => {
-  it('keeps the containment rule, bounds the card, and drops the scrim treatment', () => {
-    expect(SLIDES_HTML).toMatch(/\.frame img\{[^}]*object-fit:contain/);
-    // The operator-chosen bounds: the card must not be free to swallow the
-    // viewport again — a height cap and a width cap must both exist.
-    expect(SLIDES_HTML).toMatch(/\.frame\{[^}]*height:min\(/);
-    expect(SLIDES_HTML).toMatch(/\.shot\{[^}]*max-width:min\(/);
-    expect(SLIDES_HTML).not.toContain('.scrim{');
-    expect(SLIDES_HTML).toMatch(/\.shotname\{[^}]*overflow-wrap:anywhere/);
+describe('Slides screen — the design pass, third operator revision (UI-01, SC-1)', () => {
+  // The shipped design is web-slide's slideshow stage — the reference the
+  // operator finally named at the 09-02 gate ("ở phase trước ... UI slide đó
+  // đẹp hơn"), whose source D-08 kept in git as layout reference. These pins
+  // hold the pieces that design owes its polish to; the bounded-card pins
+  // they replace guarded a design that no longer exists.
+  it('stacks slides as cross-fading layers on a fixed black stage', () => {
+    expect(SLIDES_HTML).toMatch(/\.stage\{[^}]*background:#000/);
+    expect(SLIDES_HTML).toMatch(/\.slide\{[^}]*transition:opacity/);
+    expect(SLIDES_HTML).toMatch(/\.slide\.active\{opacity:1\}/);
+    expect(SLIDES_HTML).toMatch(/\.slide img\{[^}]*object-fit:contain/);
   });
 
-  it('appends the name element BELOW the frame, exactly as the default screen does', () => {
+  it('draws the name small over a bottom gradient, fixed white — never at display size', () => {
+    expect(SLIDES_HTML).toMatch(/\.slide-overlay\{[^}]*linear-gradient\(to top/);
+    expect(SLIDES_HTML).toMatch(/\.shotname\{[^}]*overflow-wrap:anywhere/);
+    expect(SLIDES_HTML).toMatch(/\.shotname\{[^}]*color:#fff/);
+    expect(SLIDES_HTML).not.toMatch(/\.shotname\{[^}]*var\(--t-display\)/);
+  });
+
+  it('the name rides the overlay inside the layer, gated by the toggle', () => {
     const shotTileFn = SLIDES_HTML.slice(SLIDES_HTML.indexOf('function shotTile'));
-    const shotTileBody = shotTileFn.slice(0, shotTileFn.indexOf('/* D-10/D-12 slideshow state'));
-    expect(shotTileBody).toMatch(/if\s*\(\s*guestNameEnabled\s*\)\s*\{[\s\S]{0,300}wrap\.appendChild\(name\)/);
-    expect(shotTileBody).not.toMatch(/scrim/);
+    const shotTileBody = shotTileFn.slice(0, shotTileFn.indexOf('function showLayer'));
+    expect(shotTileBody).toMatch(/if\s*\(\s*guestNameEnabled\s*\)\s*\{[\s\S]{0,300}slide-overlay/);
+    expect(shotTileBody).toMatch(/overlay\.appendChild\(name\)/);
+  });
+
+  it('the outgoing layer is removed only after the fade completes — no black gap between photos', () => {
+    const showLayerFn = SLIDES_HTML.slice(SLIDES_HTML.indexOf('function showLayer'));
+    const showLayerBody = showLayerFn.slice(0, showLayerFn.indexOf('function drawDots'));
+    expect(showLayerBody).toMatch(/setTimeout\([\s\S]{0,120}removeChild\(previous\)/);
   });
 
   it('uses only clamp() sizing and only the two permitted weights', () => {
@@ -533,8 +548,13 @@ describe('Slides screen — the design pass (UI-01, SC-1)', () => {
   });
 
   it('composes the idle state for a single centred column, distinct from the hero/slideshow branches', () => {
-    expect(SLIDES_HTML).toMatch(/\.hero\.idle-compose\{[^}]*text-align:center/);
-    expect(SLIDES_HTML).toMatch(/hero\.classList\.add\('idle-compose'\)/);
-    expect(SLIDES_HTML).toMatch(/hero\.classList\.remove\('idle-compose'\)/);
+    // Third design revision: idle is now its own cross-fade LAYER carrying
+    // idle-compose, themed by the event (the one state where the theme
+    // paints the surface), rather than a class toggled on a shared hero
+    // element. The property pinned is the same: idle is a deliberately
+    // composed centred state, not a leftover.
+    expect(SLIDES_HTML).toMatch(/\.idle-compose\{[^}]*text-align:center/);
+    expect(SLIDES_HTML).toMatch(/class="slide active idle-compose"/);
+    expect(SLIDES_HTML).toMatch(/layer\.className='slide idle-compose'/);
   });
 });
