@@ -110,6 +110,15 @@ export interface EventConfig {
   photoCount: number;
   photoDurationMs: number;
   layoutStyle: string;
+  // D9-04 (phase 9): two per-event display toggles, both defaulting ON so an
+  // operator who never opens the form sees no change on either view. They
+  // are EVENT configuration, not view configuration — both the default
+  // screen and the slides-only screen (`?view=slides`) honour them.
+  // showGuestName gates the guest's name drawn beside a photo; heroEnabled
+  // gates D-09's just-captured takeover (off means the capture still joins
+  // the slideshow rotation, it simply does not take over the screen).
+  showGuestName: boolean;
+  heroEnabled: boolean;
 }
 
 export interface DisplaySnapshot {

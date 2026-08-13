@@ -46,6 +46,9 @@ export const DEFAULT_EVENT_CONFIG: EventConfig = Object.freeze({
   photoCount: 12,
   photoDurationMs: 6000,
   layoutStyle: 'stage_sidebar',
+  // D9-04: both default ON — see the field comments on EventConfig itself.
+  showGuestName: true,
+  heroEnabled: true,
 });
 
 /** The raw `event` row shape. Never leaves this module — see toEventConfig(). */
@@ -67,6 +70,11 @@ interface EventRow {
   photo_count: number | null;
   photo_duration_ms: number | null;
   layout_style: string | null;
+  // D9-04/D9-05: NOT NULL DEFAULT 1 at the schema level (unlike every other
+  // presentation column above), so `number | null` here is defence-in-depth
+  // against a hand-edited row, not an expected state — see toEventConfig().
+  show_guest_name: number | null;
+  hero_enabled: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -100,6 +108,12 @@ function toEventConfig(row: EventRow): EventConfig {
     photoCount: row.photo_count ?? DEFAULT_EVENT_CONFIG.photoCount,
     photoDurationMs: row.photo_duration_ms ?? DEFAULT_EVENT_CONFIG.photoDurationMs,
     layoutStyle: row.layout_style ?? DEFAULT_EVENT_CONFIG.layoutStyle,
+    // D9-04: NULL (a hand-edited row only — the column is NOT NULL) takes the
+    // shipped default; any other value is compared against 0 rather than
+    // tested for truthiness, so a stray non-zero-non-one value still reads as
+    // ON rather than silently falling through to a default it did not ask for.
+    showGuestName: row.show_guest_name === null ? DEFAULT_EVENT_CONFIG.showGuestName : row.show_guest_name !== 0,
+    heroEnabled: row.hero_enabled === null ? DEFAULT_EVENT_CONFIG.heroEnabled : row.hero_enabled !== 0,
   };
 }
 
@@ -126,6 +140,12 @@ const EVENT_UPDATABLE_COLUMNS = [
   'photo_count',
   'photo_duration_ms',
   'layout_style',
+  // D9-04: plan 09-02's CMS save writes these. The validator for both must
+  // never yield null — the columns are NOT NULL DEFAULT 1, unlike every
+  // other column in this list, which are nullable-on-purpose (see the
+  // `event` table's own header comment above).
+  'show_guest_name',
+  'hero_enabled',
 ] as const;
 
 export type EventUpdatableColumn = (typeof EVENT_UPDATABLE_COLUMNS)[number];
@@ -267,6 +287,16 @@ export class LocalStore {
         photo_count       INTEGER,
         photo_duration_ms INTEGER,
         layout_style      TEXT NOT NULL DEFAULT 'stage_sidebar',
+        -- D9-04/D9-05 (phase 9): the two per-event display toggles, and the
+        -- first columns on this table that are NOT NULL-on-purpose rather
+        -- than nullable-on-purpose. A toggle has exactly two states, so
+        -- there is no "unset" reading to coalesce at projection time the way
+        -- the nullable columns above do — DEFAULT 1 (ON) at the schema level
+        -- IS the "never customized" reading. See migrate() below for how
+        -- these two land on a database that predates this phase: Phase 8
+        -- shipped zero ALTER TABLE on this table, so this is the first.
+        show_guest_name   INTEGER NOT NULL DEFAULT 1,
+        hero_enabled      INTEGER NOT NULL DEFAULT 1,
         created_at        INTEGER NOT NULL,
         updated_at        INTEGER NOT NULL
       );
@@ -386,6 +416,27 @@ export class LocalStore {
     const hasCurrentJobId = boothColumns.some((c) => c.name === 'current_job_id');
     if (!hasCurrentJobId) {
       this.db.exec('ALTER TABLE booth_state ADD COLUMN current_job_id TEXT');
+    }
+
+    // event.show_guest_name / event.hero_enabled — D9-04/D9-05. Phase 8
+    // shipped `event` with zero ALTER TABLE, and that fact was used as
+    // deployment-safety evidence during the Phase 8 cutover; this is the
+    // first one against a table that may already hold live, populated rows
+    // on a running production database. Both columns are additive, NOT NULL,
+    // and DEFAULT 1 — SQLite accepts a NOT NULL ADD COLUMN precisely because
+    // a DEFAULT is supplied, so every pre-existing row reads back as ON
+    // (today's behaviour) with no backfill statement required. No DROP, no
+    // table recreate: this is the same `PRAGMA table_info` + conditional
+    // `ALTER TABLE ADD COLUMN` idiom as the three migrations above, applied
+    // to a second existing table for the first time.
+    const eventColumns = this.db.prepare("PRAGMA table_info('event')").all() as Array<{ name: string }>;
+    const hasShowGuestName = eventColumns.some((c) => c.name === 'show_guest_name');
+    const hasHeroEnabled = eventColumns.some((c) => c.name === 'hero_enabled');
+    if (!hasShowGuestName) {
+      this.db.exec('ALTER TABLE event ADD COLUMN show_guest_name INTEGER NOT NULL DEFAULT 1');
+    }
+    if (!hasHeroEnabled) {
+      this.db.exec('ALTER TABLE event ADD COLUMN hero_enabled INTEGER NOT NULL DEFAULT 1');
     }
   }
 

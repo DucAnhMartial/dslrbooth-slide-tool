@@ -9,6 +9,7 @@ import { createMirrorReceiver } from './ingestion/mirrorReceiver';
 import { jsonWithRawBody } from './ingestion/webhookAuth';
 import { readAgentConfigForAgent } from './agent/agentConfigContract';
 import { renderDisplayPage } from './display/displayPage';
+import { renderSlidesPage } from './display/slidesPage';
 import { createStatusRouter } from './status/statusRoute';
 import { createCmsIpGate } from './cms/cmsIpGate';
 import { createCmsRouter } from './cms/cmsRouter';
@@ -145,7 +146,23 @@ export function createApp(deps: ServiceDeps): express.Express {
       return res.status(403).json({ error: 'Forbidden' });
     }
     next();
-  }, (_req, res) => res.type('html').send(renderDisplayPage()));
+  }, (req, res) => {
+    // D9-01/D9-03/T-09-02: the ONLY variant selection mechanism, and it lives
+    // INSIDE this second handler, below the allow-list gate above — a
+    // variant mounted as its own route would be a display surface with no
+    // allow-list (T-09-01). The comparison is strict equality against one
+    // literal, guarded by a `typeof` check so a repeated `?view=` (which
+    // Express parses as an array) cannot pass it; the value is never
+    // interpolated into markup, never used as a filename, never used as a
+    // lookup key. Every other value — 'queue', '', 'SLIDES', a trailing
+    // space, '__proto__', a repeated param — falls to the default page.
+    const view = req.query.view;
+    if (typeof view === 'string' && view === 'slides') {
+      res.type('html').send(renderSlidesPage());
+      return;
+    }
+    res.type('html').send(renderDisplayPage());
+  });
 
   // The three curated Room Screen fonts (UI-SPEC Open Question 1, human-answered):
   // self-hosted, weights 400 and 700 only, served from this host so a venue with
