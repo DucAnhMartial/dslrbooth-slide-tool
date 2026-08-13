@@ -100,6 +100,22 @@ export function validateAgentConfigSubmission(raw: Record<string, unknown>): Val
       if (value !== '') patch.dslrBoothPassword = value;
       continue;
     }
+
+    // EXHAUSTIVENESS. `isSafeAgentConfigField` has already narrowed `key` to
+    // `SafeAgentConfigField`, and the four branches above consume all four
+    // members — so `key` is `never` here and this assignment compiles only
+    // while that stays true. Add a fifth field to SAFE_AGENT_CONFIG_FIELDS
+    // without adding its validation branch and `npm run typecheck` fails at
+    // this line, which is the whole point: the alternative was the field
+    // sailing through the allow-list, finding no branch, and being SILENTLY
+    // dropped from the patch while this function still answered `ok: true` —
+    // contradicting its own "refuse the whole thing" contract, and doing it
+    // invisibly (Phase 8 code review, WR-06). The runtime refusal below is
+    // the belt to that compile-time braces: unreachable today, correct if a
+    // future `any` ever erodes the narrowing.
+    const unhandled: never = key;
+    log.warn(`Refused Agent configuration save carrying unvalidated field "${String(unhandled)}"`);
+    return { ok: false };
   }
 
   return { ok: true, patch };
