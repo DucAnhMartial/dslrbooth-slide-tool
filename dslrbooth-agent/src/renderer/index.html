@@ -117,6 +117,23 @@
       <button type="submit" id="save-button">Save</button>
     </form>
   </section>
+
+  <section id="preferences-panel" aria-label="Preferences">
+    <h2>Preferences</h2>
+    <div class="field field-checkbox">
+      <label for="startRelayOnLaunch">
+        <input type="checkbox" id="startRelayOnLaunch" />
+        Start the relay automatically when the app launches
+      </label>
+    </div>
+    <div class="field field-checkbox">
+      <label for="startWithWindows">
+        <input type="checkbox" id="startWithWindows" />
+        Start with Windows
+      </label>
+    </div>
+    <p id="preferences-error" role="alert"></p>
+  </section>
 </main>
 <script src="index.js"></script>
 </body>

@@ -144,6 +144,31 @@ async function loadRecentLogLines() {
   for (const line of lines || []) appendLogLine(line)
 }
 
+const PREFERENCE_FIELDS = ['startRelayOnLaunch', 'startWithWindows']
+
+async function loadPreferencesIntoForm() {
+  const prefs = await window.agentDesktop.getPreferences()
+  for (const field of PREFERENCE_FIELDS) {
+    const el = byId(field)
+    if (el) el.checked = Boolean(prefs && prefs[field])
+  }
+}
+
+function wirePreferenceCheckbox(field) {
+  const el = byId(field)
+  if (!el) return
+  el.addEventListener('change', async () => {
+    const desired = el.checked
+    const result = await window.agentDesktop.setPreferences({ [field]: desired })
+    if (!result || result.ok !== true) {
+      byId('preferences-error').textContent = 'Could not save preference.'
+      el.checked = !desired // revert on failure -- the checkbox must reflect what was actually saved
+      return
+    }
+    byId('preferences-error').textContent = ''
+  })
+}
+
 function collectPatch() {
   const patch = {}
   for (const field of FIELDS) {
@@ -170,6 +195,9 @@ function init() {
   })
   refreshStatus().catch(() => {})
   loadRecentLogLines().catch(() => {})
+  loadPreferencesIntoForm().catch(() => {})
+  wirePreferenceCheckbox('startRelayOnLaunch')
+  wirePreferenceCheckbox('startWithWindows')
 
   byId('import-button')?.addEventListener('click', async () => {
     const result = await window.agentDesktop.importLegacyEnv()

@@ -54,6 +54,27 @@ const DEFAULTS = {
 } as const
 
 /**
+ * The two operator preferences (plan 10-03 Task 3), stored beside the
+ * configuration under their own key — not part of `CONFIG_FIELDS`, so the
+ * `config:set` channel's refusal of unknown keys stays exactly what it was
+ * pinned to be, and these two go through their own channels instead.
+ */
+export const PREFERENCE_FIELDS = ['startWithWindows', 'startRelayOnLaunch'] as const
+export type PreferenceField = (typeof PREFERENCE_FIELDS)[number]
+
+function isPreferenceField(key: string): key is PreferenceField {
+  return (PREFERENCE_FIELDS as readonly string[]).includes(key)
+}
+
+export interface Preferences {
+  startWithWindows: boolean
+  startRelayOnLaunch: boolean
+}
+
+/** Both default ON — a booth machine should start itself and start with Windows without being asked. */
+const DEFAULT_PREFERENCES: Preferences = { startWithWindows: true, startRelayOnLaunch: true }
+
+/**
  * Platform capability, injected. `safeStorageEncryptor.ts` is the only
  * implementation that ships (it wraps Electron's own `safeStorage`); this
  * interface is what keeps this file importable outside Electron.
@@ -114,6 +135,8 @@ interface ConfigFileV1 {
     extensionServiceWsToken: StoredSecret | null
     dslrBoothPassword: StoredSecret | null
   }
+  /** Optional for back-compat with a file this store wrote before Task 3 existed. */
+  preferences?: Preferences
 }
 
 export interface ConfigStore {
@@ -129,6 +152,8 @@ export interface ConfigStore {
    * never carries a secret value under any key (T-10-16).
    */
   importLegacy(): ImportLegacyResult
+  getPreferences(): Preferences
+  setPreferences(patch: Record<string, unknown>): ApplyPatchResult
 }
 
 export interface ConfigStoreOptions {
@@ -158,6 +183,7 @@ function emptyDoc(): ConfigFileV1 {
     logDir: DEFAULTS.logDir,
     autoOpenDisplay: DEFAULTS.autoOpenDisplay,
     secrets: { extensionServiceWsToken: null, dslrBoothPassword: null },
+    preferences: { ...DEFAULT_PREFERENCES },
   }
 }
 
@@ -280,7 +306,7 @@ export function createConfigStore(options: ConfigStoreOptions): ConfigStore {
     }
     if (Object.keys(unknown).length > 0) return { ok: false, errors: unknown }
 
-    const { values } = currentValues()
+    const { doc: currentDoc, values } = currentValues()
     const merged: ConfigValues = { ...values }
     for (const [key, value] of Object.entries(patch)) {
       const field = key as ConfigField
@@ -314,8 +340,36 @@ export function createConfigStore(options: ConfigStoreOptions): ConfigStore {
         extensionServiceWsToken: wrapSecret(result.config.extensionServiceWsToken, true),
         dslrBoothPassword: wrapSecret(result.config.dslrBoothPassword, false),
       },
+      // A configuration save never touches preferences — carried through
+      // unchanged from whatever the document already held.
+      preferences: currentDoc.preferences,
     }
     writeFile(nextDoc)
+    return { ok: true }
+  }
+
+  function getPreferences(): Preferences {
+    const { doc } = readFile()
+    return doc.preferences ?? { ...DEFAULT_PREFERENCES }
+  }
+
+  function setPreferences(patch: Record<string, unknown>): ApplyPatchResult {
+    const unknown: PatchFieldErrors = {}
+    for (const key of Object.keys(patch)) {
+      if (!isPreferenceField(key)) unknown[key] = `Unknown preference field: ${key}`
+    }
+    if (Object.keys(unknown).length > 0) return { ok: false, errors: unknown }
+
+    const typeErrors: PatchFieldErrors = {}
+    for (const [key, value] of Object.entries(patch)) {
+      if (typeof value !== 'boolean') typeErrors[key] = `${key} must be a boolean`
+    }
+    if (Object.keys(typeErrors).length > 0) return { ok: false, errors: typeErrors }
+
+    const { doc } = readFile()
+    const current = doc.preferences ?? { ...DEFAULT_PREFERENCES }
+    const next: Preferences = { ...current, ...(patch as Partial<Preferences>) }
+    writeFile({ ...doc, preferences: next })
     return { ok: true }
   }
 
@@ -346,5 +400,7 @@ export function createConfigStore(options: ConfigStoreOptions): ConfigStore {
     buildConfig,
     applyPatch,
     importLegacy,
+    getPreferences,
+    setPreferences,
   }
 }

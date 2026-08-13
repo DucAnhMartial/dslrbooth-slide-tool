@@ -24,6 +24,8 @@ const api = {
   stop: () => ipcRenderer.invoke('agent:stop'),
   getStatus: () => ipcRenderer.invoke('agent:status'),
   getRecentLogLines: () => ipcRenderer.invoke('log:recent'),
+  getPreferences: () => ipcRenderer.invoke('preferences:get'),
+  setPreferences: (patch: Record<string, unknown>) => ipcRenderer.invoke('preferences:set', patch),
 
   // The two subscription helpers, for the one push channel `main.ts` sends
   // status snapshots on. `onStatus` also returns an unsubscribe function

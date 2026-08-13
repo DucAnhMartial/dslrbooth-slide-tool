@@ -2,7 +2,7 @@ import type { AgentHandle, AgentStatus } from '../agent'
 import type { Config, ConfigFieldErrors } from '../config'
 import type { Logger } from '../logging/logger'
 import { isSafeAgentConfigField } from '../liveConfig'
-import type { ConfigStore, ConfigSnapshot, PatchFieldErrors, ImportLegacyResult } from './configStore'
+import type { ConfigStore, ConfigSnapshot, PatchFieldErrors, ImportLegacyResult, Preferences } from './configStore'
 
 /**
  * The IPC surface (plan 10-02).
@@ -29,6 +29,8 @@ export const IPC_CHANNELS = [
   'agent:stop',
   'agent:status',
   'log:recent',
+  'preferences:get',
+  'preferences:set',
 ] as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[number]
@@ -46,6 +48,8 @@ export const IPC_CHANNEL_FUNCTION_NAMES: Record<IpcChannel, string> = {
   'agent:stop': 'stop',
   'agent:status': 'getStatus',
   'log:recent': 'getRecentLogLines',
+  'preferences:get': 'getPreferences',
+  'preferences:set': 'setPreferences',
 }
 
 /** The push channel `main.ts` sends `AgentStatus` snapshots on. Not in `IPC_CHANNELS` — it is main→renderer, never invoked. */
@@ -73,6 +77,21 @@ export type ConfigSetResult =
   | { ok: true; restartRequired: boolean }
   | { ok: false; errors: PatchFieldErrors }
 
+export type PreferencesSetResult =
+  | { ok: true }
+  | { ok: false; errors: PatchFieldErrors }
+
+/**
+ * The one-call binding to Electron's own login-item API (10-RESEARCH Don't
+ * Hand-Roll: `app.setLoginItemSettings` also maintains the companion
+ * `StartupApproved\Run` registry entry a hand-written registry write would
+ * leave behind on removal). This interface is what keeps that one line out
+ * of this otherwise electron-free file — only `main.ts` implements it.
+ */
+export interface LoginItemAdapter {
+  setOpenAtLogin(value: boolean): void
+}
+
 export interface IpcHandlersOptions {
   store: ConfigStore
   logger: Logger
@@ -83,6 +102,8 @@ export interface IpcHandlersOptions {
   pushStatus: (status: AgentStatus) => void
   /** The log tail's retained buffer, newest last. Defaults to an empty list when not supplied. */
   getRecentLogLines?: () => string[]
+  /** Called only when a preferences save actually changes `startWithWindows`. Defaults to a no-op when not supplied (tests that do not care about the OS login item). */
+  loginItemAdapter?: LoginItemAdapter
 }
 
 export interface IpcHandlerMap {
@@ -93,10 +114,12 @@ export interface IpcHandlerMap {
   'agent:stop': () => Promise<{ ok: true }>
   'agent:status': () => Promise<AgentStatus>
   'log:recent': () => Promise<string[]>
+  'preferences:get': () => Promise<Preferences>
+  'preferences:set': (patch: Record<string, unknown>) => Promise<PreferencesSetResult>
 }
 
 export function createIpcHandlers(options: IpcHandlersOptions): IpcHandlerMap {
-  const { store, logger, getAgent, setAgent, createAgent, pushStatus, getRecentLogLines } = options
+  const { store, logger, getAgent, setAgent, createAgent, pushStatus, getRecentLogLines, loginItemAdapter } = options
 
   return {
     'config:get': async () => store.getSnapshot(),
@@ -104,6 +127,18 @@ export function createIpcHandlers(options: IpcHandlersOptions): IpcHandlerMap {
     'config:import-legacy': async (): Promise<ImportLegacyResult> => store.importLegacy(),
 
     'log:recent': async () => (getRecentLogLines ? getRecentLogLines() : []),
+
+    'preferences:get': async () => store.getPreferences(),
+
+    'preferences:set': async (patch: Record<string, unknown>): Promise<PreferencesSetResult> => {
+      const result = store.setPreferences(patch)
+      if (result.ok && Object.prototype.hasOwnProperty.call(patch, 'startWithWindows')) {
+        // The ONLY call site in the codebase that writes a startup entry
+        // (T-10-22) — nothing else touches the login item.
+        loginItemAdapter?.setOpenAtLogin(Boolean(patch.startWithWindows))
+      }
+      return result
+    },
 
     'config:set': async (patch: Record<string, unknown>): Promise<ConfigSetResult> => {
       const result = store.applyPatch(patch)
@@ -173,4 +208,28 @@ export function createIpcHandlers(options: IpcHandlersOptions): IpcHandlerMap {
       return agent ? agent.getStatus() : IDLE_STATUS
     },
   }
+}
+
+/**
+ * SC-1's actual content: on launch, with a complete configuration and the
+ * launch preference on, the relay starts without the operator pressing
+ * anything; with either half false, it shows the setup form (an incomplete
+ * config) or simply waits (the preference off) — never an error.
+ *
+ * A pure function over `store` and the already-built `handlers` map (not
+ * duplicated start-up logic) so `main.ts`'s one call site and this file's
+ * own test can drive exactly the same decision, in exactly the four
+ * combinations table-driven testing exists for.
+ */
+export async function maybeAutoStartOnLaunch(
+  handlers: Pick<IpcHandlerMap, 'agent:start'>,
+  store: Pick<ConfigStore, 'buildConfig' | 'getPreferences'>,
+): Promise<{ started: boolean }> {
+  const config = store.buildConfig()
+  const preferences = store.getPreferences()
+  if (config.ok && preferences.startRelayOnLaunch) {
+    await handlers['agent:start']()
+    return { started: true }
+  }
+  return { started: false }
 }
