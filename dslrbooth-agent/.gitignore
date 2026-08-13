@@ -24,3 +24,8 @@ Thumbs.db
 
 # Test coverage
 coverage/
+# winston-daily-rotate-file writes an audit sidecar next to LOG_DIR; on a
+# non-Windows dev box a Windows-style LOG_DIR yields a literal-backslash
+# filename in the repo root. Runtime artifact either way.
+logs*
+*-audit.json

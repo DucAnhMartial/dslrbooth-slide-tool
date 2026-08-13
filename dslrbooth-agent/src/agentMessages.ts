@@ -7,18 +7,20 @@ import type { LiveConfig } from './liveConfig'
  * `config`, `reload_config`, and the existing `announcement`.
  *
  * This module exists so those branches can be driven by a test. `index.ts`
- * builds its whole world inside `main()` and starts servers on import, so the
- * chain that used to live inline there was unreachable from vitest — and the
- * two properties plan 08-04 has to prove (a `reload_config` produces exactly
- * one `config_request`, and the auto-open flag is read through the LIVE holder
- * rather than the boot config) are behavioural, not structural. They cannot be
- * asserted by inspecting a constant.
+ * used to build its whole world inside `main()` and start servers on import,
+ * so the chain that used to live inline there was unreachable from vitest —
+ * and the two properties plan 08-04 has to prove (a `reload_config` produces
+ * exactly one `config_request`, and the auto-open flag is read through the
+ * LIVE holder rather than the boot config) are behavioural, not structural.
+ * They cannot be asserted by inspecting a constant.
  *
- * The `command` branch deliberately stays in `index.ts`: it is the dslrBooth
- * Local API call site, AGT-02/AGT-03 pin its behaviour, and moving working
- * code across a file boundary is risk with no test to pay for it. This handler
- * returns `false` for anything it does not consume, and `index.ts` continues
- * exactly as before from there.
+ * The `command` branch lives in `src/commands.ts` (plan 10-01), for the same
+ * reason: it is the dslrBooth Local API call site, AGT-02/AGT-03 pin its
+ * behaviour, and it needed its own seam a test could drive once `index.ts`
+ * stopped being the only place that wired it up. This handler returns
+ * `false` for anything it does not consume, and `src/agent.ts` — the factory
+ * that now owns both handlers — falls through to `createCommandHandler`
+ * from there.
  */
 
 export interface ServiceMessage {

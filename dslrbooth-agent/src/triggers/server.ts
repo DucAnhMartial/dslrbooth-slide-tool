@@ -5,6 +5,16 @@ import { Config } from '../config'
 interface TriggerServerConfig {
   port: number
   onEvent: (eventType: string, params: Record<string, string>) => void
+  /**
+   * Routes the underlying HTTP server's `error` event out to the caller.
+   * Optional so the three tests that construct a trigger server directly
+   * (predating this plan) are untouched — but not optional in substance: an
+   * in-use port today is an uncaught exception, and the booth PC will
+   * genuinely have the old pkg exe or the Windows service holding this port
+   * while the operator installs the desktop app (10-RESEARCH Pitfall 4,
+   * plan 10-01).
+   */
+  onError?: (err: Error) => void
 }
 
 /**
@@ -75,6 +85,11 @@ export function createTriggerServer(config: TriggerServerConfig, logger: Logger)
 
   const server = app.listen(config.port, '0.0.0.0', () => {
     logger.info(`Trigger HTTP server listening on port ${config.port}`)
+  })
+
+  server.on('error', (err: Error) => {
+    logger.error(`Trigger server error: ${err.message}`)
+    config.onError?.(err)
   })
 
   return {

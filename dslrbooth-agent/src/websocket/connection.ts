@@ -129,6 +129,14 @@ export class WsConnection {
     }
     if (this.ws) {
       this.ws.removeAllListeners()
+      // `ws` aborts a still-CONNECTING socket by emitting 'error' on the next
+      // tick (websocket.js's `abortHandshake`) — asynchronously, after
+      // `removeAllListeners()` above has already run. With no listener left
+      // to catch it, Node's EventEmitter treats an unheard 'error' event as
+      // an uncaught exception. A one-shot swallow listener, attached after
+      // the real listeners are gone, absorbs exactly that abort — closing a
+      // socket that never finished connecting must not crash the process.
+      this.ws.once('error', () => {})
       try { this.ws.close(1000, 'shutdown') } catch {}
       this.ws = null
     }
