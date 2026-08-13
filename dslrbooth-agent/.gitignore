@@ -6,6 +6,18 @@ dist/
 # Packaged binary — 43MB build artifact, regenerable from src/
 *.exe
 
+# electron-builder output (10-04) — installer, portable exe and zip, all
+# regenerable from dist/ via scripts/build-win.sh; never the compiler's own
+# output directory (electron-builder.json's directories.output), so this is
+# a distinct ignore from dist/ above, not a duplicate of it.
+release/
+# electron-builder's in-repository caches (10-04) — home dir, Electron
+# distribution downloads, electron-builder's own cache. Kept inside the
+# repository (not ~/.cache) so a Docker build run as the invoking user never
+# has to create anything outside this tree; ignored here for the same
+# reason dist/ and release/ are.
+.electron-builder-cache/
+
 # Environment (SECRETS - never commit)
 .env
 
