@@ -45,6 +45,18 @@ function showFieldErrors(errors) {
   if (generic.length > 0) byId('save-error').textContent = generic.join(' ')
 }
 
+// UAT-01: a field-error map read by an operator, not JSON.stringify's braces
+// and quotes. "extensionServiceWsToken: is required" beats
+// {"extensionServiceWsToken":"is required"} at 2am at an event.
+function formatStartError(result) {
+  if (result && result.error) return result.error
+  if (result && result.errors) {
+    const parts = Object.entries(result.errors).map(([field, message]) => field + ': ' + message)
+    if (parts.length > 0) return 'Could not start — ' + parts.join('; ')
+  }
+  return 'Could not start.'
+}
+
 function renderImportOffer(snapshot) {
   const panel = byId('import-panel')
   if (!panel) return
@@ -99,6 +111,13 @@ function formatDuration(ms) {
   return [hours, minutes, seconds].map((n) => String(n).padStart(2, '0')).join(':')
 }
 
+// UAT-01: a failed start() has no home in the status snapshot -- when the
+// configuration is refused the Agent is never constructed, so `lastError` is
+// empty and the message the click handler just wrote was erased by the very
+// next renderStatus(), in the same tick. Hold it here instead, and let the
+// real status win whenever it has something to say.
+let pendingStartError = ''
+
 function renderStatus(status) {
   if (!status) return
   byId('status-running').textContent = status.running ? 'running' : 'stopped'
@@ -108,7 +127,7 @@ function renderStatus(status) {
   byId('status-last-event').textContent = formatTimestamp(status.lastEventAt)
   byId('status-uptime').textContent =
     status.running && status.startedAt ? formatDuration(Date.now() - status.startedAt) : '-'
-  byId('status-last-error').textContent = status.lastError || '-'
+  byId('status-last-error').textContent = status.lastError || pendingStartError || '-'
 }
 
 async function refreshStatus() {
@@ -222,7 +241,11 @@ function init() {
     if (result.restartRequired) {
       byId('restart-required-notice').hidden = false
     }
+    // The configuration just changed, so a start failure caused by the old
+    // one is stale -- stop showing it (UAT-01).
+    pendingStartError = ''
     await loadConfigIntoForm()
+    await refreshStatus()
   })
 
   byId('restart-button')?.addEventListener('click', async () => {
@@ -237,9 +260,12 @@ function init() {
   byId('start-button').addEventListener('click', async () => {
     const result = await window.agentDesktop.start()
     if (!result || result.ok !== true) {
-      const message = (result && (result.error || (result.errors && JSON.stringify(result.errors)))) || 'Could not start.'
-      byId('status-last-error').textContent = message
+      pendingStartError = formatStartError(result)
+      if (result && result.errors) showFieldErrors(result.errors)
+    } else {
+      pendingStartError = ''
     }
+    byId('status-last-error').textContent = pendingStartError || '-'
     await refreshStatus()
   })
 

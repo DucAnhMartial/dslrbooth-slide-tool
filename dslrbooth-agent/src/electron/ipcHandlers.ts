@@ -178,7 +178,19 @@ export function createIpcHandlers(options: IpcHandlersOptions): IpcHandlerMap {
       if (existing && existing.isRunning()) return { ok: true }
 
       const result = store.buildConfig()
-      if (!result.ok) return { ok: false, errors: result.errors }
+      if (!result.ok) {
+        // UAT-03: both failure branches were silent — they returned the reason
+        // to the renderer and wrote nothing anywhere else. Combined with the
+        // renderer overwriting its own error line, a refused start left NO
+        // trace at all: no config file, no bound port, no dialled socket, and
+        // an empty log. An operator at an event has the log and nothing else.
+        logger.warn(
+          `Start refused: the stored configuration is not usable — ${Object.entries(result.errors)
+            .map(([field, message]) => `${field}: ${message}`)
+            .join('; ')}`,
+        )
+        return { ok: false, errors: result.errors }
+      }
 
       const agent = createAgent(result.config, logger)
       agent.onStatus((status) => pushStatus(status))
@@ -188,7 +200,9 @@ export function createIpcHandlers(options: IpcHandlersOptions): IpcHandlerMap {
       pushStatus(agent.getStatus())
 
       if (!agent.isRunning()) {
-        return { ok: false, error: agent.getLastError() ?? 'The relay did not start, for an unrecorded reason.' }
+        const error = agent.getLastError() ?? 'The relay did not start, for an unrecorded reason.'
+        logger.warn(`Start failed: ${error}`)
+        return { ok: false, error }
       }
       return { ok: true }
     },

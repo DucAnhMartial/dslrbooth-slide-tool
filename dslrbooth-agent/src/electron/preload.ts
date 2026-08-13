@@ -1,5 +1,32 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import { STATUS_PUSH_CHANNEL, LOG_LINE_PUSH_CHANNEL } from './ipcHandlers'
+
+/**
+ * UAT-04 — why these two strings are LITERALS here and not imported.
+ *
+ * This file runs as a SANDBOXED preload (`sandbox: true` in main.ts). A
+ * sandboxed preload's `require` is a polyfill limited to `electron` and a
+ * couple of core modules: a relative `require('./ipcHandlers')` THROWS, the
+ * preload dies before its last line, `window.agentDesktop` is never defined,
+ * and every button in the renderer becomes silently inert — no error anywhere,
+ * because the failure happens before there is anything left to report with.
+ *
+ * That is exactly what shipped and what the first booth-PC install hit: Save
+ * wrote no config, Start bound no port and dialled nothing, and both logs were
+ * empty. Importing the constants was correct for keeping the two channel lists
+ * from drifting, and `sandbox: true` was correct for the security posture —
+ * they were simply fatal together, and no test loaded this file in a real
+ * sandboxed renderer to find out.
+ *
+ * The no-drift guarantee is preserved WITHOUT the import: these literals are
+ * asserted equal to `ipcHandlers.ts`'s exports by
+ * `test/electron-preload-sandbox.test.ts`, which runs under vitest and may
+ * import both freely. That file also asserts the COMPILED preload requires
+ * nothing but `electron`, so this class of failure cannot return.
+ *
+ * Do not replace these with an import.
+ */
+const STATUS_PUSH_CHANNEL = 'agent:status-push'
+const LOG_LINE_PUSH_CHANNEL = 'log:line-push'
 
 /**
  * The preload — the only door between the renderer and the main process

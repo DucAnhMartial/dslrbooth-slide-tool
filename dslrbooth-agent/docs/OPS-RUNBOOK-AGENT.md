@@ -138,8 +138,18 @@ currently-running Agent already holds. Do these in order:
 Configuration is a JSON file at:
 
 ```
-%APPDATA%\dslrBooth Agent\config.json
+%APPDATA%\dslrbooth-agent\config.json
 ```
+
+**Note the folder name.** It is `dslrbooth-agent`, the `name` field in
+`package.json` — *not* `dslrBooth Agent`, which is `electron-builder.json`'s
+`productName` and names only the installer, the Start-menu entry and the
+desktop shortcut. Electron derives the user-data folder from
+`app.getName()`, which reads `name`. This document said `dslrBooth Agent`
+until the first booth-PC install, where the operator opened a folder that
+does not exist and concluded, reasonably, that the application had written
+no logs at all (UAT-02). Paste the path into the Run box (`Win+R`) rather
+than typing it.
 
 This is Electron's conventional `app.getPath('userData')`, and it is the
 **same path for every packaging format** — the installer, the portable
@@ -163,8 +173,11 @@ if it is not — never silently.
 Logs live at:
 
 ```
-%APPDATA%\dslrBooth Agent\logs\app-<YYYY-MM-DD>.log
+%APPDATA%\dslrbooth-agent\logs\app-<YYYY-MM-DD>.log
 ```
+
+(Same folder-name caveat as §5 above: `dslrbooth-agent`, not
+`dslrBooth Agent`.)
 
 — the same daily-rotating file the CLI/service build has always written
 (`winston-daily-rotate-file`, 14-day retention), just relocated under the
