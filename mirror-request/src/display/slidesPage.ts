@@ -61,14 +61,18 @@ export function renderSlidesPage(): string {
     body{background:var(--paper);color:var(--ink);font-family:var(--event-font);font-weight:400;line-height:1.4}
     body:after{content:"";position:fixed;inset:0;pointer-events:none;opacity:.16;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.25'/%3E%3C/svg%3E")}
 
-    /* SC-1: one full-width column. No sidebar, no second grid track — the
-       photo surface reclaims the whole viewport (UI-01: this is a design
-       task, not display:none on an aside that never existed here). Margin is
-       3vw rather than the default page's 4.5vw: that larger value exists to
-       separate the stage column from the sidebar column, and there is no
-       sidebar here to separate from. */
+    /* SC-1: one column, no sidebar — but NOT full-bleed. The first cut of
+       this page let the frame swallow the whole viewport, and at TV size a
+       portrait booth print contained in ~94vh reads as a wall of photo — the
+       operator judged it "ảnh đang bị to quá" at the 09-02 human gate
+       (2026-08-13) and asked for the previous phase's presentation instead.
+       So the tile now keeps the default screen's PROPORTIONS: a bounded,
+       centred card about the size the stage column has beside the sidebar,
+       with the event's themed background visible around it. That framing is
+       what made the Phase 8 screen read as designed. */
     main{min-height:100vh;display:grid;grid-template-columns:minmax(0,1fr);padding:3vw}
-    .stage{display:flex;flex-direction:column;justify-content:center;min-width:0;min-height:0}
+    .stage{display:flex;flex-direction:column;justify-content:center;align-items:center;min-width:0;min-height:0}
+    .hero{width:100%;display:flex;justify-content:center}
 
     .label{font-size:var(--t-label);color:var(--muted);margin:0 0 1rem}
     .idle{font-size:var(--t-display);font-weight:700;max-width:13ch;line-height:1.05;margin:0;overflow-wrap:anywhere}
@@ -76,22 +80,29 @@ export function renderSlidesPage(): string {
        column this view has — the two-column default page can leave its idle
        heading flush left because the sidebar visually balances it; nothing
        here would balance a left-aligned heading against empty space. */
-    .hero.idle-compose{text-align:center}
+    .hero.idle-compose{text-align:center;display:block}
     .hero.idle-compose .idle,.hero.idle-compose .label{margin-left:auto;margin-right:auto}
 
-    /* D-09 hero moment, and D-10 slideshow: the same tile, exactly as on the
-       default screen — the same photo seen at different ages. */
-    .shot{display:flex;flex-direction:column;gap:1.5rem;min-height:0;flex:1}
-    .frame{flex:1;min-height:0;display:grid;place-items:center;background:var(--surface);border-radius:.75rem;overflow:hidden;position:relative}
+    /* D-09 hero moment, and D-10 slideshow: the same tile as the default
+       screen, at the default screen's SCALE. The width cap mirrors what the
+       stage column measures once the 23rem sidebar and its gap are taken out
+       of a TV-sized viewport; the height cap leaves the themed background
+       breathing above and below instead of letting the card touch both
+       edges. */
+    .shot{display:flex;flex-direction:column;gap:1.25rem;width:100%;max-width:min(86vw,68rem)}
+    .frame{height:min(66vh,42rem);display:grid;place-items:center;background:var(--surface);
+      border:1px solid var(--line);border-radius:1rem;overflow:hidden;position:relative;
+      box-shadow:0 30px 80px -24px rgba(0,0,0,.55)}
     .frame img{max-width:100%;max-height:100%;object-fit:contain}
     /* UI-01: the guest's name is drawn OVER the photo, against a scrim, so
-       it stays legible over a bright image — never beside it, which is what
-       the two-column default page does. The scrim's colours are fixed
+       it stays legible over a bright image. The scrim's colours are fixed
        (never var(--event-*)): legibility over an arbitrary guest photo
-       cannot depend on an event's own theme choices. */
-    .scrim{position:absolute;left:0;right:0;bottom:0;padding:3rem 2rem 2rem;
+       cannot depend on an event's own theme choices. The name is sized a
+       step below the display size — at card scale the display clamp reads
+       as a caption shouting over the photo (same operator feedback). */
+    .scrim{position:absolute;left:0;right:0;bottom:0;padding:2.5rem 1.75rem 1.5rem;
       background:linear-gradient(to top,rgba(0,0,0,.78),rgba(0,0,0,0));pointer-events:none}
-    .shotname{font-size:var(--t-display);font-weight:700;line-height:1.05;margin:0;max-width:16ch;overflow-wrap:anywhere;color:#fff}
+    .shotname{font-size:clamp(1.5rem,3.2vw,3.25rem);font-weight:700;line-height:1.05;margin:0;max-width:16ch;overflow-wrap:anywhere;color:#fff}
     .badge{position:absolute;top:1rem;left:1rem;background:var(--accent);color:var(--paper);font-size:var(--t-caption);font-weight:700;letter-spacing:.08em;text-transform:uppercase;padding:.35rem 1rem;border-radius:2rem}
     .dots{display:flex;gap:.5rem;justify-content:center;padding-top:1rem}
     .pip{width:.5rem;height:.5rem;border-radius:50%;background:var(--line)}
