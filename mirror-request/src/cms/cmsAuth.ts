@@ -143,7 +143,22 @@ export function createSessionStore(): SessionStore {
   };
 }
 
-/** Minimal `Cookie:` header parse — no cookie-parser dependency for one key. */
+/**
+ * Minimal `Cookie:` header parse — no cookie-parser dependency for one key.
+ *
+ * `decodeURIComponent` THROWS on a malformed percent-sequence (`%`, `%zz`, a
+ * truncated multi-byte run), and a `Cookie` header is attacker-controlled
+ * input on every request. Left uncaught, that `URIError` propagated out of
+ * `createRequireSession` and out of the pre-session `/logout` route into
+ * Express's default handler: a 500 where this module promises a uniform 401,
+ * carrying a stack trace and absolute filesystem paths whenever `NODE_ENV` is
+ * not exactly 'production'. The 401/500 split is itself the oracle the
+ * uniform-refusal design below exists to close (Phase 8 code review, CR-01).
+ *
+ * An undecodable pair is DROPPED, not fatal to the whole header. Discarding
+ * every cookie because one unrelated one was malformed would log the operator
+ * out — a second failure wearing the first one's clothes.
+ */
 export function parseCookies(header: string | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   if (!header) return out;
@@ -152,7 +167,13 @@ export function parseCookies(header: string | undefined): Record<string, string>
     if (index < 0) continue;
     const key = part.slice(0, index).trim();
     if (!key) continue;
-    out[key] = decodeURIComponent(part.slice(index + 1).trim());
+    try {
+      out[key] = decodeURIComponent(part.slice(index + 1).trim());
+    } catch {
+      // Undecodable value. A cookie that cannot be read is a cookie that was
+      // not sent, which every caller here already handles.
+      continue;
+    }
   }
   return out;
 }
