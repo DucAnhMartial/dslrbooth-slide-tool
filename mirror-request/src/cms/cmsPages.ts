@@ -32,6 +32,39 @@ export function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
+/**
+ * Serialises a value for interpolation INSIDE an inline `<script>` block.
+ *
+ * `escapeHtml` is the wrong tool here and `JSON.stringify` alone is not
+ * enough. `<script>` is a raw text element: the HTML parser does not decode
+ * entities inside it, so `&quot;` would ship literally and break the script —
+ * but it DOES scan for `</script`, and it wins that race against JavaScript's
+ * own string quoting. `JSON.stringify` escapes quotes and backslashes and
+ * leaves `<` and `/` alone, so a value containing `</script>` closes the
+ * element from inside what the author believed was a string literal.
+ *
+ * The replacement text is a valid JS escape that evaluates back to the same
+ * character, so the value the script sees is unchanged — while being nothing
+ * at all to the HTML parser. That asymmetry is the whole mechanism.
+ *
+ * U+2028 and U+2029 are escaped for a different reason: they are literal line
+ * terminators in JavaScript but legal raw characters in JSON, so an unescaped
+ * one is a syntax error rather than a vulnerability. Both the pattern and the
+ * replacement are written as escapes deliberately — as raw characters they
+ * are invisible in every editor, and a maintainer cannot review what they
+ * cannot see.
+ *
+ * Phase 8 code review, WR-08.
+ */
+export function jsonForScript(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003C')
+    .replace(/>/g, '\\u003E')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
+
 const CMS_STYLES = `
     :root{
       --bg:#f7f7f9;--surface:#ffffff;--border:rgba(0,0,0,.08);

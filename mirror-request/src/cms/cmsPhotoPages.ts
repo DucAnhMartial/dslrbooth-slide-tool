@@ -1,4 +1,4 @@
-import { escapeHtml } from './cmsPages';
+import { escapeHtml, jsonForScript } from './cmsPages';
 import { page, LOGOUT_FORM, WARNING_ICON } from './cmsEventPages';
 import type { EventSummary } from '../state/localStore';
 
@@ -428,7 +428,7 @@ export function renderCmsClearHistoryConfirmPage(data: {
       });
       ok = res.ok;
     } catch (err) { ok = false; }
-    if (ok) { location.href = ${JSON.stringify(`/cms/photos?event=${data.event.id}`)}; return; }
+    if (ok) { location.href = ${jsonForScript(`/cms/photos?event=${data.event.id}`)}; return; }
     cmsRelease(button);
     document.querySelector('#clearError').hidden = false;
   });
