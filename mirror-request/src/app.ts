@@ -68,10 +68,62 @@ export function createApp(deps: ServiceDeps): express.Express {
   // MEASURED, not assumed: test/cms-access-control.test.ts posts a ~4MB body to
   // this path and asserts the response is not a 413. If that case ever goes
   // red, this mount has moved below the global parser.
+  //
+  // WR-05 (Phase 8 code review): the IP check below runs BEFORE the parser,
+  // not after. Mounted the other way round, a non-whitelisted peer still had
+  // its body read and buffered — up to the raised ~6.7MB ceiling — before the
+  // CMS IP gate at the bottom of this function ever saw the request. The
+  // final answer was correctly 403 either way, so D-13's access decision was
+  // never in question; what was being spent for a peer with no business here
+  // was memory and CPU. This is the same "route order is load-bearing"
+  // reasoning the CMS mount below states, applied to the one middleware that
+  // previously sat above everything.
+  //
+  // It duplicates the gate rather than moving the parser below it, because
+  // the parser MUST still precede `jsonWithRawBody()` — that ordering is what
+  // keeps the 100kb default in force everywhere else, and it is the property
+  // the comment above describes.
   app.use(
     '/cms/api/assets',
+    (req, res, next) => {
+      const ip = clientIp(req);
+      if (!isWhitelisted(ip, config.CMS_IP_WHITELIST)) {
+        log.warn(`Blocked /cms/api/assets from non-whitelisted IP: ${ip}`);
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      next();
+    },
     express.json({ limit: Math.ceil(config.CMS_UPLOAD_MAX_BYTES * (4 / 3)) + 65_536 }),
   );
+
+  // WR-03: body-parser's own refusal, converted to the shape the rest of this
+  // endpoint uses.
+  //
+  // A body over the limit above never reaches `handleAssetUpload`. Left
+  // alone, body-parser threw `PayloadTooLargeError` and Express's DEFAULT
+  // handler answered it — a 413, `Content-Type: text/html`, and a full stack
+  // trace with absolute filesystem paths whenever NODE_ENV is not exactly
+  // 'production' (which `config.ts` never requires). That broke
+  // `uploadHandler.ts`'s stated invariant — "One refusal for every way an
+  // upload can fail... Distinct messages here would tell a caller which of
+  // its guesses was closer" — from outside the handler that promises it, and
+  // it leaked paths while doing so. Same root cause as CR-01: there is no
+  // JSON-aware error handler anywhere in this app, so every parser-level
+  // throw fell through to the HTML page.
+  //
+  // Scoped to this path and this error type. Anything else is passed on
+  // untouched, so this cannot silently swallow an unrelated fault.
+  app.use(
+    '/cms/api/assets',
+    (err: Error & { type?: string }, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+      if (err?.type === 'entity.too.large') {
+        res.status(400).json({ error: 'Invalid upload' });
+        return;
+      }
+      next(err);
+    },
+  );
+
   app.use(jsonWithRawBody());
 
   const mirror = createMirrorReceiver(store, config.PROXY_IP_WHITELIST, {
