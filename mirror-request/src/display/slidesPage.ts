@@ -174,10 +174,17 @@ export function renderSlidesPage(): string {
     var wrap=document.createElement('div');
     wrap.className='shot';
     wrap.appendChild(photoFrame(photo,badgeText));
-    var name=document.createElement('p');
-    name.className='shotname';
-    name.textContent=(photo&&photo.name)||'';
-    wrap.appendChild(name);
+    // D9-04: guestNameEnabled is read here, not passed in — this is called
+    // from both render() (the hero tile) and drawSlide()'s own setInterval
+    // callback (the slideshow tile), and the module-level flag is what keeps
+    // both in step with the latest snapshot without threading a parameter
+    // through the rotation timer.
+    if(guestNameEnabled){
+      var name=document.createElement('p');
+      name.className='shotname';
+      name.textContent=(photo&&photo.name)||'';
+      wrap.appendChild(name);
+    }
     // Zero-one-many: a single slide draws NO rotation indicator at all.
     if(pipCount>1){
       var dots=document.createElement('div');
@@ -195,6 +202,12 @@ export function renderSlidesPage(): string {
   /* D-10/D-12 slideshow state, re-read from the SNAPSHOT on every update —
      nothing here is captured once at load. Identical to displayPage.ts. */
   var slides=[],slideIndex=0,slideTimer=null,slideKey='',slideDuration=6000;
+  // D9-04: the two per-event toggles, re-derived on every render() call from
+  // the snapshot's eventConfig (never captured once at load) and read by
+  // shotTile()/drawSlide() outside render()'s own call stack — see the
+  // comment on shotTile() above for why these live at module scope rather
+  // than as parameters.
+  var heroTakeoverEnabled=true,guestNameEnabled=true;
   function stopSlideshow(){ if(slideTimer){clearInterval(slideTimer);slideTimer=null} }
   function syncSlides(data){
     var cfg=data.eventConfig||{};
@@ -234,9 +247,19 @@ export function renderSlidesPage(): string {
   function render(data){
     applyEventConfig(data.eventConfig);
     var cfg=data.eventConfig||{};
+    // D9-04: compared against the literal false explicitly, never tested for
+    // truthiness — an absent field (a snapshot from a not-yet-restarted
+    // server) must mean ON, so today's behaviour holds through a rolling
+    // deploy rather than silently losing the hero moment or the guest name.
+    heroTakeoverEnabled=cfg.heroEnabled!==false;
+    guestNameEnabled=cfg.showGuestName!==false;
     syncSlides(data);
 
-    if(data.justCaptured){
+    // D9-04: heroTakeoverEnabled only gates whether this first branch is
+    // taken; with it false the chain falls through to the slideshow branch
+    // below, and the just-captured photo is still in data.photos
+    // (buildSnapshot() does not read this flag), so it still joins rotation.
+    if(heroTakeoverEnabled&&data.justCaptured){
       currentStageState='hero';
       hero.innerHTML='';
       hero.appendChild(shotTile(data.justCaptured,'Ảnh vừa chụp',1,0));

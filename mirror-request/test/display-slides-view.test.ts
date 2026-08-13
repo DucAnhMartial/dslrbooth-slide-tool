@@ -329,3 +329,92 @@ describe('Wire — the two new toggles reach a live WS client (D9-04)', () => {
     expect(nulled?.heroEnabled).toBe(true);
   });
 });
+
+/**
+ * D9-04, Task 3: both toggles are EVENT configuration, so the slides screen
+ * honours them exactly as the default screen does — this is the slides-side
+ * half of that proof; test/display-default-view-regression.test.ts carries
+ * the default-page half.
+ */
+describe('Slides screen — D9-04, both toggles honoured (hero takeover + guest name)', () => {
+  it('derives the hero-takeover flag by explicit comparison against false, and gates the takeover branch on it', () => {
+    // An absent field must mean ON — `!== false`, never a truthiness test —
+    // so a snapshot from a not-yet-restarted server keeps today's behaviour.
+    expect(SLIDES_HTML).toMatch(/heroTakeoverEnabled\s*=\s*cfg\.heroEnabled\s*!==\s*false/);
+    expect(SLIDES_HTML).toMatch(/if\s*\(\s*heroTakeoverEnabled\s*&&\s*data\.justCaptured\s*\)/);
+  });
+
+  it('derives the guest-name flag the same way, and appends the name element only when it is set', () => {
+    expect(SLIDES_HTML).toMatch(/guestNameEnabled\s*=\s*cfg\.showGuestName\s*!==\s*false/);
+    const shotTileFn = SLIDES_HTML.slice(SLIDES_HTML.indexOf('function shotTile'));
+    const shotTileBody = shotTileFn.slice(0, shotTileFn.indexOf('/* D-10/D-12 slideshow state'));
+    expect(shotTileBody).toMatch(/if\s*\(\s*guestNameEnabled\s*\)\s*\{[\s\S]{0,200}shotname/);
+  });
+});
+
+describe('Wire — both toggles, applied at the buildSnapshot() level (D9-04)', () => {
+  /** Reaches the private builder directly, exactly as
+   * display-hero-moment.test.ts's snapshotOf() does. */
+  function snapshotOf(display: DisplayServer): DisplaySnapshot {
+    return (display as unknown as { buildSnapshot(): DisplaySnapshot }).buildSnapshot();
+  }
+  function makeQueue(store: LocalStore): Partial<QueueService> {
+    return {
+      getQueuePosition: () => undefined,
+      getQueueLength: () => store.getQueueLength(),
+      getAnnouncement: () => null,
+    };
+  }
+  function makeAgent(): Partial<AgentServer> {
+    return { isAgentOnline: () => true };
+  }
+
+  it('with hero_enabled off, justCaptured is still populated and the same photo heads the rotation array', () => {
+    const store = makeStore();
+    const event = store.createEvent({ name: 'Sự kiện tắt hero' });
+    store.setActiveEvent(event.id);
+    store.updateEvent(event.id, { hero_enabled: 0 });
+    store.recordEventPhoto({
+      jobId: 'job-hero-off',
+      eventId: event.id,
+      guestName: 'Khách vừa chụp',
+      photoUrl: 'https://fotoshare.co/i/hero-off',
+      capturedAt: Date.now(),
+    });
+
+    const display = new DisplayServer(makeQueue(store) as QueueService, makeAgent() as AgentServer, store, {
+      heroMomentDurationMs: 12_000,
+    });
+    const snapshot = snapshotOf(display);
+
+    // The wire is unaffected by the toggle — buildSnapshot() never reads it.
+    // The rendering DECISION to skip the takeover is the page's, proved
+    // above by the SLIDES_HTML guard regex; the human-visible half of this
+    // claim (no takeover actually drawn) is judged by plan 09-02's gate.
+    expect(snapshot.justCaptured).not.toBeNull();
+    expect(snapshot.eventConfig.heroEnabled).toBe(false);
+    expect(snapshot.photos[0]?.photoUrl).toBe('https://fotoshare.co/i/hero-off');
+  });
+
+  it('with show_guest_name off, the wire still carries the name — only the page decides not to draw it', () => {
+    const store = makeStore();
+    const event = store.createEvent({ name: 'Sự kiện tắt tên' });
+    store.setActiveEvent(event.id);
+    store.updateEvent(event.id, { show_guest_name: 0 });
+    store.recordEventPhoto({
+      jobId: 'job-name-off',
+      eventId: event.id,
+      guestName: 'Khách ẩn tên',
+      photoUrl: 'https://fotoshare.co/i/name-off',
+      capturedAt: Date.now() - 3_600_000, // outside the hero window
+    });
+
+    const display = new DisplayServer(makeQueue(store) as QueueService, makeAgent() as AgentServer, store, {
+      heroMomentDurationMs: 12_000,
+    });
+    const snapshot = snapshotOf(display);
+
+    expect(snapshot.eventConfig.showGuestName).toBe(false);
+    expect(snapshot.photos[0]?.name).toBe('Khách ẩn tên');
+  });
+});

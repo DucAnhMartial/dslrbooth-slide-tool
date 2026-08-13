@@ -44,6 +44,40 @@ describe('Default room screen — the D9-02 regression pin (bare /display-screen
   });
 });
 
+/**
+ * D9-04, Task 3: both toggles are EVENT configuration, so the default screen
+ * honours them exactly as the slides screen does — this is the default-page
+ * half of that proof; test/display-slides-view.test.ts carries the
+ * slides-side half plus the shared snapshot-level assertions.
+ */
+describe('Default room screen — D9-04, both toggles honoured (hero takeover + guest name)', () => {
+  it('derives the hero-takeover flag by explicit comparison against false, and gates the takeover branch on it', () => {
+    expect(HTML).toMatch(/heroTakeoverEnabled\s*=\s*cfg\.heroEnabled\s*!==\s*false/);
+    expect(HTML).toMatch(/if\s*\(\s*heroTakeoverEnabled\s*&&\s*data\.justCaptured\s*\)/);
+  });
+
+  it('derives the guest-name flag the same way, and appends the name element only when it is set', () => {
+    expect(HTML).toMatch(/guestNameEnabled\s*=\s*cfg\.showGuestName\s*!==\s*false/);
+    const shotTileFn = HTML.slice(HTML.indexOf('function shotTile'));
+    const shotTileBody = shotTileFn.slice(0, shotTileFn.indexOf('/* D-10/D-12 slideshow state'));
+    expect(shotTileBody).toMatch(/if\s*\(\s*guestNameEnabled\s*\)\s*\{[\s\S]{0,200}shotname/);
+  });
+
+  it('leaves the sidebar untouched: the queue list renders regardless of the guest-name toggle', () => {
+    // The toggle governs the name shown WITH A PHOTO, not the waiting list —
+    // a different thing, per 09-CONTEXT.md D9-04.
+    expect(HTML).toContain('id="queue"');
+    expect(HTML).toContain("nm.className='qname'");
+  });
+
+  it('does not reorder the stage-precedence chain: announcing, capturing, slideshow and idle are all still present', () => {
+    expect(HTML).toContain("data.boothState==='ANNOUNCING'");
+    expect(HTML).toContain("data.boothState==='BUSY'");
+    expect(HTML).toContain('slides.length>=1');
+    expect(HTML).toContain('renderIdle(cfg)');
+  });
+});
+
 describe('maybeBroadcast() diff guard — the two new EventConfig fields cannot flood the venue (T-09-05, D-09)', () => {
   let storeCounter = 0;
   function uniqueStorePath(): string {
