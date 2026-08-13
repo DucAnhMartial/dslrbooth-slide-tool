@@ -111,6 +111,7 @@ export function pickSafeAgentConfig(input: Record<string, unknown> | undefined):
  */
 export interface AgentConfigSource {
   getAgentConfig(): Record<string, unknown> | undefined;
+  hasAgentConfigRow(): boolean;
   saveAgentConfig(next: Record<string, unknown>): void;
 }
 
@@ -126,14 +127,26 @@ export interface AgentConfigSource {
  * An empty row is seeded rather than answered empty: a booth asking for its
  * configuration before an operator has ever opened the CMS should be told what
  * it already believes, not told nothing.
+ *
+ * A CORRUPT row is answered the same way but NOT written. `getAgentConfig()`
+ * reports `undefined` for both "no row" and "unparseable row", and seeding over
+ * the second rotates the corrupt blob into `previous_json` — destroying D-18's
+ * one step back at the moment the operator would reach for it. The booth still
+ * gets a usable answer; the operator still gets their history. Recovery is a
+ * re-save from the CMS, which overwrites the corrupt current in the normal way
+ * (Phase 8 code review, WR-07).
  */
 export function readAgentConfigForAgent(store: AgentConfigSource): Record<string, unknown> {
   const stored = store.getAgentConfig();
-  if (!stored) {
-    const seeded = { ...DEFAULT_AGENT_CONFIG };
-    store.saveAgentConfig(seeded);
-    log.info('Seeded agent_config with the shipped defaults on first Agent request');
-    return seeded;
+  if (stored) return pickSafeAgentConfig(stored);
+
+  if (store.hasAgentConfigRow()) {
+    log.warn('agent_config row is unreadable — answering with defaults WITHOUT writing over it');
+    return { ...DEFAULT_AGENT_CONFIG };
   }
-  return pickSafeAgentConfig(stored);
+
+  const seeded = { ...DEFAULT_AGENT_CONFIG };
+  store.saveAgentConfig(seeded);
+  log.info('Seeded agent_config with the shipped defaults on first Agent request');
+  return seeded;
 }

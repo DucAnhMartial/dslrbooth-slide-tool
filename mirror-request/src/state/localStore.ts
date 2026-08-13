@@ -1225,6 +1225,24 @@ export class LocalStore {
   // Phase 8 — Agent configuration with one step of history (D-18)
   // ---------------------------------------------------------------------
 
+  /**
+   * Whether the row EXISTS, regardless of whether its blob parses.
+   *
+   * `getAgentConfig()` answers `undefined` for two different worlds — "never
+   * configured" and "configured, but the blob is corrupt" — and a caller that
+   * responds to the first by WRITING must not take that action in the second.
+   * Seeding over a corrupt row rotates the corrupt blob into `previous_json`
+   * and destroys D-18's one step back at the exact moment it would be reached
+   * for (Phase 8 code review, WR-07). This is the seam that keeps the two
+   * apart.
+   */
+  hasAgentConfigRow(): boolean {
+    const row = this.db.prepare('SELECT 1 AS present FROM agent_config WHERE id = 1').get() as
+      | { present: number }
+      | undefined;
+    return row !== undefined;
+  }
+
   getAgentConfig(): Record<string, unknown> | undefined {
     const row = this.db.prepare('SELECT current_json FROM agent_config WHERE id = 1').get() as
       | { current_json: string }
@@ -1234,6 +1252,8 @@ export class LocalStore {
       return JSON.parse(row.current_json) as Record<string, unknown>;
     } catch {
       // A corrupt blob must not take the CMS down; the operator re-saves.
+      // Callers that would WRITE on `undefined` must consult
+      // `hasAgentConfigRow()` first — see its docstring.
       logger.warn('agent_config.current_json is not valid JSON — treating as unset');
       return undefined;
     }
@@ -1276,16 +1296,27 @@ export class LocalStore {
     if (!row?.previous_json) return undefined;
 
     const restored = row.previous_json;
+
+    // PARSE BEFORE WRITING. The original order wrote previous_json into
+    // current_json and only then discovered it would not parse — so a corrupt
+    // previous took the working current down with it and returned undefined,
+    // leaving the operator with no configuration and no step back (the same
+    // defect as WR-07, reached from the other end).
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(restored) as Record<string, unknown>;
+    } catch {
+      logger.warn(
+        'agent_config.previous_json is not valid JSON — refusing the restore and leaving current intact',
+      );
+      return undefined;
+    }
+
     this.db.prepare(
       `UPDATE agent_config SET current_json = ?, previous_json = NULL, updated_at = ? WHERE id = 1`
     ).run(restored, new Date().toISOString());
 
-    try {
-      return JSON.parse(restored) as Record<string, unknown>;
-    } catch {
-      logger.warn('agent_config.previous_json is not valid JSON — restored value is unusable');
-      return undefined;
-    }
+    return parsed;
   }
 
   close(): void {
