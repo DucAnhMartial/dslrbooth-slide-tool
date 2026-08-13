@@ -334,11 +334,31 @@ export class LocalStore {
       -- header above states for expired rows, and for a related reason: these
       -- rows are a guest-facing record, and the operator — not a timer — owns
       -- when a wedding's photos stop existing.
+      -- TWO URLs, and they are not interchangeable.
+      --
+      -- photo_url is dslrBooth's SHARE PAGE (param2, e.g.
+      -- https://fotoshare.co/i/3knbmax) — a text/html page the guest opens to
+      -- view and download. It is what notificationService delivers, and
+      -- NOT-01/NOT-02 depend on it staying exactly that.
+      --
+      -- image_url is the FILE that page advertises in its og:image
+      -- (e.g. https://cdn-bz-op.fotoshare.co/.../..._1x.jpg, image/jpeg) —
+      -- what goes in an <img src> on the wall. Measured 2026-08-13: putting
+      -- the share page in an <img> draws a broken image on every television,
+      -- because a page is not a picture.
+      --
+      -- NULLABLE on purpose. It is resolved from a third party that can be
+      -- slow, down, or re-templated, and the row is written the instant the
+      -- upload lands rather than waiting on that. A null here means "not
+      -- resolved (yet, or ever)", and every display projection falls back to
+      -- photo_url — which is precisely today's behaviour, including its
+      -- broken-image G4 placeholder.
       CREATE TABLE IF NOT EXISTS event_photo (
         jobId       TEXT PRIMARY KEY,
         event_id    TEXT NOT NULL,
         guest_name  TEXT NOT NULL,
         photo_url   TEXT NOT NULL,
+        image_url   TEXT,
         captured_at INTEGER NOT NULL
       );
       -- D-18: the Agent's remotely-editable configuration, plus ONE step of
@@ -437,6 +457,17 @@ export class LocalStore {
     }
     if (!hasHeroEnabled) {
       this.db.exec('ALTER TABLE event ADD COLUMN hero_enabled INTEGER NOT NULL DEFAULT 1');
+    }
+
+    // event_photo.image_url — the file behind dslrBooth's share page. See the
+    // CREATE TABLE above for why one URL could not serve both the guest's
+    // notification and the wall's <img src>. NULLABLE with no default, so an
+    // existing row keeps its share URL and resolves to null here, which every
+    // display projection reads as "fall back to photo_url" — i.e. exactly the
+    // behaviour that database had a moment before this ran.
+    const photoColumns = this.db.prepare("PRAGMA table_info('event_photo')").all() as Array<{ name: string }>;
+    if (!photoColumns.some((c) => c.name === 'image_url')) {
+      this.db.exec('ALTER TABLE event_photo ADD COLUMN image_url TEXT');
     }
   }
 
@@ -1183,6 +1214,26 @@ export class LocalStore {
   }
 
   /**
+   * Attaches the resolved direct image URL to a photo already on record.
+   *
+   * A SEPARATE step from `recordEventPhoto()` on purpose: the row is written
+   * the instant the upload lands, and resolving the share page is a network
+   * call to a third party that may be slow, may fail, and may never succeed.
+   * Making the insert wait on it would trade a guaranteed history row for a
+   * prettier screen — the wrong way round. `photo_url` is never touched here;
+   * the guest's link must survive whatever happens to the wall's.
+   *
+   * Returns false when no such photo exists, which is the honest answer for a
+   * resolution that finished after its event was deleted.
+   */
+  setEventPhotoImageUrl(jobId: string, imageUrl: string): boolean {
+    const result = this.db
+      .prepare('UPDATE event_photo SET image_url = ? WHERE jobId = ?')
+      .run(imageUrl, jobId);
+    return result.changes === 1;
+  }
+
+  /**
    * The newest capture for one event, as a NARROW projection — no jobId, no
    * event_id, no raw row. `buildSnapshot()` calls this for the hero moment
    * (plan 08-02), and the same reasoning that keeps `getNextQueuedJob()` out
@@ -1193,12 +1244,21 @@ export class LocalStore {
   getMostRecentEventPhoto(
     eventId: string,
   ): { photoUrl: string; guestName: string; capturedAt: number } | undefined {
+    // image_url FIRST, photo_url as the fallback. This projection feeds an
+    // <img src> on the wall, so it wants the file; an unresolved row keeps
+    // today's behaviour rather than vanishing from the screen.
     const row = this.db.prepare(
-      `SELECT photo_url, guest_name, captured_at FROM event_photo
+      `SELECT photo_url, image_url, guest_name, captured_at FROM event_photo
        WHERE event_id = ? ORDER BY captured_at DESC LIMIT 1`
-    ).get(eventId) as { photo_url: string; guest_name: string; captured_at: number } | undefined;
+    ).get(eventId) as
+      | { photo_url: string; image_url: string | null; guest_name: string; captured_at: number }
+      | undefined;
     if (!row) return undefined;
-    return { photoUrl: row.photo_url, guestName: row.guest_name, capturedAt: row.captured_at };
+    return {
+      photoUrl: row.image_url ?? row.photo_url,
+      guestName: row.guest_name,
+      capturedAt: row.captured_at,
+    };
   }
 
   /** Newest first, for the CMS photo-history page (paginated at 50/page). */
@@ -1206,15 +1266,18 @@ export class LocalStore {
     eventId: string,
     opts: { limit: number; offset: number },
   ): Array<{ jobId: string; photoUrl: string; guestName: string; capturedAt: number }> {
+    // Same image_url-then-photo_url preference as getMostRecentEventPhoto:
+    // this list feeds both the slideshow and the CMS thumbnails, and both
+    // want the file rather than the page.
     const rows = this.db.prepare(
-      `SELECT jobId, photo_url, guest_name, captured_at FROM event_photo
+      `SELECT jobId, photo_url, image_url, guest_name, captured_at FROM event_photo
        WHERE event_id = ? ORDER BY captured_at DESC LIMIT ? OFFSET ?`
     ).all(eventId, opts.limit, opts.offset) as Array<{
-      jobId: string; photo_url: string; guest_name: string; captured_at: number;
+      jobId: string; photo_url: string; image_url: string | null; guest_name: string; captured_at: number;
     }>;
     return rows.map((row) => ({
       jobId: row.jobId,
-      photoUrl: row.photo_url,
+      photoUrl: row.image_url ?? row.photo_url,
       guestName: row.guest_name,
       capturedAt: row.captured_at,
     }));

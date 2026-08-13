@@ -3,6 +3,7 @@ import type { AgentServer } from '../agent/agentServer';
 import { getConfig } from '../config';
 import type { EnvConfig } from '../types';
 import { labelLogger } from '../logging/logger';
+import { resolveDirectImageUrl } from '../display/imageUrlResolver';
 
 // Exported so tests can spy on the exact instance this module logs through.
 export const queueLogger = labelLogger('queue');
@@ -140,6 +141,9 @@ export class QueueService {
   private captureCounts = new Map<string, number>();
   private pendingPrintExpiryMs: number;
   private noPhotoCloseDelayMs: number;
+  private resolveImageUrl: (shareUrl: string) => Promise<string | undefined> =
+    (shareUrl) => resolveDirectImageUrl(shareUrl);
+
   private sendCommandCb: ((payload: {
     type: 'command'; action: 'start_session'; jobId: string; mode?: string
   }) => void) | null = null;
@@ -292,6 +296,16 @@ export class QueueService {
   }
   bindAnnouncement(cb: NonNullable<QueueService['sendAnnouncementCb']>): void {
     this.sendAnnouncementCb = cb;
+  }
+  /**
+   * The share-page-to-image-file resolver, injectable for the same reason
+   * every timing knob in this service is: a test must be able to drive it
+   * without reaching a third-party host over the network, and a suite that
+   * depended on fotoshare.co being up would go red whenever someone's wifi
+   * did. Defaults to the real one.
+   */
+  bindImageUrlResolver(fn: (shareUrl: string) => Promise<string | undefined>): void {
+    this.resolveImageUrl = fn;
   }
     bindNotificationService(ns: { sendPhotoLink: (jid: string, url: string) => Promise<void> } | null): void {
       this.notificationService = ns;
@@ -1024,6 +1038,24 @@ export class QueueService {
         photoUrl,
         capturedAt: Date.now(),
       });
+
+      // The row is now safe. ONLY THEN do we go and ask a third party what
+      // the actual picture's address is.
+      //
+      // `photoUrl` here is dslrBooth's share PAGE, which is what the guest
+      // must be sent — but a page in an <img src> draws a broken image on
+      // every television, which is exactly what happened on 2026-08-13.
+      // `resolveDirectImageUrl` reads the og:image off that page and
+      // `setEventPhotoImageUrl` attaches it; the display projections prefer
+      // it and fall back to the share URL when it is absent.
+      //
+      // DELIBERATELY NOT AWAITED. This method is called from the synchronous
+      // Agent-event path, and a slow or hanging fotoshare must never delay a
+      // capture, hold the booth, or throw into an event handler. The screen
+      // re-reads on every tick, so the picture swaps in when the answer
+      // arrives — typically well inside the 12s hero window — and if it never
+      // arrives the screen behaves exactly as it did before this change.
+      void this.resolvePhotoImageUrl(jobId, photoUrl);
       return;
     }
     // T-08-08: a template string, never an object. The winston masking
@@ -1033,6 +1065,26 @@ export class QueueService {
     queueLogger.warn(
       `Print upload for ${jobId} resolved but no active event — photo not recorded to history`,
     );
+  }
+
+  /**
+   * Resolves one photo's share page to its image file, in the background.
+   *
+   * Swallows everything. It is fire-and-forget from a synchronous event
+   * handler, so an unhandled rejection here would be an unhandled rejection in
+   * the process — and the worst outcome this is allowed to produce is a
+   * screen that behaves the way it did yesterday.
+   */
+  private async resolvePhotoImageUrl(jobId: string, shareUrl: string): Promise<void> {
+    try {
+      const direct = await this.resolveImageUrl(shareUrl);
+      if (!direct) return;
+      if (this.store.setEventPhotoImageUrl(jobId, direct)) {
+        queueLogger.info(`Resolved display image for ${jobId}`);
+      }
+    } catch (err) {
+      queueLogger.warn(`Image resolution failed for ${jobId}: ${(err as Error).message}`);
+    }
   }
 
   private async sendNotification(jobId: string, photoUrl: string): Promise<void> {
