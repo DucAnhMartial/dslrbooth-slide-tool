@@ -91,6 +91,15 @@ export const PHOTO_DURATION_RANGE = { min: 2000, max: 30_000 } as const;
  */
 export const SCREEN_URL_PATH = '/display-screen';
 
+/**
+ * D9-06: the slides-only variant of the SAME fixed URL above, selected by
+ * `?view=slides` (D9-01) — not a second screen identity, not a per-event
+ * link. It belongs beside `SCREEN_URL_PATH` in the same fixed screen-address
+ * card for the same reason: there is one string to copy per screen TYPE, and
+ * the D-12 test asserts that count does not grow with the event list.
+ */
+export const SLIDES_SCREEN_URL_PATH = `${SCREEN_URL_PATH}?view=slides`;
+
 const FONT_LABELS: Record<string, string> = {
   'system-ui': 'Mặc định hệ thống (system-ui)',
   'be-vietnam-pro': 'Be Vietnam Pro (chữ không chân)',
@@ -154,6 +163,17 @@ const PREVIEW_STYLES = `
       display:grid;place-items:center;overflow:hidden;margin-bottom:var(--sp-sm)}
     .preview img{max-width:100%;max-height:100%;object-fit:contain}
     .preview .placeholder{color:var(--text-muted);font-size:14px;text-align:center;padding:var(--sp-sm)}
+`;
+
+/**
+ * D9-04: the shared `label{display:block}` and the 44px minimum-height rules
+ * above are written for text inputs — a checkbox stretched by them looks like
+ * a rendering bug, not a control. This block scopes the checkbox row to its
+ * own flex layout instead of overriding the shared rules globally.
+ */
+const CHECKBOX_STYLES = `
+    .checkbox-row{display:flex;align-items:center;gap:var(--sp-sm);min-height:44px;margin-bottom:0;cursor:pointer}
+    .checkbox-row input[type=checkbox]{width:20px;height:20px;flex:none;min-height:0}
 `;
 
 /**
@@ -284,12 +304,23 @@ export function renderCmsEventListPage(data: {
   </div>
   <div class="card">
     <h2>Địa chỉ màn hình phòng</h2>
-    <p class="muted">Mở địa chỉ này trên mọi TV trong phòng. Địa chỉ giống nhau cho mọi sự kiện —
+    <p class="muted">Mở địa chỉ phù hợp trên mỗi TV trong phòng. Địa chỉ giống nhau cho mọi sự kiện —
       màn hình luôn hiển thị sự kiện đang hoạt động, không cần sửa lại khi đổi khách.</p>
-    <div class="actions">
-      <code id="screenUrl">${SCREEN_URL_PATH}</code>
-      <button class="secondary" type="button" id="copyUrl" data-nonmutating="copy">Sao chép địa chỉ</button>
-      <span class="muted" id="copyState" role="status"></span>
+    <div class="screenUrlRow">
+      <p class="muted"><strong>Loại 1 — Thứ tự + slide</strong> (màn hình hiện tại, không đổi)</p>
+      <div class="actions">
+        <code id="screenUrl">${SCREEN_URL_PATH}</code>
+        <button class="secondary" type="button" id="copyUrl" data-nonmutating="copy">Sao chép địa chỉ</button>
+        <span class="muted" id="copyState" role="status"></span>
+      </div>
+    </div>
+    <div class="screenUrlRow">
+      <p class="muted"><strong>Loại 2 — Chỉ slide</strong> (chỉ có ảnh, không có danh sách chờ)</p>
+      <div class="actions">
+        <code id="slidesUrl">${SLIDES_SCREEN_URL_PATH}</code>
+        <button class="secondary" type="button" id="copySlidesUrl" data-nonmutating="copy">Sao chép địa chỉ</button>
+        <span class="muted" id="copySlidesState" role="status"></span>
+      </div>
     </div>
   </div>
 </main>`;
@@ -303,21 +334,29 @@ export function renderCmsEventListPage(data: {
     .badge{color:var(--accent);font-weight:600}
     .empty{padding:var(--sp-2xl) 0;text-align:center}
     code{font-size:16px;background:var(--bg);padding:var(--sp-sm) var(--sp-md);border-radius:6px}
+    .screenUrlRow{margin-bottom:var(--sp-md)}
+    .screenUrlRow:last-child{margin-bottom:0}
 `;
 
   // Copying a URL mutates nothing, so it deliberately does NOT take the
   // in-flight state — G1 is about writes, and disabling a read-only control
-  // would be noise.
+  // would be noise. D9-06: the same copy behaviour serves both labeled
+  // screen-address types, parameterized rather than duplicated a second time.
   const script = `
-  document.querySelector('#copyUrl').addEventListener('click', function(){
-    var full = location.origin + ${JSON.stringify(SCREEN_URL_PATH)};
-    var done = function(){ document.querySelector('#copyState').textContent = 'Đã sao chép'; };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(full).then(done, function(){ document.querySelector('#copyState').textContent = full; });
-    } else {
-      document.querySelector('#copyState').textContent = full;
-    }
-  });
+  function bindCopy(buttonId, stateId, path){
+    var button = document.querySelector('#' + buttonId);
+    button.addEventListener('click', function(){
+      var full = location.origin + path;
+      var done = function(){ document.querySelector('#' + stateId).textContent = 'Đã sao chép'; };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(full).then(done, function(){ document.querySelector('#' + stateId).textContent = full; });
+      } else {
+        document.querySelector('#' + stateId).textContent = full;
+      }
+    });
+  }
+  bindCopy('copyUrl', 'copyState', ${JSON.stringify(SCREEN_URL_PATH)});
+  bindCopy('copySlidesUrl', 'copySlidesState', ${JSON.stringify(SLIDES_SCREEN_URL_PATH)});
 `;
 
   return page('Bảng điều khiển sự kiện', styles, body, script);
@@ -397,6 +436,23 @@ function colorField(name: string, label: string, value: string): string {
   return `<div class="field">
         <label for="${name}">${label}</label>
         <input id="${name}" name="${name}" type="color" value="${escapeHtml(value)}">
+      </div>`;
+}
+
+/**
+ * D9-04: one of the two per-event display toggles. The wrapper row puts the
+ * input and its label side by side (see CHECKBOX_STYLES) rather than the
+ * block layout every text field above uses, with a hint stating plainly which
+ * screens the toggle affects — both toggles are event configuration, so both
+ * change the default layout as well as the slides-only view.
+ */
+function checkboxField(opts: { name: string; label: string; checked: boolean; hint: string }): string {
+  return `<div class="field">
+        <label class="checkbox-row" for="${opts.name}">
+          <input id="${opts.name}" name="${opts.name}" type="checkbox"${opts.checked ? ' checked' : ''}>
+          <span>${opts.label}</span>
+        </label>
+        <p class="muted">${opts.hint}</p>
       </div>`;
 }
 
@@ -554,6 +610,18 @@ export function renderCmsEventFormPage(data: {
           <select id="layout_style" name="layout_style">${layoutOptions}</select>
         </div>
       </div>
+      ${checkboxField({
+        name: 'show_guest_name',
+        label: 'Hiển thị tên khách trên ảnh',
+        checked: event.showGuestName,
+        hint: 'Áp dụng cho cả màn hình mặc định và màn hình chỉ slide — tắt để ẩn tên khách khỏi mọi ảnh trên cả hai màn hình.',
+      })}
+      ${checkboxField({
+        name: 'hero_enabled',
+        label: 'Hiệu ứng "ảnh vừa chụp" phóng to',
+        checked: event.heroEnabled,
+        hint: 'Áp dụng cho cả màn hình mặc định và màn hình chỉ slide — tắt để ảnh vừa chụp vào thẳng vòng trình chiếu, không phóng to riêng trước.',
+      })}
 
       <div class="actions">
         <button type="submit" id="saveBtn" data-mutating data-inflight-label="Đang lưu…">Lưu cấu hình</button>
@@ -571,7 +639,14 @@ export function renderCmsEventFormPage(data: {
   function collect(){
     var payload = {};
     form.querySelectorAll('[name]').forEach(function(input){
-      if (input.type === 'number') {
+      // D9-04: a checkbox's .value is a constant string regardless of its
+      // checked state — without this branch the toggle would submit the
+      // same payload whether ticked or not, and the control would silently
+      // do nothing. This branch MUST run before the generic non-number path
+      // below, which reads .value.
+      if (input.type === 'checkbox') {
+        payload[input.name] = input.checked;
+      } else if (input.type === 'number') {
         payload[input.name] = input.value === '' ? null : Number(input.value);
       } else {
         payload[input.name] = input.value;
@@ -643,7 +718,7 @@ export function renderCmsEventFormPage(data: {
   });
 `;
 
-  return page('Cấu hình sự kiện', PREVIEW_STYLES, body, script);
+  return page('Cấu hình sự kiện', PREVIEW_STYLES + CHECKBOX_STYLES, body, script);
 }
 
 // ---------------------------------------------------------------------------

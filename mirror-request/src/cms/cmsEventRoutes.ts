@@ -134,6 +134,23 @@ function enumField(values: readonly string[]): FieldValidator {
 }
 
 /**
+ * D9-04: a real JSON boolean, mapped to 1 or 0 — nothing else. The form's
+ * `collect()` always submits a genuine boolean for a checkbox input, so a
+ * string (`"true"`), a number, or `null` is refused rather than coerced: a
+ * permissive parser at this boundary would let a hand-built request write a
+ * value the column's domain does not have (T-09-08).
+ *
+ * This validator must NEVER return `null`. `show_guest_name` and
+ * `hero_enabled` are both `INTEGER NOT NULL`, and `updateEvent()` maps
+ * `patch[column] ?? null` — a null-yielding validator here would turn a
+ * legitimate save into a database constraint error mid-event (T-09-09).
+ * Refusing the whole patch (returning `undefined`) is what
+ * `validateEventPatch()` treats as "write nothing"; only `1` or `0` reach the
+ * database.
+ */
+const boolField: FieldValidator = (raw) => (typeof raw === 'boolean' ? (raw ? 1 : 0) : undefined);
+
+/**
  * A bounded integer. Out of range is REFUSED, never clamped: a silent clamp
  * leaves the operator's form and the room screen disagreeing about what was
  * saved, and the operator finds out from the wall rather than from the CMS.
@@ -166,6 +183,8 @@ const FIELD_VALIDATORS: Record<string, FieldValidator> = {
   qr_cta_text: textField(FIELD_CAPS.qr_cta_text),
   photo_count: intField(PHOTO_COUNT_RANGE),
   photo_duration_ms: intField(PHOTO_DURATION_RANGE),
+  show_guest_name: boolField,
+  hero_enabled: boolField,
 };
 
 /**
