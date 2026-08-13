@@ -117,7 +117,7 @@ if either of these is missing or left as a placeholder:
 | `DISPLAY_IP_WHITELIST` | Must be set to the real display-machine address(es), comma-separated. Added in Phase 5 (see §9). Unlike `PROXY_IP_WHITELIST`, there is no loopback default that could be mistaken for "configured" — an empty list is rejected outright. | Startup throws: `DISPLAY_IP_WHITELIST must be configured in production with the real display-machine addresses (D-09, Assumption A4)` |
 | `CMS_IP_WHITELIST` | Must be set to the real operator-laptop address(es), comma-separated. Added in Phase 8 (see §12). **It is NOT `DISPLAY_IP_WHITELIST`** — see the warning below the table. Empty is rejected outright, same as the display list. | Startup throws: `CMS_IP_WHITELIST must be configured in production with the real operator-laptop addresses (D-13) — it is NOT DISPLAY_IP_WHITELIST` |
 | `CMS_USERNAME` | Must be set and must not still read `replace-with-cms-username`. Required in **every** environment, not only production — the CMS has exactly one account (D-14) and there is no fallback login. | Startup throws: `CMS_USERNAME must be configured (not placeholder)` |
-| `CMS_PASSWORD_HASH` | Must be set to a salted scrypt digest in `salt:hash` hex form and must not still read `replace-with-cms-password-hash`. Required in every environment. **Never a plaintext password** — mint it with `npm run cms:hash-password -- 'the-password'` (§12). | Startup throws: `CMS_PASSWORD_HASH must be configured (not placeholder)` |
+| `CMS_PASSWORD_HASH` | Must be set to a salted scrypt digest in `salt:hash` hex form and must not still read `replace-with-cms-password-hash`. Required in every environment. **Never a plaintext password** — mint it with `npm run cms:hash-password` and type the password at the prompt (§12). Passing it as an argument is refused. | Startup throws: `CMS_PASSWORD_HASH must be configured (not placeholder)` |
 
 ⚠ **`CMS_IP_WHITELIST` and `DISPLAY_IP_WHITELIST` must not be set to the same
 value.** They describe two different audiences on two different network paths:
@@ -197,6 +197,23 @@ are in the fail-fast table above; see §12 for the console these govern):
 | `CMS_SESSION_COOKIE_NAME` | `cms_session` | The name of the operator's session cookie. Override only if it collides with something else served from the same host. The cookie carries `HttpOnly` and `SameSite=Lax` and deliberately **no `Secure` flag** — see §12's security posture, which explains why and what that costs. |
 | `CMS_UPLOAD_DIR` | `./data/uploads` | Where uploaded logo/background/QR images are written. Must stay **outside** the code directory (D-15): a written file must never land somewhere the process could later execute or serve as source. The directory is created if missing. Files here are served only through `GET /uploads/:filename`, which types them from their own bytes and can emit only PNG, JPEG, GIF or WebP. |
 | `CMS_UPLOAD_MAX_BYTES` | `5242880` (5 MiB) | The cap on one decoded image. Raising it also raises the JSON body limit on `POST /cms/api/assets`, which is derived from this value (`ceil(value × 4/3) + 65536`, for base64 inflation plus envelope) — the global 100 kb body limit stays in force on every other route, including `/on-register`. Lowering it does not shrink files already on disk. |
+
+Login throttle variables, added by the Phase 8 code review (WR-01). All three
+are optional with working defaults; **none is in `.env.example`**, so add them
+only if you need to change the shipped behaviour:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CMS_LOGIN_RATE_LIMIT_WINDOW_MS` | `900000` (15 min) | The fixed window a login budget is counted in, per source address. |
+| `CMS_LOGIN_RATE_LIMIT_MAX` | `10` | Attempts allowed per window per address, counting successes as well as failures. The eleventh gets `429` and the shipped Vietnamese "wait a few minutes" page, **without the password being examined at all** — so the refusal cannot differ between a right guess and a wrong one. An operator who has fumbled ten times in a quarter hour will not succeed on the eleventh, and the wait is short enough to sit out. |
+| `CMS_LOGIN_RATE_LIMIT_MAX_KEYS` | `1000` | Upper bound on distinct addresses tracked at once — bounds memory if someone rotates source addresses. |
+
+**Why this exists even though the CMS is already IP-gated:** a
+`CMS_IP_WHITELIST` entry is very often a whole venue subnet (`10.0.0.*`), and
+inside one an attacker previously had unlimited online guesses against a single
+scrypt hash. If you see repeated `CMS login throttled for <ip>` warnings,
+that is this control working — check §5's log vocabulary and find out whose
+device that address is.
 
 Session lifecycle variables added in Phase 7 (optional, working default —
 see §5 for the two anchors this governs):
@@ -1734,8 +1751,25 @@ The service is never given a plaintext password. Mint the digest **offline, on
 your own machine**, and paste the result into `.env`:
 
 ```bash
-cd mirror-request && npm run cms:hash-password -- 'the-password-you-chose'
+cd mirror-request && npm run cms:hash-password
 ```
+
+It prompts for the password and **does not echo it while you type**. For a
+scripted install, pipe it instead:
+
+```bash
+printf '%s\n' "$PASSWORD" | npm run cms:hash-password
+```
+
+**Passing the password as an argument is refused, on purpose** (Phase 8 code
+review, WR-04). The old `-- 'the-password'` form put the plaintext in your
+shell's history file and made it readable by every other process on the
+machine through `ps aux` and `/proc/<pid>/cmdline` for as long as the command
+ran. Both are checked more often on a shared machine than "does it touch
+disk", which was the only exposure the helper originally reasoned about. If
+you run it the old way it prints an explanation and exits non-zero rather than
+quietly working — an operator following an older note would otherwise keep the
+exposure while believing it fixed.
 
 It prints one line, `CMS_PASSWORD_HASH=<salt>:<hash>`. Replace the value in
 `.env` and restart the service.

@@ -373,12 +373,19 @@ describe('the upload body parser is larger than the global default, and only on 
 // ---------------------------------------------------------------------------
 
 describe('the offline password-hash helper (D-14)', () => {
+  /**
+   * Piped on STDIN, not passed as an argument. Phase 8's code review (WR-04)
+   * found the argv form exposed the master password to the shell's history
+   * file and to `ps` / `/proc/<pid>/cmdline`; the helper now refuses a
+   * positional argument outright, so this harness had to change with it.
+   */
   function runHelper(password: string): string {
-    return execFileSync(
-      'npx',
-      ['ts-node', '-T', 'scripts/hashCmsPassword.ts', password],
-      { cwd: process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-    ).trim();
+    return execFileSync('npx', ['ts-node', '-T', 'scripts/hashCmsPassword.ts'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      input: `${password}\n`,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
   }
 
   it('prints a CMS_PASSWORD_HASH line whose digest verifyPassword accepts, with a fresh salt each run', () => {
@@ -398,5 +405,19 @@ describe('the offline password-hash helper (D-14)', () => {
     expect(firstHash).not.toBe(secondHash);
     // The plaintext must appear nowhere in the output.
     expect(first).not.toContain('test-pass-123');
+  }, 60_000);
+
+  it('REFUSES a password passed as a command-line argument (WR-04)', () => {
+    // The regression guard for the fix itself. If a future edit restores argv
+    // support "for convenience", this fails — and the exposure it reopens is
+    // exactly the one an operator cannot see: the password sitting in their
+    // shell history long after the command finished.
+    expect(() =>
+      execFileSync('npx', ['ts-node', '-T', 'scripts/hashCmsPassword.ts', 'oops-in-argv'], {
+        cwd: process.cwd(),
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }),
+    ).toThrow();
   }, 60_000);
 });
