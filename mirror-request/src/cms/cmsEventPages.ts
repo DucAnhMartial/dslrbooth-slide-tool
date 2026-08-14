@@ -174,6 +174,23 @@ const PREVIEW_STYLES = `
 const CHECKBOX_STYLES = `
     .checkbox-row{display:flex;align-items:center;gap:var(--sp-sm);min-height:44px;margin-bottom:0;cursor:pointer}
     .checkbox-row input[type=checkbox]{width:20px;height:20px;flex:none;min-height:0}
+
+    /* CMS-08: the which-screen tag beside every field label. Colour-coded so
+       a glance down the form groups the settings by screen without reading
+       each one, and quiet enough that the label still reads first. */
+    .screentag{display:inline-block;margin-left:.5rem;padding:.1rem .5rem;border-radius:999px;
+      font-size:.7rem;font-weight:600;letter-spacing:.02em;vertical-align:middle;
+      border:1px solid currentColor;opacity:.85;white-space:nowrap}
+    .screentag.both{color:#2f6f4f}
+    .screentag.waiting{color:#2f5f8f}
+    .screentag.slides{color:#7a4a8f}
+    .screentag.none{color:#7a7a7a}
+
+    /* The legend, once at the top of the form. */
+    .screenlegend{display:flex;flex-wrap:wrap;gap:.75rem;align-items:center;
+      margin:0 0 var(--sp-md);padding:.75rem 1rem;border-radius:.6rem;
+      background:rgba(127,127,127,.08);font-size:.85rem}
+    .screenlegend b{font-weight:600}
 `;
 
 /**
@@ -417,6 +434,63 @@ export function renderCmsEventCreatePage(): string {
 // The configuration form
 // ---------------------------------------------------------------------------
 
+/**
+ * CMS-08: which screen does this field actually change?
+ *
+ * The form mixes settings for two different screens plus a couple that change
+ * nothing visible at all, and said so nowhere — an operator edited the QR, the
+ * background and the photo settings and reported seeing no change anywhere,
+ * partly because some of it genuinely did nothing and partly because the rest
+ * only shows on a screen they were not looking at.
+ *
+ * THE MAP IS DERIVED FROM THE PAGES, NOT FROM INTENT. Each entry below was
+ * read out of displayPage.ts and slidesPage.ts by listing every 'cfg.' they
+ * dereference; test/cms-field-screen-tags.test.ts re-derives it the same way
+ * and fails if a page starts or stops reading a field without this map being
+ * updated. A label that drifts from behaviour is worse than no label, because
+ * it is believed.
+ */
+export const SCREEN_TAG = {
+  both: { text: 'Cả hai màn', cls: 'both' },
+  waiting: { text: 'Màn chờ chụp', cls: 'waiting' },
+  slides: { text: 'Màn trình chiếu', cls: 'slides' },
+  cmsOnly: { text: 'Chỉ trong CMS', cls: 'none' },
+  inactive: { text: 'Chưa dùng', cls: 'none' },
+} as const;
+
+export type ScreenTagKey = keyof typeof SCREEN_TAG;
+
+/** Field name (the form's own `name` attribute) -> which screen it affects. */
+export const FIELD_SCREEN_MAP: Record<string, ScreenTagKey> = {
+  name: 'cmsOnly',
+  logo_url: 'both',
+  background_url: 'both',
+  color_dominant: 'both',
+  color_secondary: 'both',
+  color_accent: 'both',
+  color_text: 'both',
+  color_text_muted: 'both',
+  font_choice: 'both',
+  idle_heading: 'both',
+  idle_sub: 'both',
+  qr_cta_text: 'both',
+  qr_image_url: 'waiting',
+  photo_count: 'slides',
+  photo_duration_ms: 'slides',
+  show_guest_name: 'slides',
+  hero_enabled: 'slides',
+  layout_style: 'inactive',
+};
+
+function screenTag(fieldName: string): string {
+  const key = FIELD_SCREEN_MAP[fieldName];
+  if (!key) return '';
+  const tag = SCREEN_TAG[key];
+  return `<span class="screentag ${tag.cls}">${tag.text}</span>`;
+}
+
+// ---------------------------------------------------------------------------
+
 function textField(opts: {
   name: string;
   label: string;
@@ -425,7 +499,7 @@ function textField(opts: {
   hint?: string;
 }): string {
   return `<div class="field">
-        <label for="${opts.name}">${opts.label}</label>
+        <label for="${opts.name}">${opts.label}${screenTag(opts.name)}</label>
         <input id="${opts.name}" name="${opts.name}" type="text" maxlength="${opts.maxlength}"
           value="${escapeHtml(opts.value)}">
         ${opts.hint ? `<p class="muted">${opts.hint}</p>` : ''}
@@ -434,7 +508,7 @@ function textField(opts: {
 
 function colorField(name: string, label: string, value: string): string {
   return `<div class="field">
-        <label for="${name}">${label}</label>
+        <label for="${name}">${label}${screenTag(name)}</label>
         <input id="${name}" name="${name}" type="color" value="${escapeHtml(value)}">
       </div>`;
 }
@@ -450,7 +524,7 @@ function checkboxField(opts: { name: string; label: string; checked: boolean; hi
   return `<div class="field">
         <label class="checkbox-row" for="${opts.name}">
           <input id="${opts.name}" name="${opts.name}" type="checkbox"${opts.checked ? ' checked' : ''}>
-          <span>${opts.label}</span>
+          <span>${opts.label}${screenTag(opts.name)}</span>
         </label>
         <p class="muted">${opts.hint}</p>
       </div>`;
@@ -467,7 +541,7 @@ function assetField(opts: { name: string; label: string; value: string | null; h
     ? `<img src="${escapeHtml(opts.value)}" alt="">`
     : `<span class="placeholder">Chưa có ảnh</span>`;
   return `<div class="field">
-        <label for="${opts.name}_file">${opts.label}</label>
+        <label for="${opts.name}_file">${opts.label}${screenTag(opts.name)}</label>
         <div class="preview" id="${opts.name}_preview">${preview}</div>
         <input type="hidden" name="${opts.name}" id="${opts.name}" value="${escapeHtml(opts.value ?? '')}">
         <div class="actions">
@@ -522,6 +596,14 @@ export function renderCmsEventFormPage(data: {
     <p class="ok" id="saveOk" role="status" hidden>${SAVE_SUCCESS}</p>
     <p class="error" id="saveError" role="alert" hidden>${SAVE_ERROR}</p>
     <form id="eventForm" data-event-id="${id}">
+      <p class="screenlegend">
+        <b>Mỗi cài đặt bên dưới có nhãn cho biết nó đổi màn nào:</b>
+        <span class="screentag both">${SCREEN_TAG.both.text}</span>
+        <span class="screentag waiting">${SCREEN_TAG.waiting.text}</span>
+        <span class="screentag slides">${SCREEN_TAG.slides.text}</span>
+        <span class="screentag none">${SCREEN_TAG.cmsOnly.text}</span>
+        <span class="screentag none">${SCREEN_TAG.inactive.text}</span>
+      </p>
       <h2>Tên sự kiện</h2>
       ${textField({
         name: 'name',
@@ -558,7 +640,7 @@ export function renderCmsEventFormPage(data: {
 
       <h2>Chữ và nội dung màn hình chờ</h2>
       <div class="field">
-        <label for="font_choice">Phông chữ</label>
+        <label for="font_choice">Phông chữ${screenTag('font_choice')}</label>
         <select id="font_choice" name="font_choice">${fontOptions}</select>
       </div>
       ${textField({
@@ -594,19 +676,19 @@ export function renderCmsEventFormPage(data: {
       <h2>Trình chiếu ảnh</h2>
       <div class="grid">
         <div class="field">
-          <label for="photo_count">Số ảnh hiển thị</label>
+          <label for="photo_count">Số ảnh hiển thị${screenTag('photo_count')}</label>
           <input id="photo_count" name="photo_count" type="number" inputmode="numeric"
             min="${PHOTO_COUNT_RANGE.min}" max="${PHOTO_COUNT_RANGE.max}" step="1" value="${event.photoCount}">
           <p class="muted">Từ ${PHOTO_COUNT_RANGE.min} đến ${PHOTO_COUNT_RANGE.max} ảnh.</p>
         </div>
         <div class="field">
-          <label for="photo_duration_ms">Thời gian mỗi ảnh (mili giây)</label>
+          <label for="photo_duration_ms">Thời gian mỗi ảnh (mili giây)${screenTag('photo_duration_ms')}</label>
           <input id="photo_duration_ms" name="photo_duration_ms" type="number" inputmode="numeric"
             min="${PHOTO_DURATION_RANGE.min}" max="${PHOTO_DURATION_RANGE.max}" step="100" value="${event.photoDurationMs}">
           <p class="muted">Từ ${PHOTO_DURATION_RANGE.min} đến ${PHOTO_DURATION_RANGE.max} mili giây.</p>
         </div>
         <div class="field">
-          <label for="layout_style">Kiểu bố cục</label>
+          <label for="layout_style">Kiểu bố cục${screenTag('layout_style')}</label>
           <select id="layout_style" name="layout_style">${layoutOptions}</select>
         </div>
       </div>
