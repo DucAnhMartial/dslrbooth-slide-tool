@@ -41,6 +41,19 @@
  * comments here, not backticks.
  */
 
+/**
+ * This screen's own name, the counterpart to displayPage's badge. Both room
+ * screens draw the same photos from the same snapshot, so without these an
+ * operator setting up two TVs cannot tell which URL each one is on — see
+ * displayPage.ts's SCREEN_BADGE_LABEL for the full reasoning and the timing.
+ *
+ * Kept as separate constants per file rather than shared: a test asserts they
+ * DIFFER, and a shared module would make that assertion about itself.
+ */
+export const SLIDES_BADGE_LABEL = 'Màn trình chiếu';
+export const SLIDES_BADGE_HINT = 'Chỉ ảnh, không hàng chờ';
+export const SLIDES_BADGE_PROMINENT_MS = 8000;
+
 export function renderSlidesPage(): string {
   return `<!doctype html>
 <html lang="vi">
@@ -137,6 +150,22 @@ export function renderSlidesPage(): string {
       font-size:var(--t-label);font-weight:700;text-align:center;padding:.9rem 1rem}
     #banner.show{display:block}
 
+    /* Screen identity. Same shape and timing as the queue screen's badge, and
+       deliberately the same corner: an operator comparing two TVs reads the
+       same spot on both. Muted rather than accent-tinted here — this stage is
+       a black field with photographs on it, and a coloured block on it would
+       be the brightest thing in the room. */
+    .screenbadge{position:fixed;top:1.6vw;left:1.6vw;z-index:5;pointer-events:none;
+      display:flex;flex-direction:column;gap:.2rem;
+      background:rgba(255,255,255,.1);color:#fff;
+      border:1px solid rgba(255,255,255,.35);border-radius:.6rem;
+      padding:1rem 1.5rem;
+      transition:opacity .8s ease,transform .8s ease,padding .8s ease;
+      transform-origin:top left}
+    .screenbadge b{font-size:clamp(1.4rem,2.4vw,2.6rem);font-weight:700;letter-spacing:.04em;text-transform:uppercase;line-height:1}
+    .screenbadge span{font-size:clamp(.8rem,1.1vw,1.1rem);color:rgba(255,255,255,.65);letter-spacing:.06em}
+    .screenbadge.settled{opacity:.28;transform:scale(.5);padding:.6rem .9rem}
+
     /* T-09-13: the Agent-offline signal, rendered ONLY on the fault. Fixed
        destructive colour, unreachable from applyEventConfig() below. */
     #agentOffline{position:fixed;bottom:1.5rem;right:1.5rem;z-index:8;
@@ -146,6 +175,7 @@ export function renderSlidesPage(): string {
 </head>
 <body data-view="slides">
 <div id="banner" role="status">Mất kết nối — đang thử kết nối lại…</div>
+<div class="screenbadge" id="screenbadge" aria-hidden="true"><b>${SLIDES_BADGE_LABEL}</b><span>${SLIDES_BADGE_HINT}</span></div>
 <div id="agentOffline" role="status" hidden>● Agent mất kết nối</div>
 <div class="stage" id="stage">
   <!-- UI-01: server-rendered idle backstop, in the first bytes the browser
@@ -159,6 +189,13 @@ export function renderSlidesPage(): string {
   <div id="dots"></div>
 </div>
 <script>
+  /* Settles on a timer, not on the first snapshot — a screen that never
+     receives one is exactly the screen whose identity is being looked for. */
+  setTimeout(function(){
+    var badge=document.querySelector('#screenbadge');
+    if(badge) badge.classList.add('settled');
+  }, ${SLIDES_BADGE_PROMINENT_MS});
+
   var stage=document.querySelector('#stage'),dots=document.querySelector('#dots'),
       banner=document.querySelector('#banner'),agentOffline=document.querySelector('#agentOffline'),
       hero=document.querySelector('#hero');

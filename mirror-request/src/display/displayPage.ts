@@ -28,6 +28,27 @@
  */
 export const SHIPPED_LAYOUT_STYLE = 'stage_sidebar';
 
+/**
+ * The screen's own name, shown large for a few seconds after load and then
+ * reduced to a dim corner mark.
+ *
+ * Both room screens draw the same photos from the same snapshot, so an
+ * operator setting up two TVs could not tell which URL a given screen was on
+ * — the difference was a sidebar column, which reads as "this TV is just
+ * cropped differently". This is the fix for that, and the timing is the whole
+ * design: setup is when the question is asked, so the answer is unmissable
+ * then and nearly invisible for the rest of the night. A permanent banner on
+ * a wall screen at a wedding would be noise aimed at guests to solve an
+ * operator's problem.
+ *
+ * Static text, never guest data — it is safe as markup precisely because
+ * nothing request-supplied reaches it.
+ */
+export const SCREEN_BADGE_LABEL = 'Màn chờ chụp';
+export const SCREEN_BADGE_HINT = 'Hàng chờ + ảnh vừa chụp';
+/** How long the badge stays at full size before shrinking to the corner. */
+export const SCREEN_BADGE_PROMINENT_MS = 8000;
+
 export function renderDisplayPage(): string {
   return `<!doctype html>
 <html lang="vi">
@@ -129,11 +150,41 @@ export function renderDisplayPage(): string {
        tile: a person's initials, never a blank box. */
     .avatar{width:clamp(5rem,9vw,8rem);aspect-ratio:1;border-radius:50%;background:var(--accent);color:var(--paper);display:grid;place-items:center;font-size:clamp(2rem,4vw,3.5rem);font-weight:700}
 
-    aside{border-left:1px solid var(--line);padding-left:2.5rem;display:flex;flex-direction:column;min-height:0}
+    /* The screen-identity badge. Fixed so it never moves with content, and
+       pointer-events:none so it can never intercept anything. It shrinks by
+       transition rather than disappearing: a screen that can still be
+       identified at a glance, all night, without competing with the photos. */
+    .screenbadge{position:fixed;top:1.6vw;left:1.6vw;z-index:5;pointer-events:none;
+      display:flex;flex-direction:column;gap:.2rem;
+      background:color-mix(in srgb,var(--accent) 22%,var(--surface));
+      color:var(--ink);border:1px solid var(--accent);border-radius:.6rem;
+      padding:1rem 1.5rem;
+      transition:opacity .8s ease,transform .8s ease,padding .8s ease;
+      transform-origin:top left}
+    .screenbadge b{font-size:clamp(1.4rem,2.4vw,2.6rem);font-weight:700;letter-spacing:.04em;text-transform:uppercase;line-height:1}
+    .screenbadge span{font-size:clamp(.8rem,1.1vw,1.1rem);color:var(--muted);letter-spacing:.06em}
+    /* After the prominent window: small, dim, still legible up close. */
+    .screenbadge.settled{opacity:.32;transform:scale(.5);padding:.6rem .9rem}
+    /* An operator who wants it back can wake it from the CMS-free path:
+       reloading the TV re-runs the prominent window. */
+
+    aside{border-left:1px solid var(--line);padding-left:2.5rem;display:flex;flex-direction:column;min-height:0;
+      /* CMS-06: the queue is this screen's REASON, not a margin note. A tinted
+         panel with its own edge makes the two-region split readable across a
+         room, which "a column to the right of a photo" was not. */
+      background:color-mix(in srgb,var(--accent) 8%,transparent);
+      border-radius:1rem;padding:2rem 2rem 2rem 2.5rem}
     /* margin is "0 0 2.5rem", not "0 0:2.5rem". The stray colon (pre-existing
        since Phase 5, logged as deferred item D-1 during 08-01) made the whole
        declaration invalid, so this heading silently had no bottom margin. */
     aside h2{font-size:var(--t-caption);font-weight:700;text-transform:uppercase;letter-spacing:.18em;margin:0 0 2.5rem}
+    /* The count rides the heading rather than sitting in its own row: it is
+       the fact this screen exists to publish, and the slides screen carries no
+       queue metadata of any kind (D9-01), so this is content the two screens
+       can never share. */
+    .qcount{display:inline-block;margin-left:.6rem;padding:.15rem .6rem;border-radius:999px;
+      background:var(--accent);color:var(--paper);letter-spacing:0}
+    .qcount:empty{display:none}
     /* Capped visible rows + scroll: the sidebar never grows the page however
        many guests are queued (T-08-11). Bounded independently of the wire's
        own 5-row cap in getQueuedGuestSummaries(). */
@@ -168,6 +219,7 @@ export function renderDisplayPage(): string {
 </head>
 <body data-layout="${SHIPPED_LAYOUT_STYLE}">
 <div id="banner" role="status">Mất kết nối — đang thử kết nối lại…</div>
+<div class="screenbadge" id="screenbadge" aria-hidden="true"><b>${SCREEN_BADGE_LABEL}</b><span>${SCREEN_BADGE_HINT}</span></div>
 <main>
   <section class="stage">
     <div class="eyebrow"><span class="dot"></span><span id="state">Sẵn sàng</span></div>
@@ -185,12 +237,20 @@ export function renderDisplayPage(): string {
     <div class="meta" id="queueMeta">Chưa có khách trong hàng chờ</div>
   </section>
   <aside>
-    <h2>Thứ tự tiếp theo</h2>
+    <h2>Thứ tự tiếp theo<span id="queueCount" class="qcount"></span></h2>
     <ol id="queue"></ol>
     <div class="status" id="agent"></div>
   </aside>
 </main>
 <script>
+  /* The badge settles on a timer, not on the first snapshot: a screen that
+     never receives one is exactly the screen whose identity an operator is
+     trying to read. */
+  setTimeout(function(){
+    var badge=document.querySelector('#screenbadge');
+    if(badge) badge.classList.add('settled');
+  }, ${SCREEN_BADGE_PROMINENT_MS});
+
   var hero=document.querySelector('#hero'),queue=document.querySelector('#queue'),
       stateEl=document.querySelector('#state'),agentEl=document.querySelector('#agent'),
       meta=document.querySelector('#queueMeta'),banner=document.querySelector('#banner');
@@ -363,6 +423,11 @@ export function renderDisplayPage(): string {
     agentEl.className='status '+(data.agentOnline?'online':'offline');
     agentEl.textContent=data.agentOnline?'● Agent đang kết nối':'● Agent mất kết nối';
     meta.textContent=data.queueLength?data.queueLength+' khách đang chờ':'Chưa có khách trong hàng chờ';
+    /* textContent, and empty rather than "0" when nobody is waiting — the
+       :empty rule hides the pill entirely, so an idle screen shows no badge
+       instead of a zero the room has to interpret. */
+    var qc=document.querySelector('#queueCount');
+    if(qc) qc.textContent=data.queueLength?String(data.queueLength):'';
 
     // Sidebar. Row names truncate with an ellipsis (see .qname) and carry the
     // full string in title=, so nothing is unrecoverable from a cut row.
