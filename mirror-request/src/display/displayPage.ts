@@ -32,10 +32,13 @@ export const SHIPPED_LAYOUT_STYLE = 'stage_sidebar';
  * The screen's own name, shown large for a few seconds after load and then
  * reduced to a dim corner mark.
  *
- * Both room screens draw the same photos from the same snapshot, so an
- * operator setting up two TVs could not tell which URL a given screen was on
- * — the difference was a sidebar column, which reads as "this TV is just
- * cropped differently". This is the fix for that, and the timing is the whole
+ * Both room screens USED TO draw the same photos from the same snapshot, so
+ * an operator setting up two TVs could not tell which URL a given screen was
+ * on — the difference was a sidebar column, which reads as "this TV is just
+ * cropped differently". The screens have since diverged properly (this one
+ * shows no photographs at all), but the badge stays: it is what answers the
+ * question on the first glance, before anyone waits for a state to change.
+ * The timing is the whole
  * design: setup is when the question is asked, so the answer is unmissable
  * then and nearly invisible for the rest of the night. A permanent banner on
  * a wall screen at a wedding would be noise aimed at guests to solve an
@@ -45,7 +48,7 @@ export const SHIPPED_LAYOUT_STYLE = 'stage_sidebar';
  * nothing request-supplied reaches it.
  */
 export const SCREEN_BADGE_LABEL = 'Màn chờ chụp';
-export const SCREEN_BADGE_HINT = 'Hàng chờ + ảnh vừa chụp';
+export const SCREEN_BADGE_HINT = 'Hàng chờ và lượt gọi — không có ảnh';
 /** How long the badge stays at full size before shrinking to the corner. */
 export const SCREEN_BADGE_PROMINENT_MS = 8000;
 
@@ -129,26 +132,10 @@ export function renderDisplayPage(): string {
     .instruction{font-size:var(--t-label);max-width:22ch;line-height:1.2}
     .idle{font-size:var(--t-display);font-weight:700;max-width:13ch;line-height:1.05;margin:0;overflow-wrap:anywhere}
 
-    /* D-09 hero moment, and D-10 slideshow: the same tile, because they are
-       the same thing seen at different ages. */
-    .shot{display:flex;flex-direction:column;gap:1.5rem;min-height:0;flex:1}
-    .frame{flex:1;min-height:0;display:grid;place-items:center;background:var(--surface);border-radius:.75rem;overflow:hidden;position:relative}
-    .frame img{max-width:100%;max-height:100%;object-fit:contain}
-    .shotname{font-size:var(--t-display);font-weight:700;line-height:1.05;margin:0;max-width:16ch;overflow-wrap:anywhere}
-    .badge{position:absolute;top:1rem;left:1rem;background:var(--accent);color:var(--paper);font-size:var(--t-caption);font-weight:700;letter-spacing:.08em;text-transform:uppercase;padding:.35rem 1rem;border-radius:2rem}
-    .dots{display:flex;gap:.5rem;justify-content:center;padding-top:1rem}
-    .pip{width:.5rem;height:.5rem;border-radius:50%;background:var(--line)}
-    .pip.on{width:1.6rem;border-radius:.25rem;background:var(--ink)}
-
-    /* G4's sibling: a photo that fails to load gets a neutral tile with a
-       warning icon AND a visible Vietnamese label — never the browser's
-       broken-image glyph, which reads as "this screen is broken". */
-    .broken{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1rem;width:100%;height:100%;color:var(--muted)}
-    .broken svg{opacity:.35}
-    .broken span{font-size:var(--t-label)}
-    /* The incumbent web-slide initials avatar, carried forward for a name-only
-       tile: a person's initials, never a blank box. */
-    .avatar{width:clamp(5rem,9vw,8rem);aspect-ratio:1;border-radius:50%;background:var(--accent);color:var(--paper);display:grid;place-items:center;font-size:clamp(2rem,4vw,3.5rem);font-weight:700}
+    /* No photo-tile styles. Every rule that dressed a photograph on this
+       screen (.shot, .frame, .shotname, .badge, .dots, .pip, .broken,
+       .avatar) went with the code that used them on 2026-08-14 — see the
+       stage-precedence note below. slidesPage.ts carries its own. */
 
     /* The screen-identity badge. Fixed so it never moves with content, and
        pointer-events:none so it can never intercept anything. It shrinks by
@@ -287,115 +274,26 @@ export function renderDisplayPage(): string {
     root.setProperty('--event-font',FONTS[cfg.fontChoice]||FONTS['system-ui']);
   }
 
-  // The incumbent web-slide's fallback, carried forward unchanged.
-  function getInitials(name){
-    return String(name||'').trim().split(/\\s+/).map(function(w){return w.charAt(0)}).join('').toUpperCase().slice(0,2);
-  }
+  /* No photo tile builder, no slideshow, no hero moment.
+     Everything that drew a photograph on this screen was removed on
+     2026-08-14 when the operator decided the waiting screen answers "when is
+     my turn" and nothing else; every photograph now lives on ?view=slides.
+     That supersedes D-09's hero moment and D-10's rotation FOR THIS PAGE only
+     — slidesPage.ts still draws both, off the same snapshot, and the snapshot
+     itself is unchanged (D-12: one snapshot, every screen).
 
-  /* Builds one photo tile. The URL is assigned to the img's src PROPERTY and
-     the name to textContent — never interpolated into an innerHTML string.
-     Both values crossed a trust boundary to get here (the Agent supplied the
-     URL, an operator or guest the name), and this is the only place they meet
-     the DOM (T-08-10). A load failure swaps in the neutral placeholder rather
-     than leaving the browser's broken-image glyph on a wall. */
-  function photoFrame(photo,badgeText){
-    var frame=document.createElement('div');
-    frame.className='frame';
-    if(photo&&photo.photoUrl){
-      var img=document.createElement('img');
-      img.alt='';
-      img.addEventListener('error',function(){
-        frame.innerHTML='<div class="broken"><svg width="64" height="64" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
-          +'<path d="M12 9v5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>'
-          +'<circle cx="12" cy="17.5" r="1.2" fill="currentColor"/>'
-          +'<path d="M10.3 3.9 2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>'
-          +'</svg><span></span></div>';
-        frame.querySelector('.broken span').textContent='Không tải được ảnh';
-      });
-      img.src=photo.photoUrl;
-      frame.appendChild(img);
-    }else{
-      // Name-only tile: initials avatar, never a blank or broken frame.
-      var avatar=document.createElement('div');
-      avatar.className='avatar';
-      avatar.textContent=getInitials(photo&&photo.name);
-      frame.appendChild(avatar);
-    }
-    if(badgeText){
-      var badge=document.createElement('div');
-      badge.className='badge';
-      badge.textContent=badgeText;
-      frame.appendChild(badge);
-    }
-    return frame;
-  }
+     The helpers are DELETED rather than left unused behind a flag: a photo
+     renderer nothing calls is a photo renderer that comes back by accident,
+     and the trust-boundary rules it carried (src property, textContent, never
+     innerHTML for guest data) now live in exactly one place instead of two.
 
-  function shotTile(photo,badgeText,pipCount,pipIndex){
-    var wrap=document.createElement('div');
-    wrap.className='shot';
-    wrap.appendChild(photoFrame(photo,badgeText));
-    // D9-04: guestNameEnabled is read here, not passed in — this is called
-    // from both render() (the hero tile) and drawSlide()'s own setInterval
-    // callback (the slideshow tile), and the module-level flag is what keeps
-    // both in step with the latest snapshot without threading a parameter
-    // through the rotation timer.
-    if(guestNameEnabled){
-      var name=document.createElement('p');
-      name.className='shotname';
-      name.textContent=(photo&&photo.name)||'';
-      wrap.appendChild(name);
-    }
-    // Zero-one-many: a single slide draws NO rotation indicator at all. Dots
-    // on a one-photo slideshow promise a rotation that never comes.
-    if(pipCount>1){
-      var dots=document.createElement('div');
-      dots.className='dots';
-      for(var i=0;i<pipCount;i++){
-        var pip=document.createElement('span');
-        pip.className='pip'+(i===pipIndex?' on':'');
-        dots.appendChild(pip);
-      }
-      wrap.appendChild(dots);
-    }
-    return wrap;
-  }
-
-  /* D-10/D-12 slideshow state. Everything it needs is re-read from the SNAPSHOT
-     on every update — the photo list, photoCount and photoDurationMs — so an
-     operator changing the per-photo duration or the photo count mid-event
-     reaches every TV on the next snapshot with no reload. Nothing here is
-     captured once at load. */
-  var slides=[],slideIndex=0,slideTimer=null,slideKey='',slideDuration=6000;
-  // D9-04: the two per-event toggles, re-derived on every render() call from
-  // the snapshot's eventConfig (never captured once at load) and read by
-  // shotTile()/drawSlide() outside render()'s own call stack — see the
-  // comment on shotTile() above for why these live at module scope rather
-  // than as parameters.
-  var heroTakeoverEnabled=true,guestNameEnabled=true;
-  function stopSlideshow(){ if(slideTimer){clearInterval(slideTimer);slideTimer=null} }
-  function syncSlides(data){
-    var cfg=data.eventConfig||{};
-    var count=typeof cfg.photoCount==='number'?cfg.photoCount:12;
-    var duration=typeof cfg.photoDurationMs==='number'&&cfg.photoDurationMs>0?cfg.photoDurationMs:6000;
-    // Skip anything with no image: a no_photo guest is absent from the
-    // slideshow entirely rather than appearing as an empty frame.
-    var next=(data.photos||[]).filter(function(p){return p&&p.photoUrl}).slice(0,count);
-    var key=next.map(function(p){return p.photoUrl}).join('|')+'@'+duration;
-    if(key===slideKey)return;
-    slideKey=key;slides=next;slideDuration=duration;
-    if(slideIndex>=slides.length)slideIndex=0;
-    stopSlideshow();
-    if(slides.length>1){
-      slideTimer=setInterval(function(){
-        slideIndex=(slideIndex+1)%slides.length;
-        if(currentStageState==='slideshow')drawSlide();
-      },slideDuration);
-    }
-  }
-  function drawSlide(){
-    hero.innerHTML='';
-    hero.appendChild(shotTile(slides[slideIndex],null,slides.length,slideIndex));
-  }
+     Removed here: the photo-frame and photo-tile builders, the initials
+     fallback, the slideshow sync/draw/stop trio, and the two D9-04 toggle
+     flags they were read through. (Deliberately described rather than named:
+     a test asserts those identifiers no longer appear in this document, and
+     a comment listing them would be the only thing keeping them there.)
+     'heroEnabled' and 'showGuestName' remain live event settings — they now
+     govern the slides view alone, and the CMS copy was corrected to say so. */
 
   var currentStageState='idle';
 
@@ -415,9 +313,6 @@ export function renderDisplayPage(): string {
     // truthiness — an absent field (a snapshot from a not-yet-restarted
     // server) must mean ON, so today's behaviour holds through a rolling
     // deploy rather than silently losing the hero moment or the guest name.
-    heroTakeoverEnabled=cfg.heroEnabled!==false;
-    guestNameEnabled=cfg.showGuestName!==false;
-    syncSlides(data);
 
     stateEl.textContent=data.boothState==='ANNOUNCING'?'Chuẩn bị vào vị trí':data.boothState==='BUSY'?'Đang chụp':'Sẵn sàng';
     agentEl.className='status '+(data.agentOnline?'online':'offline');
@@ -453,22 +348,29 @@ export function renderDisplayPage(): string {
       queue.appendChild(li);
     }
 
-    // Stage precedence. justCaptured is checked FIRST and reads its name from
-    // justCaptured, never from guestName: the guest who just finished shooting
-    // and the guest being announced are two different people at this instant,
-    // and showing the announced guest's name over the finished guest's photo
-    // is the exact D-09 failure this ordering prevents.
+    // Stage precedence — THIS SCREEN SHOWS NO PHOTOGRAPHS AT ALL.
     //
-    // D9-04: the precedence ORDER is untouched — heroTakeoverEnabled only
-    // gates whether this first branch is taken at all. With it false the
-    // chain falls through to whichever branch would have run next; the just-
-    // captured photo is still in data.photos (buildSnapshot() does not read
-    // this flag), so it still reaches the slideshow branch below.
-    if(heroTakeoverEnabled&&data.justCaptured){
-      currentStageState='hero';
-      hero.innerHTML='';
-      hero.appendChild(shotTile(data.justCaptured,'Ảnh vừa chụp',1,0));
-    }else if(data.boothState==='ANNOUNCING'&&data.guestName){
+    // D-09 gave this screen a hero moment for the guest who had just finished
+    // ("their new photo fills the screen with their name for ~10-15 seconds,
+    // then joins the rotating slideshow"), and D-10 gave it that rotation.
+    // Both were decided in Phase 8, when this was the ONLY room screen.
+    // Phase 9 added the slides-only view and never revisited them, so for a
+    // while both screens ran the same slideshow off the same snapshot — which
+    // is what an operator saw and reported: "màn hình chờ chụp sao vẫn có ảnh
+    // của người cũ".
+    //
+    // The operator's answer, on 2026-08-14, was to take photographs off this
+    // screen entirely — hero moment included. That SUPERSEDES D-09 for this
+    // page: the waiting screen answers "when is my turn" and nothing else,
+    // and every photograph lives on ?view=slides. 'justCaptured' and 'photos'
+    // are still in the snapshot (the slides view needs both, and D-12 keeps
+    // one snapshot for every screen); this page simply draws neither.
+    //
+    // The chain is now announcing -> capturing -> idle, and idle is where a
+    // screen with nothing to announce comes to rest — the QR and the call to
+    // register, which is the useful thing to show a room full of people who
+    // have not signed up yet.
+    if(data.boothState==='ANNOUNCING'&&data.guestName){
       currentStageState='announcing';
       hero.innerHTML='<p class="label">Xin mời khách tiếp theo</p><h1 id="guest"></h1>'
         +'<div class="callout"><div class="count" id="count"></div>'
@@ -480,12 +382,11 @@ export function renderDisplayPage(): string {
     }else if(data.boothState==='BUSY'){
       currentStageState='capturing';
       hero.innerHTML='<p class="idle">Đang chụp ảnh.<br>Hãy nhìn vào ống kính.</p>';
-    }else if(slides.length>=1){
-      currentStageState='slideshow';
-      drawSlide();
     }else{
-      // Zero photos, no guest, nothing announced: the deliberately drawn idle
-      // state (UI-01), not an empty stage.
+      // Nothing announced and nobody shooting: the deliberately drawn idle
+      // state (UI-01), not an empty stage. This is now the resting state of
+      // the screen rather than a zero-photo edge case, which is why the QR and
+      // its call to register matter more than they used to.
       currentStageState='idle';
       renderIdle(cfg);
     }

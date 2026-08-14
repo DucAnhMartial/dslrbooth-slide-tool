@@ -6,6 +6,7 @@ import express from 'express';
 import request from 'supertest';
 import { WebSocket } from 'ws';
 import { missingCharacters } from './helpers/woff2Cmap';
+import { renderSlidesPage } from '../src/display/slidesPage';
 import { renderDisplayPage } from '../src/display/displayPage';
 import { DisplayServer } from '../src/display/displayServer';
 import { LocalStore } from '../src/state/localStore';
@@ -125,6 +126,13 @@ function seedGuest(store: LocalStore, id: string, name: string): void {
 }
 
 const HTML = renderDisplayPage();
+/* Photographs left this screen on 2026-08-14 (see displayPage.ts's
+   stage-precedence note): the waiting screen answers "when is my turn" and
+   nothing else, and every photo now lives on ?view=slides. The photo-rendering
+   assertions below therefore target SLIDES_HTML, and each is paired with a
+   check that the waiting screen carries none of it — the snapshot assertions
+   are unchanged, because the wire still carries photos for the slides view. */
+const SLIDES_HTML = renderSlidesPage();
 const FONT_DIR = path.join(__dirname, '..', 'assets', 'fonts');
 
 describe('Room Screen — layout and the one shipped layout_style', () => {
@@ -257,9 +265,11 @@ describe('Room Screen — slideshow, zero / one / many (D-10, D-12)', () => {
     // The single-slide rule is a guard in the page, not an accident of timing.
     // Both halves are asserted separately because they are separate mistakes:
     // one photo must not start a rotation interval...
-    expect(HTML).toMatch(/if\s*\(\s*slides\.length\s*>\s*1\s*\)\s*\{[\s\S]{0,120}setInterval/);
+    expect(SLIDES_HTML).toMatch(/if\s*\(\s*slides\.length\s*>\s*1\s*\)\s*\{[\s\S]{0,160}setInterval/);
     // ...and must not draw rotation dots that promise a rotation never coming.
-    expect(HTML).toMatch(/if\s*\(\s*pipCount\s*>\s*1\s*\)/);
+    expect(SLIDES_HTML).toMatch(/if\s*\(\s*count\s*<\s*2\s*\)\s*return/);
+    // And the waiting screen starts no rotation of any kind.
+    expect(HTML).not.toMatch(/setInterval/);
   });
 
   it('caps the wire at eventConfig.photoCount however large history grows (T-08-11)', async () => {
@@ -297,19 +307,27 @@ describe('Room Screen — slideshow, zero / one / many (D-10, D-12)', () => {
     // Read from the snapshot's config inside the render path, never captured
     // once at load: an operator changing the per-photo duration mid-event must
     // reach every TV on the next snapshot.
-    expect(HTML).toContain('photoDurationMs');
-    expect(HTML).toContain('photoCount');
+    expect(SLIDES_HTML).toContain('photoDurationMs');
+    expect(SLIDES_HTML).toContain('photoCount');
+    // The waiting screen reads neither: it has no rotation to configure.
+    expect(HTML).not.toContain('photoDurationMs');
   });
 });
 
 describe('Room Screen — media fallbacks, never a broken-image glyph', () => {
   it('declares an image error handler and the neutral placeholder with a visible Vietnamese label', () => {
-    expect(HTML).toMatch(/onerror|'error'/);
-    expect(HTML).toContain('Không tải được ảnh');
+    expect(SLIDES_HTML).toMatch(/onerror|'error'/);
+    expect(SLIDES_HTML).toContain('Không tải được ảnh');
+    // Nothing to fall back FROM on the waiting screen — it loads no images.
+    expect(HTML).not.toContain('Không tải được ảnh');
   });
 
   it('keeps the incumbent initials-avatar fallback for a name-only tile', () => {
-    expect(HTML).toContain('getInitials');
+    expect(SLIDES_HTML).toContain('getInitials');
+    // This assertion passed against the waiting screen for one commit only
+    // because a comment there still NAMED the function it had just deleted.
+    // Asserting on the page that actually draws tiles is the point.
+    expect(HTML).not.toContain('getInitials');
   });
 });
 

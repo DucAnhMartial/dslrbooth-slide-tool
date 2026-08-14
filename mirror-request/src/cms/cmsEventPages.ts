@@ -614,13 +614,13 @@ export function renderCmsEventFormPage(data: {
         name: 'show_guest_name',
         label: 'Hiển thị tên khách trên ảnh',
         checked: event.showGuestName,
-        hint: 'Áp dụng cho cả màn hình mặc định và màn hình chỉ slide — tắt để ẩn tên khách khỏi mọi ảnh trên cả hai màn hình.',
+        hint: 'Chỉ áp dụng cho màn hình trình chiếu (?view=slides) — màn hình chờ chụp không hiển thị ảnh nào. Tắt để ẩn tên khách khỏi mọi ảnh trên màn trình chiếu.',
       })}
       ${checkboxField({
         name: 'hero_enabled',
         label: 'Hiệu ứng "ảnh vừa chụp" phóng to',
         checked: event.heroEnabled,
-        hint: 'Áp dụng cho cả màn hình mặc định và màn hình chỉ slide — tắt để ảnh vừa chụp vào thẳng vòng trình chiếu, không phóng to riêng trước.',
+        hint: 'Chỉ áp dụng cho màn hình trình chiếu (?view=slides) — màn hình chờ chụp không hiển thị ảnh nào. Tắt để ảnh vừa chụp vào thẳng vòng trình chiếu, không phóng to riêng trước.',
       })}
 
       <div class="actions">

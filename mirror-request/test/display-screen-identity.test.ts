@@ -116,6 +116,46 @@ describe('the layouts diverge (CMS-06)', () => {
   });
 });
 
+describe('the waiting screen shows no photographs at all (supersedes D-09 for this page)', () => {
+  // The operator's report that started this: "màn hình chờ chụp sao vẫn có ảnh
+  // của người cũ". D-09 gave this screen a hero moment that then "joins the
+  // rotating slideshow", and D-10 gave it the rotation — both decided in
+  // Phase 8, when this was the ONLY room screen. Phase 9 added the slides view
+  // and never revisited them, so both screens ran the same slideshow. On
+  // 2026-08-14 the operator chose to take photographs off this screen
+  // entirely, hero moment included.
+  it('renders no image element and no photo tile', () => {
+    expect(defaultPage).not.toMatch(/createElement\('img'\)/);
+    expect(defaultPage).not.toMatch(/\.src\s*=\s*photo/);
+    expect(defaultPage).not.toMatch(/function shotTile|function photoFrame/);
+  });
+
+  it('starts no rotation timer', () => {
+    expect(defaultPage).not.toMatch(/setInterval/);
+  });
+
+  it('reads neither photos nor justCaptured in its render path', () => {
+    const render = defaultPage.slice(defaultPage.indexOf("data.boothState==='ANNOUNCING'"));
+    expect(render).not.toMatch(/data\.photos/);
+    expect(render).not.toMatch(/data\.justCaptured/);
+  });
+
+  it('the slides screen still draws them — the photographs moved, they were not deleted', () => {
+    expect(slidesPage).toMatch(/createElement\('img'\)/);
+    expect(slidesPage).toMatch(/setInterval/);
+  });
+
+  it('the badge hint no longer promises photographs it will not show', () => {
+    // It said "Hàng chờ + ảnh vừa chụp" until the photos left. It may still
+    // use the word to DENY them ("không có ảnh") — the failure mode being
+    // guarded is a hint that advertises a photo feature this screen dropped,
+    // not the word itself. The first draft of this assertion banned the word
+    // outright and failed against a correct hint.
+    expect(SCREEN_BADGE_HINT).not.toMatch(/ảnh vừa chụp/i);
+    expect(SCREEN_BADGE_HINT).not.toMatch(/trình chiếu/i);
+  });
+});
+
 describe('the content diverges (CMS-06, D9-01)', () => {
   it('only the queue screen publishes a waiting count', () => {
     expect(defaultPage).toContain('queueCount');

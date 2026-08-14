@@ -51,16 +51,24 @@ describe('Default room screen — the D9-02 regression pin (bare /display-screen
  * slides-side half plus the shared snapshot-level assertions.
  */
 describe('Default room screen — D9-04, both toggles honoured (hero takeover + guest name)', () => {
-  it('derives the hero-takeover flag by explicit comparison against false, and gates the takeover branch on it', () => {
-    expect(HTML).toMatch(/heroTakeoverEnabled\s*=\s*cfg\.heroEnabled\s*!==\s*false/);
-    expect(HTML).toMatch(/if\s*\(\s*heroTakeoverEnabled\s*&&\s*data\.justCaptured\s*\)/);
+  // SUPERSEDED 2026-08-14. D9-04's two toggles used to govern this screen as
+  // well as the slides view; this screen now draws no photographs at all, so
+  // there is nothing here for either toggle to gate. The assertions are
+  // INVERTED rather than deleted — the guard that mattered was "the hero
+  // branch behaves as decided", and the decision changed to "there is no hero
+  // branch". A deleted test would let it come back unnoticed.
+  it('has no hero-takeover branch at all: no photograph reaches this screen', () => {
+    expect(HTML).not.toMatch(/heroTakeoverEnabled/);
+    expect(HTML).not.toMatch(/if\s*\(\s*heroTakeoverEnabled\s*&&\s*data\.justCaptured\s*\)/);
+    expect(HTML).not.toMatch(/currentStageState='hero'/);
   });
 
-  it('derives the guest-name flag the same way, and appends the name element only when it is set', () => {
-    expect(HTML).toMatch(/guestNameEnabled\s*=\s*cfg\.showGuestName\s*!==\s*false/);
-    const shotTileFn = HTML.slice(HTML.indexOf('function shotTile'));
-    const shotTileBody = shotTileFn.slice(0, shotTileFn.indexOf('/* D-10/D-12 slideshow state'));
-    expect(shotTileBody).toMatch(/if\s*\(\s*guestNameEnabled\s*\)\s*\{[\s\S]{0,200}shotname/);
+  it('has no photo-tile builder for a guest name to be drawn onto', () => {
+    // showGuestName is still a live event setting — it governs the slides view
+    // now, and cmsEventPages.ts was corrected to say exactly that.
+    expect(HTML).not.toMatch(/guestNameEnabled/);
+    expect(HTML).not.toMatch(/function shotTile/);
+    expect(HTML).not.toMatch(/function photoFrame/);
   });
 
   it('leaves the sidebar untouched: the queue list renders regardless of the guest-name toggle', () => {
@@ -70,11 +78,25 @@ describe('Default room screen — D9-04, both toggles honoured (hero takeover + 
     expect(HTML).toContain("nm.className='qname'");
   });
 
-  it('does not reorder the stage-precedence chain: announcing, capturing, slideshow and idle are all still present', () => {
+  it('keeps the stage-precedence chain that survives: announcing, capturing, idle', () => {
+    // The slideshow branch is gone with the photographs. The other three are
+    // the whole of what this screen now says, so losing one silently would
+    // leave a wall screen with nothing to show.
     expect(HTML).toContain("data.boothState==='ANNOUNCING'");
     expect(HTML).toContain("data.boothState==='BUSY'");
-    expect(HTML).toContain('slides.length>=1');
     expect(HTML).toContain('renderIdle(cfg)');
+    expect(HTML).not.toContain('slides.length>=1');
+    expect(HTML).not.toMatch(/currentStageState='slideshow'/);
+  });
+
+  it('idle is now the resting state, not a zero-photo edge case', () => {
+    // With no rotation to fall through to, a screen with nothing announced
+    // comes to rest on the QR and its call to register — which is the useful
+    // thing to show a room that has not signed up yet.
+    const chain = HTML.slice(HTML.indexOf("data.boothState==='ANNOUNCING'"));
+    const idleAt = chain.indexOf('renderIdle(cfg)');
+    expect(idleAt).toBeGreaterThan(-1);
+    expect(chain.slice(0, idleAt)).not.toMatch(/drawSlide|shotTile/);
   });
 });
 
