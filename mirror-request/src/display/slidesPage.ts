@@ -150,6 +150,15 @@ export function renderSlidesPage(): string {
       font-size:var(--t-label);font-weight:700;text-align:center;padding:.9rem 1rem}
     #banner.show{display:block}
 
+    /* CMS-07: the event background sits under the black stage, which keeps
+       its own scrim so a photograph is never competing with another
+       photograph behind it. Heavier than the waiting screen's scrim for that
+       reason. */
+    #eventBg{position:fixed;inset:0;z-index:-2;background-size:cover;background-position:center;background-repeat:no-repeat}
+    #eventBg:after{content:"";position:absolute;inset:0;background:#000;opacity:.82}
+    /* Top-RIGHT: the screen-identity badge owns the top-left corner. */
+    #eventLogo{position:fixed;top:1.6vw;right:1.6vw;z-index:5;max-height:6vh;max-width:16vw;object-fit:contain;pointer-events:none;opacity:.9}
+
     /* Screen identity. Same shape and timing as the queue screen's badge, and
        deliberately the same corner: an operator comparing two TVs reads the
        same spot on both. Muted rather than accent-tinted here — this stage is
@@ -174,6 +183,8 @@ export function renderSlidesPage(): string {
   </style>
 </head>
 <body data-view="slides">
+<div id="eventBg" hidden></div>
+<img id="eventLogo" alt="" hidden>
 <div id="banner" role="status">Mất kết nối — đang thử kết nối lại…</div>
 <div class="screenbadge" id="screenbadge" aria-hidden="true"><b>${SLIDES_BADGE_LABEL}</b><span>${SLIDES_BADGE_HINT}</span></div>
 <div id="agentOffline" role="status" hidden>● Agent mất kết nối</div>
@@ -218,6 +229,20 @@ export function renderSlidesPage(): string {
     root.setProperty('--event-text',cfg.colorText);
     root.setProperty('--event-text-muted',cfg.colorTextMuted);
     root.setProperty('--event-font',FONTS[cfg.fontChoice]||FONTS['system-ui']);
+    /* CMS-07: the event background and logo, same contract as the waiting
+       screen. NO QR here — this screen is photographs, and a registration
+       code over someone's portrait is an advert on a picture frame. The
+       waiting screen is where people who have not registered are looking. */
+    var bg=document.querySelector('#eventBg');
+    if(bg){
+      if(cfg.backgroundUrl){ bg.style.backgroundImage='url("'+encodeURI(cfg.backgroundUrl)+'")'; bg.hidden=false; }
+      else { bg.style.backgroundImage=''; bg.hidden=true; }
+    }
+    var logo=document.querySelector('#eventLogo');
+    if(logo){
+      if(cfg.logoUrl){ logo.src=cfg.logoUrl; logo.hidden=false; }
+      else { logo.removeAttribute('src'); logo.hidden=true; }
+    }
   }
 
   function getInitials(name){

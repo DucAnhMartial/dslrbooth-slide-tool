@@ -137,6 +137,22 @@ export function renderDisplayPage(): string {
        .avatar) went with the code that used them on 2026-08-14 — see the
        stage-precedence note below. slidesPage.ts carries its own. */
 
+    /* CMS-07: the event's background image, and its logo.
+       The background sits UNDER the paper colour's own scrim so operator text
+       stays legible over any photograph — a bright wedding portrait behind
+       white type is unreadable at TV distance (UI-01), and the operator
+       choosing a background should not have to also solve contrast. */
+    #eventBg{position:fixed;inset:0;z-index:-2;background-size:cover;background-position:center;background-repeat:no-repeat}
+    #eventBg:after{content:"";position:absolute;inset:0;background:var(--paper);opacity:.72}
+    /* Top-RIGHT: the screen-identity badge owns the top-left corner. */
+    #eventLogo{position:fixed;top:1.6vw;right:1.6vw;z-index:5;max-height:7vh;max-width:18vw;object-fit:contain;pointer-events:none}
+
+    /* The QR block in the idle state: the code big enough to scan from a few
+       metres, its caption directly beneath. */
+    .qrblock{display:flex;flex-direction:column;align-items:flex-start;gap:1rem;margin:2.5rem 0 0}
+    .qrblock img{width:clamp(9rem,16vw,16rem);aspect-ratio:1;object-fit:contain;background:#fff;padding:.75rem;border-radius:.75rem}
+    .qrblock .label{margin:0;max-width:22ch}
+
     /* The screen-identity badge. Fixed so it never moves with content, and
        pointer-events:none so it can never intercept anything. It shrinks by
        transition rather than disappearing: a screen that can still be
@@ -205,6 +221,12 @@ export function renderDisplayPage(): string {
   </style>
 </head>
 <body data-layout="${SHIPPED_LAYOUT_STYLE}">
+<!-- CMS-07: the event background, behind everything. A separate fixed layer
+     rather than a body background so the noise overlay, the badge and the
+     disconnect banner all keep sitting on top of it, and so clearing the
+     image in the CMS is one property reset rather than a repaint of body. -->
+<div id="eventBg" hidden></div>
+<img id="eventLogo" alt="" hidden>
 <div id="banner" role="status">Mất kết nối — đang thử kết nối lại…</div>
 <div class="screenbadge" id="screenbadge" aria-hidden="true"><b>${SCREEN_BADGE_LABEL}</b><span>${SCREEN_BADGE_HINT}</span></div>
 <main>
@@ -272,6 +294,41 @@ export function renderDisplayPage(): string {
     root.setProperty('--event-text',cfg.colorText);
     root.setProperty('--event-text-muted',cfg.colorTextMuted);
     root.setProperty('--event-font',FONTS[cfg.fontChoice]||FONTS['system-ui']);
+    applyEventImages(cfg);
+  }
+
+  /* CMS-07: the background and the logo.
+     Until 2026-08-14 an operator could upload a logo, a background and a QR
+     code, the files were stored, served and carried in the snapshot — and no
+     screen read any of them. The CMS promised three things it did not do.
+
+     The URL is assigned through the style property and the img src PROPERTY,
+     never interpolated into an innerHTML string: it is operator-supplied and
+     crosses a trust boundary to get here, the same rule the photo tiles used
+     to follow. Absent values RESET rather than being skipped, so clearing an
+     image in the CMS clears it on every TV at the next snapshot instead of
+     leaving the old one until someone reloads. */
+  function applyEventImages(cfg){
+    var bg=document.querySelector('#eventBg');
+    if(bg){
+      if(cfg.backgroundUrl){
+        bg.style.backgroundImage='url("'+encodeURI(cfg.backgroundUrl)+'")';
+        bg.hidden=false;
+      }else{
+        bg.style.backgroundImage='';
+        bg.hidden=true;
+      }
+    }
+    var logo=document.querySelector('#eventLogo');
+    if(logo){
+      if(cfg.logoUrl){
+        logo.src=cfg.logoUrl;
+        logo.hidden=false;
+      }else{
+        logo.removeAttribute('src');
+        logo.hidden=true;
+      }
+    }
   }
 
   /* No photo tile builder, no slideshow, no hero moment.
@@ -301,9 +358,34 @@ export function renderDisplayPage(): string {
     // Written with textContent, never innerHTML — the heading and sub are
     // operator-authored strings, and interpolating them as markup would turn
     // the CMS config form into a stored-XSS path onto every TV.
-    hero.innerHTML='<p class="idle" id="idleHeading"></p><p class="label" id="idleSub"></p>';
+    //
+    // CMS-07: the QR lives HERE and only here. Idle is now this screen's
+    // resting state (the slideshow that used to fill it is gone), so this is
+    // what a room full of people who have not registered yet actually looks
+    // at — which is precisely the moment a registration QR is useful. It is
+    // deliberately absent from the announcing and capturing states: a guest
+    // being called to the camera does not need to scan anything, and a code
+    // on screen during someone's turn is clutter aimed at the wrong person.
+    hero.innerHTML='<p class="idle" id="idleHeading"></p>'
+      +'<div class="qrblock" id="qrBlock" hidden><img id="qrImage" alt=""><p class="label" id="qrCta"></p></div>'
+      +'<p class="label" id="idleSub"></p>';
     hero.querySelector('#idleHeading').textContent=cfg.idleHeading||'Sẵn sàng chụp ảnh cùng bạn';
-    hero.querySelector('#idleSub').textContent=cfg.qrCtaText||cfg.idleSub||'Quét mã QR bên dưới để đăng ký';
+
+    var qrBlock=hero.querySelector('#qrBlock');
+    var cta=cfg.qrCtaText||cfg.idleSub||'Quét mã QR bên dưới để đăng ký';
+    if(cfg.qrImageUrl){
+      // src PROPERTY, and the caption as textContent — both crossed a trust
+      // boundary to reach this screen.
+      hero.querySelector('#qrImage').src=cfg.qrImageUrl;
+      hero.querySelector('#qrCta').textContent=cta;
+      qrBlock.hidden=false;
+      // The call to action rides the QR block; showing it twice would read as
+      // two different instructions.
+      hero.querySelector('#idleSub').textContent='';
+    }else{
+      // No QR uploaded: the old behaviour exactly — the instruction alone.
+      hero.querySelector('#idleSub').textContent=cta;
+    }
   }
 
   function render(data){
