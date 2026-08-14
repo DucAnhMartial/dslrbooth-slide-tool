@@ -93,6 +93,35 @@ const LOGIN_ERROR = 'Sai tên đăng nhập hoặc mật khẩu. Vui lòng thử
  * `index.ts`, so that a refused address never reaches any of this code — see
  * `cmsIpGate.ts` for why that separation is the point.
  */
+/**
+ * CMS-09: where to send an operator after they log back in.
+ *
+ * `requireSession` bounces an expired document navigation to
+ * `/cms/login?next=<where they were going>`, and the login form carries it
+ * through as a hidden input so they land back on the page they wanted rather
+ * than the dashboard.
+ *
+ * ALLOW-LISTED RATHER THAN SANITISED. The value arrives in a query string and
+ * ends up in a Location header, which is an open-redirect the moment it is
+ * trusted: `//evil.example` and `https://evil.example` are both valid targets
+ * for a browser and neither is this service. So the rule is positive — it must
+ * start with `/cms/` and must not start with `//` — and anything else falls
+ * back to the dashboard rather than being repaired. A login link that quietly
+ * goes somewhere else is a phishing primitive handed out by the login page
+ * itself.
+ */
+export function safeNextTarget(raw: unknown): string {
+  const fallback = '/cms/';
+  if (typeof raw !== 'string' || raw === '') return fallback;
+  // Reject protocol-relative and absolute URLs outright, plus any attempt to
+  // smuggle a scheme past the prefix check.
+  if (raw.startsWith('//') || raw.includes('://') || raw.includes('\\')) return fallback;
+  if (!raw.startsWith('/cms/')) return fallback;
+  // A newline in a Location header splits the response.
+  if (/[\r\n]/.test(raw)) return fallback;
+  return raw;
+}
+
 export function createCmsRouter(
   store: CmsEventStore & CmsAgentStore & CmsPhotoStore,
   cfg: CmsConfig,
@@ -128,8 +157,11 @@ export function createCmsRouter(
   router.use(express.urlencoded({ extended: false }));
   router.use(express.json());
 
-  router.get('/login', (_req: Request, res: Response) => {
-    res.type('html').send(renderCmsLoginPage());
+  router.get('/login', (req: Request, res: Response) => {
+    // Validated on the way IN as well as on the way out, so a hostile ?next=
+    // never reaches the rendered form as a hidden field either (CMS-09).
+    const wanted = safeNextTarget(req.query.next);
+    res.type('html').send(renderCmsLoginPage({ next: wanted === '/cms/' ? undefined : wanted }));
   });
 
   /**
@@ -196,7 +228,7 @@ export function createCmsRouter(
     log.info(`CMS login succeeded from ${clientIp(req)}`);
     // 303 so the browser re-issues the follow-up as a GET rather than
     // replaying the POST body at the dashboard.
-    res.redirect(303, '/cms/');
+    res.redirect(303, safeNextTarget(req.body?.next));
   });
 
   router.post('/logout', (req: Request, res: Response) => {

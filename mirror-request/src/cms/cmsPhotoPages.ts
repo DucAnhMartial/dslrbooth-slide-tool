@@ -465,6 +465,7 @@ export function renderCmsDeletePhotoConfirmPage(data: {
         // which event it belonged to — this page never gets to assert that.
         body: JSON.stringify({ jobId: form.dataset.jobId })
       });
+      if (cmsHandleAuth(res)) return;
       ok = res.ok;
     } catch (err) { ok = false; }
     if (ok) { location.href = ${jsonForScript(`/cms/photos?event=${data.event.id}`)}; return; }
@@ -527,6 +528,7 @@ export function renderCmsClearHistoryConfirmPage(data: {
         // it. A dialog the browser could skip is not a control.
         body: JSON.stringify({ eventId: form.dataset.eventId, confirmName: document.querySelector('#confirmName').value })
       });
+      if (cmsHandleAuth(res)) return;
       ok = res.ok;
     } catch (err) { ok = false; }
     if (ok) { location.href = ${jsonForScript(`/cms/photos?event=${data.event.id}`)}; return; }

@@ -246,10 +246,43 @@ export function buildClearedSessionCookie(cookieName: string): string {
  * two failure modes waiting to drift apart, and any difference between them
  * tells an attacker which half of the guess was right.
  */
+/**
+ * CMS-09: what an expired session LOOKS like.
+ *
+ * Sessions live in memory and have no inactivity timeout (see the store's
+ * header), so the way an operator actually loses one is a service restart —
+ * a deploy, a crash, a reboot. That part is correct and stays. What was wrong
+ * is what happened next: every unauthenticated request got `401 {"error":
+ * "Unauthorized"}`, INCLUDING a plain browser navigation, so an operator who
+ * came back to the CMS after a restart was shown raw JSON on a white page
+ * with no way forward and nothing telling them to log in again.
+ *
+ * The response now depends on what asked:
+ *   - a document navigation gets 302 to the login page, carrying where it was
+ *     going so the operator lands back there instead of on a dashboard;
+ *   - a fetch/XHR keeps 401 JSON, because a redirect to an HTML login form is
+ *     useless to a caller expecting JSON — the page's own handler turns that
+ *     401 into a navigation (see cmsEventPages.ts's shared in-flight script).
+ *
+ * `Accept` is the discriminator rather than a path prefix: it is what
+ * distinguishes the two callers, and it keeps working if an API route is ever
+ * mounted outside /cms/api.
+ */
 export function createRequireSession(sessions: SessionStore, cookieName: string): RequestHandler {
   return (req: Request, res: Response, next: NextFunction) => {
     const token = parseCookies(req.headers.cookie)[cookieName] ?? '';
     if (!sessions.isValid(token)) {
+      const accept = String(req.headers.accept ?? '');
+      const wantsHtml = accept.includes('text/html');
+      // Never redirect a mutating request: replaying a POST as a GET after
+      // login would be a silent, unasked-for repeat of whatever it was.
+      if (wantsHtml && req.method === 'GET') {
+        // originalUrl, not url: this middleware is mounted under /cms, and the
+        // mount-relative path would send the operator to the wrong place.
+        const next = encodeURIComponent(req.originalUrl);
+        res.redirect(302, `/cms/login?next=${next}`);
+        return;
+      }
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }

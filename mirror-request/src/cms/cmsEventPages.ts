@@ -222,6 +222,19 @@ const INFLIGHT_SCRIPT = `
     if(button.dataset.prevHtml) button.innerHTML = button.dataset.prevHtml;
   }
   function cmsFail(){ alert(${JSON.stringify(SAVE_ERROR)}); }
+  /* CMS-09: an expired session, seen from inside a page that is already open.
+     Sessions have no timeout, so this happens when the service restarts under
+     a CMS tab someone left open — a deploy, a crash, a reboot. Before this,
+     every such action failed with the generic save error, which told the
+     operator their edit was broken when in fact they were simply logged out.
+     A 401 is never a content error: send them to the login page, carrying
+     where they were so they land back on it. Returns true when it handled the
+     response, so callers can stop. */
+  function cmsHandleAuth(res){
+    if(!res || res.status !== 401) return false;
+    location.href = '/cms/login?next=' + encodeURIComponent(location.pathname + location.search);
+    return true;
+  }
 `;
 
 /**
@@ -418,6 +431,7 @@ export function renderCmsEventCreatePage(): string {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: input.value })
       });
+      if (cmsHandleAuth(res)) return;
       if (res.ok) { var created = await res.json(); location.href = '/cms/events/' + created.id + '?saved=1'; return; }
     } catch (err) { /* fall through to the shared failure copy */ }
     cmsRelease(button);
@@ -750,6 +764,7 @@ export function renderCmsEventFormPage(data: {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(collect())
       });
+      if (cmsHandleAuth(res)) return;
       ok = res.ok;
     } catch (err) { ok = false; }
     cmsRelease(button);
@@ -776,6 +791,7 @@ export function renderCmsEventFormPage(data: {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ data: String(reader.result) })
         });
+        if (cmsHandleAuth(res)) return;
         if (res.ok) {
           var stored = await res.json();
           document.querySelector('#' + field).value = stored.url;
@@ -868,6 +884,7 @@ export function renderCmsActivateConfirmPage(data: {
         // for; this field is.
         body: JSON.stringify({ confirmed: true })
       });
+      if (cmsHandleAuth(res)) return;
       ok = res.ok;
     } catch (err) { ok = false; }
     if (ok) { location.href = '/cms/events'; return; }
@@ -933,6 +950,7 @@ export function renderCmsDeleteConfirmPage(data: {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ confirmName: document.querySelector('#confirmName').value })
       });
+      if (cmsHandleAuth(res)) return;
       ok = res.ok;
     } catch (err) { ok = false; }
     if (ok) { location.href = '/cms/events'; return; }

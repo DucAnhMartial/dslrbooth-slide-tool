@@ -95,7 +95,7 @@ const CMS_STYLES = `
  * response can never be used to confirm which operator accounts exist
  * (T-08-01).
  */
-export function renderCmsLoginPage(opts: { error?: string } = {}): string {
+export function renderCmsLoginPage(opts: { error?: string; next?: string } = {}): string {
   const error = opts.error ? `<p class="error" role="alert">${escapeHtml(opts.error)}</p>` : '';
   return `<!doctype html>
 <html lang="vi">
@@ -112,6 +112,7 @@ export function renderCmsLoginPage(opts: { error?: string } = {}): string {
 <body>
 <main>
   <form class="card" method="post" action="/cms/login" id="loginForm">
+    ${opts.next ? `<input type="hidden" name="next" value="${escapeHtml(opts.next)}">` : ''}
     <h1>Đăng nhập</h1>
     ${error}
     <div class="field">

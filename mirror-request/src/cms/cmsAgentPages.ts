@@ -208,6 +208,7 @@ export function renderCmsAgentConfigPage(data: CmsAgentPageData): string {
         body: JSON.stringify(body || {})
       });
       var payload = await res.json().catch(function(){ return {}; });
+      if (cmsHandleAuth(res)) return;
       report(res.ok, payload.message || payload.error || ${JSON.stringify(AGENT_SAVE_ERROR)});
       if (res.ok) setTimeout(function(){ location.reload(); }, 600);
     } catch (err) {
