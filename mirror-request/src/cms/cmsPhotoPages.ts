@@ -51,6 +51,13 @@ export const CLEAR_HISTORY_MISMATCH =
  */
 export const THUMB_MISSING_LABEL = 'Ảnh không tải được';
 
+/** CMS-05: removing ONE photo. Distinct wording from CLEAR_HISTORY_ACTION on
+ * purpose — "Xóa ảnh này" and "Xóa lịch sử ảnh" must never read as the same
+ * button, because one loses a capture and the other loses a wedding. */
+export const DELETE_PHOTO_ACTION = 'Xóa ảnh này';
+export const DELETE_PHOTO_CONFIRM =
+  'Xóa ảnh này khỏi lịch sử? Không thể hoàn tác. Ảnh đã gửi cho khách không bị ảnh hưởng.';
+
 /** The row shape `listEventPhotos()` projects — no internal columns (T-08-29). */
 export interface PhotoHistoryRow {
   jobId: string;
@@ -143,10 +150,17 @@ function thumbnailCell(row: PhotoHistoryRow): string {
 
 function photoRow(row: PhotoHistoryRow): string {
   const name = escapeHtml(row.guestName);
+  // CMS-05: a LINK to a confirmation page, not a button that deletes. These
+  // rows are 44px tall with thumbnails side by side, and this CMS is operated
+  // on a touchscreen at an event — a one-click destructive control here would
+  // lose a guest's photograph to a stray thumb. The link also degrades
+  // correctly with no JavaScript, which the delete POST itself does not.
+  const deleteHref = escapeHtml(`/cms/photos/delete?job=${encodeURIComponent(row.jobId)}`);
   return `<tr class="photo-row">
         ${thumbnailCell(row)}
         <td class="name"><span class="ellipsis" title="${name}">${name}</span></td>
         <td class="time">${escapeHtml(formatCapturedAt(row.capturedAt))}</td>
+        <td class="row-action"><a class="btn secondary small" href="${deleteHref}">${DELETE_PHOTO_ACTION}</a></td>
       </tr>`;
 }
 
@@ -211,6 +225,12 @@ const PHOTO_STYLES = `
       border-bottom:1px solid var(--border)}
     td{padding:var(--sp-sm) var(--sp-md);border-top:1px solid var(--border);vertical-align:middle}
     .photo-row{min-height:44px}
+    /* CMS-05: the per-row delete link. Right-aligned and narrow so it never
+       crowds the guest name, but still 44px of touch target — this CMS is
+       operated on a touchscreen at an event, and a destructive control that is
+       hard to hit accurately is a control that gets hit twice. */
+    .row-action{text-align:right;white-space:nowrap}
+    .row-action .btn.small{padding:.45rem .7rem;font-size:.85rem;min-height:44px;display:inline-flex;align-items:center}
     .thumb-box{display:inline-grid;place-items:center;width:120px;height:80px;overflow:hidden;
       border-radius:6px;background:var(--bg);border:1px solid var(--border)}
     .thumb-img{max-width:100%;max-height:100%;object-fit:cover}
@@ -322,7 +342,7 @@ export function renderCmsPhotoHistoryPage(data: {
     </div>`;
     } else {
       body = `<table>
-      <thead><tr><th scope="col">Ảnh</th><th scope="col">Khách</th><th scope="col">Thời gian chụp</th></tr></thead>
+      <thead><tr><th scope="col">Ảnh</th><th scope="col">Khách</th><th scope="col">Thời gian chụp</th><th scope="col">Thao tác</th></tr></thead>
       <tbody>${data.rows.map(photoRow).join('')}</tbody>
     </table>
     ${pager(eventId, data.page, data.totalPages)}`;
@@ -375,6 +395,87 @@ export function renderCmsPhotoHistoryPage(data: {
  * `error` re-renders this same view after a mismatch, so a wrong answer costs
  * the operator a retype and never a row.
  */
+/**
+ * The confirmation page for deleting ONE photo (CMS-05).
+ *
+ * Shows the same thumbnail, name and time the history row showed, through the
+ * same `thumbnailCell` helper — the operator confirms against the photograph,
+ * not against a job id they cannot read. Reusing the helper rather than
+ * re-rendering the image is deliberate: a second copy of the
+ * is-this-URL-safe-to-put-in-an-src rule would be a second thing to get wrong,
+ * and this page is exactly where getting it wrong shows a stranger's photo
+ * next to a delete button.
+ *
+ * No retyped-name field, unlike the clear-everything page. That control is
+ * proportionate to erasing a whole wedding's history; requiring it here would
+ * teach the operator to type event names without reading them, which weakens
+ * the confirmation that actually guards the catastrophic act.
+ */
+export function renderCmsDeletePhotoConfirmPage(data: {
+  event: EventSummary;
+  photo: { jobId: string; photoUrl: string; guestName: string; capturedAt: number };
+}): string {
+  const guestName = escapeHtml(data.photo.guestName);
+  const eventName = escapeHtml(data.event.name);
+  const jobId = escapeHtml(data.photo.jobId);
+  const backHref = escapeHtml(`/cms/photos?event=${encodeURIComponent(data.event.id)}`);
+
+  const body = `<main>
+  <header>
+    <h1>${DELETE_PHOTO_ACTION}</h1>
+    <div class="actions">
+      <a class="btn secondary" href="${backHref}">Quay lại lịch sử ảnh</a>
+      ${LOGOUT_FORM}
+    </div>
+  </header>
+  <div class="card">
+    <p class="warn">${WARNING_ICON}<span>${DELETE_PHOTO_CONFIRM}</span></p>
+    <table>
+      <thead><tr><th scope="col">Ảnh</th><th scope="col">Khách</th><th scope="col">Thời gian chụp</th></tr></thead>
+      <tbody><tr class="photo-row">
+        ${thumbnailCell({ jobId: data.photo.jobId, photoUrl: data.photo.photoUrl, guestName: data.photo.guestName, capturedAt: data.photo.capturedAt })}
+        <td class="name"><span class="ellipsis" title="${guestName}">${guestName}</span></td>
+        <td class="time">${escapeHtml(formatCapturedAt(data.photo.capturedAt))}</td>
+      </tr></tbody>
+    </table>
+    <p class="muted">Thuộc sự kiện “${eventName}”.</p>
+    <p class="error" id="deleteError" role="alert" hidden>Không xóa được ảnh này. Có thể ảnh đã bị xóa trước đó — tải lại lịch sử ảnh để kiểm tra.</p>
+    <form id="deleteForm" data-job-id="${jobId}">
+      <div class="actions">
+        <button type="submit" class="destructive" id="deleteBtn" data-mutating
+          data-inflight-label="Đang xóa…">${DELETE_PHOTO_ACTION}</button>
+        <a class="btn secondary" href="${backHref}">Hủy</a>
+      </div>
+    </form>
+  </div>
+</main>`;
+
+  const script = `
+  var form = document.querySelector('#deleteForm');
+  form.addEventListener('submit', async function(e){
+    e.preventDefault();
+    var button = document.querySelector('#deleteBtn');
+    if (!cmsBusy(button)) return;
+    var ok = false;
+    try {
+      var res = await fetch('/cms/api/photos/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // The job id travels to the SERVER, which reads the row and decides
+        // which event it belonged to — this page never gets to assert that.
+        body: JSON.stringify({ jobId: form.dataset.jobId })
+      });
+      ok = res.ok;
+    } catch (err) { ok = false; }
+    if (ok) { location.href = ${jsonForScript(`/cms/photos?event=${data.event.id}`)}; return; }
+    cmsRelease(button);
+    document.querySelector('#deleteError').hidden = false;
+  });
+`;
+
+  return page(DELETE_PHOTO_ACTION, PHOTO_STYLES, body, script);
+}
+
 export function renderCmsClearHistoryConfirmPage(data: {
   event: EventSummary;
   photoCount: number;

@@ -22,3 +22,17 @@ data/*.sqlite-wal
 # production database — same PII/sensitivity posture as the live file above
 # (§2), so they must never enter git history either.
 data/backups/
+
+# Guest- and operator-supplied images: event logos, waiting-screen backgrounds
+# and registration QR codes, served back out of /uploads. Same reasoning as the
+# database and its backups above — these are request-supplied bytes about real
+# people and real clients, they are runtime state rather than source, and one
+# `git add -A` would put them in history permanently. Found missing when a
+# backup taken beside the live database (rather than in data/backups/) left the
+# directory untracked and dragged its contents into view alongside it.
+data/uploads/
+
+# A pre-mutation backup belongs in data/backups/ above. This second pattern
+# exists because the convention is easy to miss in a hurry, and a backup left
+# beside the live file inherits its full sensitivity either way.
+data/*.sqlite.bak*

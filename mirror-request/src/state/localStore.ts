@@ -329,8 +329,9 @@ export class LocalStore {
       -- NO AUTOMATIC DELETE PATH MAY BE ADDED HERE. D-11 is explicit: photo
       -- history is kept per event and removed ONLY by a hand-confirmed CMS
       -- action (deleteEventPhotos, wired to a typed confirmation in plan
-      -- 08-05). No auto-expiry, no row cap, no scheduled cleanup, no
-      -- delete-on-event-switch. This is the same discipline pending_print's
+      -- 08-05; joined later by deleteEventPhoto, the same act scoped to one
+      -- row — see CMS-05). No auto-expiry, no row cap, no scheduled cleanup,
+      -- no delete-on-event-switch. This is the same discipline pending_print's
       -- header above states for expired rows, and for a related reason: these
       -- rows are a guest-facing record, and the operator — not a timer — owns
       -- when a wedding's photos stop existing.
@@ -1302,6 +1303,58 @@ export class LocalStore {
    */
   deleteEventPhotos(eventId: string): number {
     return this.db.prepare('DELETE FROM event_photo WHERE event_id = ?').run(eventId).changes;
+  }
+
+  /**
+   * Reads one photo row by job id, for the delete confirmation page.
+   *
+   * Same `image_url`-then-`photo_url` preference `listEventPhotos` uses, so
+   * the thumbnail the operator confirms against is byte-for-byte the one the
+   * history table just showed them — confirming against a different rendering
+   * of the same row is how you delete the wrong photograph.
+   *
+   * Returns the event id too: the caller must not take it from the query
+   * string. A jobId is the primary key, so the row itself is the authority on
+   * which event it belongs to.
+   */
+  getEventPhoto(
+    jobId: string,
+  ): { jobId: string; eventId: string; photoUrl: string; guestName: string; capturedAt: number } | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT jobId, event_id, photo_url, image_url, guest_name, captured_at
+         FROM event_photo WHERE jobId = ?`,
+      )
+      .get(jobId) as
+      | { jobId: string; event_id: string; photo_url: string; image_url: string | null; guest_name: string; captured_at: number }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      jobId: row.jobId,
+      eventId: row.event_id,
+      photoUrl: row.image_url ?? row.photo_url,
+      guestName: row.guest_name,
+      capturedAt: row.captured_at,
+    };
+  }
+
+  /**
+   * Deletes ONE photo row, by primary key (CMS-05).
+   *
+   * A second hand-driven deletion path, and deliberately not a relaxation of
+   * D-11. D-11 says photo history is "kept per event, deleted only by hand"
+   * and forbids automation: no expiry, no row cap, no scheduled cleanup, no
+   * delete-on-event-switch. This is as hand-driven as `deleteEventPhotos` —
+   * one operator, one confirmed click, one row — and it exists because the
+   * alternative an operator actually had was clearing an entire wedding's
+   * history to remove a single failed capture.
+   *
+   * Returns whether a row went away, so the caller reports what happened
+   * instead of assuming. A jobId that is already gone is `false`, not an
+   * error: two operators closing the same broken capture is not a fault.
+   */
+  deleteEventPhoto(jobId: string): boolean {
+    return this.db.prepare('DELETE FROM event_photo WHERE jobId = ?').run(jobId).changes > 0;
   }
 
   /**

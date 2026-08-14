@@ -4,6 +4,7 @@ import {
   PHOTOS_PER_PAGE,
   renderCmsPhotoHistoryPage,
   renderCmsClearHistoryConfirmPage,
+  renderCmsDeletePhotoConfirmPage,
 } from './cmsPhotoPages';
 import type { EventSummary } from '../state/localStore';
 
@@ -35,6 +36,10 @@ export interface CmsPhotoStore {
   ): Array<{ jobId: string; photoUrl: string; guestName: string; capturedAt: number }>;
   countEventPhotos(eventId: string): number;
   deleteEventPhotos(eventId: string): number;
+  getEventPhoto(
+    jobId: string,
+  ): { jobId: string; eventId: string; photoUrl: string; guestName: string; capturedAt: number } | undefined;
+  deleteEventPhoto(jobId: string): boolean;
 }
 
 /**
@@ -196,6 +201,68 @@ export function createCmsPhotoRoutes(store: CmsPhotoStore): ReturnType<typeof Ro
       `Cleared photo history for event ${event.id} — ${deleted} rows deleted by a confirmed operator action`,
     );
     res.status(200).json({ cleared: true, deleted });
+  });
+
+  /**
+   * The confirmation view for deleting ONE photo (CMS-05).
+   *
+   * Why a page and not a one-click button in the table: the history table's
+   * rows are 44px tall and thumbnails sit next to each other, so a stray click
+   * on a touchscreen at an event would otherwise destroy a guest's photograph
+   * with no way back. The confirmation shows the same thumbnail, name and time
+   * the row showed, so the operator confirms against the photo rather than
+   * against a job id they cannot read.
+   *
+   * Unlike the clear-everything path there is NO retyped name. That
+   * confirmation is proportionate to erasing a whole wedding; demanding it to
+   * remove one failed capture would train the operator to type event names
+   * without reading, which weakens the control that actually matters.
+   */
+  router.get('/photos/delete', (req: Request, res: Response) => {
+    const jobId = typeof req.query.job === 'string' ? req.query.job : '';
+    const photo = jobId ? store.getEventPhoto(jobId) : undefined;
+    if (!photo) {
+      res.status(404).json({ error: 'Photo not found' });
+      return;
+    }
+    // The row is the authority on which event it belongs to — never the query
+    // string, which the operator's browser did not necessarily set.
+    const event = store.listEvents().find((candidate) => candidate.id === photo.eventId);
+    if (!event) {
+      res.status(404).json({ error: 'Event not found' });
+      return;
+    }
+    res.type('html').send(renderCmsDeletePhotoConfirmPage({ event, photo }));
+  });
+
+  /**
+   * Deletes one photo row. The second hand-driven deletion path, and not a
+   * relaxation of D-11: that decision forbids AUTOMATIC removal — no expiry,
+   * no row cap, no scheduled cleanup, no delete-on-event-switch — and requires
+   * that a human decides when a guest's photograph stops existing. This is a
+   * human deciding, one row at a time.
+   *
+   * It exists because the only tool an operator had for a single failed
+   * capture was clearing the entire event's history.
+   */
+  router.post('/api/photos/delete', (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as { jobId?: unknown };
+    const jobId = typeof body.jobId === 'string' ? body.jobId : '';
+    const photo = jobId ? store.getEventPhoto(jobId) : undefined;
+    if (!photo) {
+      // Already gone is not a fault: two operators closing the same broken
+      // capture, or a double-submitted form, both land here.
+      res.status(404).json({ error: 'Photo not found' });
+      return;
+    }
+
+    const deleted = store.deleteEventPhoto(jobId);
+    // One line per deletion, and NO guest name — the same rule the clear-all
+    // line follows (T-08-25). A template string so the masking formatters run.
+    cmsPhotoLogger.info(
+      `Deleted one photo from event ${photo.eventId} — job ${jobId}, by a confirmed operator action`,
+    );
+    res.status(200).json({ deleted });
   });
 
   return router;
