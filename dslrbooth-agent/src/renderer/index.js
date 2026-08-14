@@ -13,6 +13,27 @@ const FIELDS = [
   'logDir',
   'autoOpenDisplay',
 ]
+// UAT-06: the four fields the Extension Service may push down (D-16's safe
+// set). Editing one here works immediately -- and is then overwritten the next
+// time the relay connects and pulls configuration, because the CMS is the
+// source of truth for these four and the Agent asks it on every connect.
+// Found on the first booth PC: the operator unticked the display option, saved
+// it, watched config.json hold `false`, and still saw the guest window open --
+// the stored CMS row said `true` and won, silently, exactly as designed.
+//
+// Nothing about that boundary changes here (D-16 and D-17 are locked, and a
+// local edit staying possible is the deliberate recovery path for a booth that
+// cannot reach the CMS). What changes is that the window stops implying
+// otherwise.
+//
+// Mirrors SAFE_AGENT_CONFIG_FIELDS in src/liveConfig.ts. Kept as a literal
+// because the renderer is plain browser JS with no bundler and cannot import
+// it; test/electron-cms-managed-fields.test.ts asserts the two lists are equal,
+// so they cannot drift.
+const CMS_MANAGED_FIELDS = ['logLevel', 'autoOpenDisplay', 'dslrBoothApiPort', 'dslrBoothPassword']
+const CMS_MANAGED_NOTICE =
+  'Managed from the CMS. A change here applies now, but the Extension Service overwrites it the next time the relay connects — change it in /cms/agent to make it stick.'
+
 const SECRET_FIELDS = ['extensionServiceWsToken', 'dslrBoothPassword']
 const SECRET_PRESENCE_KEY = {
   extensionServiceWsToken: 'hasExtensionServiceWsToken',
@@ -29,6 +50,37 @@ function clearFieldErrors() {
     if (el) el.textContent = ''
   }
   byId('save-error').textContent = ''
+}
+
+/**
+ * UAT-06: writes the CMS-managed notice under each of the four safe fields,
+ * and the effective-log-path notice under logDir. Creates the paragraph if the
+ * markup has none, so adding a field to the list needs no HTML change.
+ * Text only -- never markup (T-10-19).
+ */
+function renderFieldNotices(effectiveLogDir) {
+  const notices = CMS_MANAGED_FIELDS.map((field) => [field, CMS_MANAGED_NOTICE])
+  notices.push([
+    'logDir',
+    'The desktop app always writes its log beside its own settings' +
+      (effectiveLogDir ? ' (' + effectiveLogDir + ')' : '') +
+      '. This value is used by the CLI and Windows-service builds, not by this window.',
+  ])
+
+  for (const [field, text] of notices) {
+    const input = byId(field)
+    if (!input) continue
+    let hint = byId('notice-' + field)
+    if (!hint) {
+      hint = document.createElement('p')
+      hint.className = 'field-notice'
+      hint.id = 'notice-' + field
+      const anchor = input.closest('.field') || input.parentElement
+      if (!anchor) continue
+      anchor.appendChild(hint)
+    }
+    hint.textContent = text
+  }
 }
 
 function showFieldErrors(errors) {
@@ -209,6 +261,10 @@ function collectPatch() {
 }
 
 function init() {
+  // UAT-06: rendered before anything async, so the notices are on screen even
+  // if loading the configuration fails.
+  renderFieldNotices()
+
   loadConfigIntoForm().catch((err) => {
     byId('save-error').textContent = String((err && err.message) || err)
   })

@@ -138,7 +138,18 @@ if (!gotLock) {
     // not captured once, for the same "read live, not once" reason
     // `agent.ts`'s reachability probe reads `live.dslrBoothApiPort`.
     const logTail = createLogTail({
-      resolveLogDir: () => store.getSnapshot().logDir,
+      // UAT-05: tail the directory the logger ACTUALLY writes to, which in this
+      // process is always `logDir` above (userData/logs) — every Agent is built
+      // with `bootLogger`, so the stored `logDir` never decides where a line
+      // lands here. Reading `store.getSnapshot().logDir` instead pointed the
+      // pane at the shipped default `'logs'`, a RELATIVE path resolved against
+      // the process working directory — beside the installed .exe under
+      // Program Files, where no log file exists and none could be written. The
+      // pane sat empty on the booth PC while the log filled up correctly a
+      // folder away. The comment forty lines up already warned that the
+      // relative default is unwritable for an installed build; the fix had been
+      // applied to the logger and not to the reader of it.
+      resolveLogDir: () => logDir,
       emit: (line) => {
         mainWindow?.webContents.send(LOG_LINE_PUSH_CHANNEL, line)
       },
