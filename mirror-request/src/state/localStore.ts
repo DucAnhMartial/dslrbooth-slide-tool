@@ -739,6 +739,27 @@ export class LocalStore {
     ).run(stallReason, jobId);
   }
 
+  /**
+   * Records WHY the Agent refused a `start_session`.
+   *
+   * `ack_error_message` has existed since Phase 2 and nothing ever wrote to
+   * it: `onAgentAck` received the Agent's reason, logged it at DEBUG — a level
+   * this service does not run at — and dropped it. Four jobs failed with
+   * `stall_reason = 'agent_nak'` and no recoverable explanation for any of
+   * them, which is how this was found.
+   *
+   * Written on every nak, not only the one that exhausts the retries: the
+   * first refusal is usually the informative one, and by the last attempt the
+   * booth may be failing for a different reason than it started with.
+   *
+   * OPERATOR-ONLY. `status/guestStatus.ts` names this column among the words
+   * that may never cross the guest boundary, and nothing here changes that —
+   * this only makes the value exist for the people already allowed to read it.
+   */
+  recordAckError(jobId: string, message: string): void {
+    this.db.prepare('UPDATE queue_job SET ack_error_message = ? WHERE id = ?').run(message, jobId);
+  }
+
   // idempotency
   isProcessed(regId: string): boolean {
     return this.db.prepare('SELECT 1 FROM processed_id WHERE reg_id = ?').get(regId) !== undefined;

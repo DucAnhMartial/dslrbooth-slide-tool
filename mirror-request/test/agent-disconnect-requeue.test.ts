@@ -33,6 +33,8 @@ function buildStore(jobs: MockJob[]) {
     if (job) job.status = 'queued';
   });
   const failJob = vi.fn();
+  // See queue-timeout-retry.test.ts: the NAK branch records the Agent's reason.
+  const recordAckError = vi.fn();
   const updateJobStatus = vi.fn((id: string, status: string) => {
     const job = jobs.find((j) => j.id === id);
     if (job) job.status = status;
@@ -66,6 +68,7 @@ function buildStore(jobs: MockJob[]) {
     requeueWithRetry,
     requeueNoRetry,
     failJob,
+    recordAckError,
     // tick() sweeps the pending-print registry on its first statement, above
     // the IDLE guard, so every mocked store a QueueService is built with has to
     // satisfy that part of the real LocalStore surface. The shared helper is
@@ -75,7 +78,7 @@ function buildStore(jobs: MockJob[]) {
     ...NO_PHOTO_SWEEP_STUB,
   } as unknown as LocalStore;
 
-  return { store, jobs, requeueWithRetry, requeueNoRetry, failJob, updateJobStatus, getBooth: () => booth };
+  return { store, jobs, requeueWithRetry, requeueNoRetry, failJob, recordAckError, updateJobStatus, getBooth: () => booth };
 }
 
 describe('LocalStore.requeueNoRetry — real SQL proof (D-01, D-12, Phase 2 D-06)', () => {

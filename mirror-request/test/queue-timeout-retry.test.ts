@@ -22,6 +22,11 @@ function buildStore(queued: Array<{ id: string }>) {
   });
   const requeueWithRetry = vi.fn().mockReturnValue({ retries: 1 });
   const failJob = vi.fn();
+  // The NAK branch records WHY the Agent refused (ack_error_message). Added to
+  // the fake rather than made optional on the caller: a `?.` there would let a
+  // real store that stopped providing this method fail silently, which is the
+  // exact class of bug that left four production jobs unexplainable.
+  const recordAckError = vi.fn();
   const store = {
     getBoothState: () => booth,
     getNextQueuedJob: () => queued[0],
@@ -40,6 +45,7 @@ function buildStore(queued: Array<{ id: string }>) {
     getJobRegistration: () => undefined,
     requeueWithRetry,
     failJob,
+    recordAckError,
     // tick() sweeps the pending-print registry on its first statement, above
     // the IDLE guard, so every mocked store a QueueService is built with has to
     // satisfy that part of the real LocalStore surface. The shared helper is
@@ -49,7 +55,7 @@ function buildStore(queued: Array<{ id: string }>) {
     ...NO_PHOTO_SWEEP_STUB,
   } as unknown as LocalStore;
 
-  return { store, updateJobStatus, requeueWithRetry, failJob, getBooth: () => booth };
+  return { store, updateJobStatus, requeueWithRetry, failJob, recordAckError, getBooth: () => booth };
 }
 
 describe('QueueService — live busyTimer timeout joins the bounded retry policy (BTH-02, D-05..D-07)', () => {

@@ -273,7 +273,13 @@ export class QueueService {
    * (plan 02-02). `reason` is always one of the fixed, server-authored
    * stall_reason strings — never guest-supplied text.
    */
-  private handleStall(jobId: string, reason: string): void {
+  /**
+   * `reason` is the stable CATEGORY — it is what `failJob` stores in
+   * `stall_reason` and what the CMS and other code match on. `detail` is free
+   * prose that only ever reaches the log line, so a category can never become
+   * unmatchable because someone appended an error message to it.
+   */
+  private handleStall(jobId: string, reason: string, detail?: string): void {
     // WR-01: the third exit for captureCounts. A stalled job never reaches a
     // close path, so without this its shot count survives to be added onto by
     // the retry attempt (requeueWithRetry preserves the jobId, D-06) or leaks
@@ -282,9 +288,9 @@ export class QueueService {
     const { retries } = this.store.requeueWithRetry(jobId);
     if (retries > this.sessionMaxRetries) {
       this.store.failJob(jobId, reason);
-      queueLogger.warn(`Job ${jobId} failed after ${retries} attempts: ${reason}`);
+      queueLogger.warn(`Job ${jobId} failed after ${retries} attempts: ${reason}${detail ? ` — ${detail}` : ''}`);
     } else {
-      queueLogger.warn(`Job ${jobId} requeued (attempt ${retries + 1}/${this.sessionMaxRetries + 1}): ${reason}`);
+      queueLogger.warn(`Job ${jobId} requeued (attempt ${retries + 1}/${this.sessionMaxRetries + 1}): ${reason}${detail ? ` — ${detail}` : ''}`);
     }
   }
 
@@ -497,10 +503,19 @@ export class QueueService {
     if (ok) {
       this.sessionAcked(jobId);
     } else {
-      queueLogger.debug(`Agent nak for job ${jobId}: ${errorMessage ?? 'no error message'}`);
+      // The Agent's reason used to go to DEBUG — a level this service does not
+      // run at — and nowhere else, so four production jobs failed with
+      // `stall_reason = 'agent_nak'` and no recoverable explanation for any of
+      // them. It now rides handleStall's EXISTING warning rather than adding a
+      // second line: "one stall, one warning" is a property this file's tests
+      // assert, and two lines for one refusal is how a log becomes something
+      // an operator skims past.
+      const reason = errorMessage ?? 'no error message';
+      // Durably too, because a log rotates and a failed job outlives it.
+      this.store.recordAckError(jobId, reason);
       this.store.setBoothIdle();
       this.clearBusyTimer();
-      this.handleStall(jobId, 'agent_nak');
+      this.handleStall(jobId, 'agent_nak', reason);
       this.tick();
     }
   }
