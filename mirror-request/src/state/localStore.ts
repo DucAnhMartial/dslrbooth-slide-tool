@@ -49,6 +49,15 @@ export const DEFAULT_EVENT_CONFIG: EventConfig = Object.freeze({
   // D9-04: both default ON — see the field comments on EventConfig itself.
   showGuestName: true,
   heroEnabled: true,
+  /* CMS-10: how strongly the event background is dimmed, 0-100.
+     72 is what both room screens hard-coded before this was configurable, so
+     an existing event looks identical until someone changes it. It is a
+     SETTING rather than a constant because the right value is a property of
+     the customer's artwork, not of this software: a dark, low-contrast
+     backdrop wants 0 and a bright wedding portrait behind white type still
+     wants most of 72. The operator can see their own screen; this code
+     cannot. */
+  backgroundOverlay: 72,
 });
 
 /** The raw `event` row shape. Never leaves this module — see toEventConfig(). */
@@ -74,6 +83,7 @@ interface EventRow {
   // presentation column above), so `number | null` here is defence-in-depth
   // against a hand-edited row, not an expected state — see toEventConfig().
   show_guest_name: number | null;
+  background_overlay: number | null;
   hero_enabled: number | null;
   created_at: number;
   updated_at: number;
@@ -113,6 +123,13 @@ function toEventConfig(row: EventRow): EventConfig {
     // tested for truthiness, so a stray non-zero-non-one value still reads as
     // ON rather than silently falling through to a default it did not ask for.
     showGuestName: row.show_guest_name === null ? DEFAULT_EVENT_CONFIG.showGuestName : row.show_guest_name !== 0,
+    // Clamped on the way OUT as well as on the way in: a hand-edited database
+    // or a rolled-back deploy must not be able to put an out-of-range number
+    // into a CSS opacity on every TV.
+    backgroundOverlay:
+      row.background_overlay === null || row.background_overlay === undefined
+        ? DEFAULT_EVENT_CONFIG.backgroundOverlay
+        : Math.min(100, Math.max(0, Math.round(row.background_overlay))),
     heroEnabled: row.hero_enabled === null ? DEFAULT_EVENT_CONFIG.heroEnabled : row.hero_enabled !== 0,
   };
 }
@@ -145,6 +162,7 @@ const EVENT_UPDATABLE_COLUMNS = [
   // other column in this list, which are nullable-on-purpose (see the
   // `event` table's own header comment above).
   'show_guest_name',
+  'background_overlay',
   'hero_enabled',
 ] as const;
 
@@ -458,6 +476,12 @@ export class LocalStore {
     }
     if (!hasHeroEnabled) {
       this.db.exec('ALTER TABLE event ADD COLUMN hero_enabled INTEGER NOT NULL DEFAULT 1');
+    }
+    // event.background_overlay — CMS-10. Same additive idiom, and the DEFAULT
+    // is the value both screens previously hard-coded, so every existing row
+    // reads back as exactly what it rendered a moment before this ran.
+    if (!eventColumns.some((c) => c.name === 'background_overlay')) {
+      this.db.exec('ALTER TABLE event ADD COLUMN background_overlay INTEGER NOT NULL DEFAULT 72');
     }
 
     // event_photo.image_url — the file behind dslrBooth's share page. See the

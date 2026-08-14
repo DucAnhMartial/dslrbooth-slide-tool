@@ -12,6 +12,7 @@ import {
   LAYOUT_STYLES,
   FIELD_CAPS,
   PHOTO_COUNT_RANGE,
+  BACKGROUND_OVERLAY_RANGE,
   PHOTO_DURATION_RANGE,
   SAVE_ERROR,
 } from './cmsEventPages';
@@ -183,6 +184,7 @@ const FIELD_VALIDATORS: Record<string, FieldValidator> = {
   qr_cta_text: textField(FIELD_CAPS.qr_cta_text),
   photo_count: intField(PHOTO_COUNT_RANGE),
   photo_duration_ms: intField(PHOTO_DURATION_RANGE),
+  background_overlay: intField(BACKGROUND_OVERLAY_RANGE),
   show_guest_name: boolField,
   hero_enabled: boolField,
 };

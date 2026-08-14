@@ -60,11 +60,15 @@ describe('the background and logo reach both room screens (CMS-07)', () => {
     }
   });
 
-  it('the background sits behind a scrim, so operator text stays legible over any photo', () => {
-    // A bright portrait behind white type is unreadable at TV distance
-    // (UI-01), and choosing a background should not mean solving contrast.
+  it('the background sits behind a scrim whose strength the operator sets (CMS-10)', () => {
+    // Originally a fixed dim, on the reasoning that a bright portrait behind
+    // white type is unreadable at TV distance (UI-01). True — but it made a
+    // deliberately dark backdrop invisible, and how much dimming an image
+    // needs is a fact about that image, not about this software. The scrim
+    // stays; its strength became a setting, with the old constant as the
+    // default so nothing moved on upgrade.
     for (const page of [defaultPage, slidesPage]) {
-      expect(page).toMatch(/#eventBg:after\{[^}]*opacity:\.\d+/);
+      expect(page).toMatch(/#eventBg:after\{[^}]*opacity:var\(--event-bg-overlay,\.72\)/);
     }
   });
 

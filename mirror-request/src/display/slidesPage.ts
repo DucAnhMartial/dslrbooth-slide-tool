@@ -155,7 +155,7 @@ export function renderSlidesPage(): string {
        photograph behind it. Heavier than the waiting screen's scrim for that
        reason. */
     #eventBg{position:fixed;inset:0;z-index:-2;background-size:cover;background-position:center;background-repeat:no-repeat}
-    #eventBg:after{content:"";position:absolute;inset:0;background:#000;opacity:.82}
+    #eventBg:after{content:"";position:absolute;inset:0;background:#000;opacity:var(--event-bg-overlay,.72)}
     /* Top-RIGHT: the screen-identity badge owns the top-left corner. */
     #eventLogo{position:fixed;top:1.6vw;right:1.6vw;z-index:5;max-height:6vh;max-width:16vw;object-fit:contain;pointer-events:none;opacity:.9}
 
@@ -233,6 +233,15 @@ export function renderSlidesPage(): string {
        screen. NO QR here — this screen is photographs, and a registration
        code over someone's portrait is an advert on a picture frame. The
        waiting screen is where people who have not registered are looking. */
+    /* CMS-10: the dim is the operator's number now, not a constant of ours.
+       A heavy default kept white type legible over a bright photograph, and
+       made a deliberately dark backdrop invisible — which is a judgement about
+       the customer's own artwork that this code is in no position to make.
+       Clamped here too: the projection clamps, and a page that trusts a number
+       it was handed is a page one bad row away from an unreadable wall. */
+    var ov=typeof cfg.backgroundOverlay==='number'?cfg.backgroundOverlay:72;
+    ov=Math.min(100,Math.max(0,ov));
+    document.documentElement.style.setProperty('--event-bg-overlay',String(ov/100));
     var bg=document.querySelector('#eventBg');
     if(bg){
       if(cfg.backgroundUrl){ bg.style.backgroundImage='url("'+encodeURI(cfg.backgroundUrl)+'")'; bg.hidden=false; }

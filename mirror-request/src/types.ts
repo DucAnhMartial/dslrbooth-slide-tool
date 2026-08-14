@@ -118,6 +118,17 @@ export interface EventConfig {
   // gates D-09's just-captured takeover (off means the capture still joins
   // the slideshow rotation, it simply does not take over the screen).
   showGuestName: boolean;
+  /**
+   * CMS-10: how strongly the event background image is dimmed behind the
+   * content, 0-100. Zero shows the artwork untouched.
+   *
+   * Configurable rather than constant because the correct value belongs to the
+   * customer's own image: both room screens hard-coded a heavy dim so that
+   * white type stayed legible over a bright photograph, which made a
+   * deliberately dark, low-contrast backdrop nearly invisible. The operator
+   * can see their screen; this software cannot.
+   */
+  backgroundOverlay: number;
   heroEnabled: boolean;
 }
 

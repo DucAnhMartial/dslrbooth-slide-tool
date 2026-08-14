@@ -143,7 +143,7 @@ export function renderDisplayPage(): string {
        white type is unreadable at TV distance (UI-01), and the operator
        choosing a background should not have to also solve contrast. */
     #eventBg{position:fixed;inset:0;z-index:-2;background-size:cover;background-position:center;background-repeat:no-repeat}
-    #eventBg:after{content:"";position:absolute;inset:0;background:var(--paper);opacity:.72}
+    #eventBg:after{content:"";position:absolute;inset:0;background:var(--paper);opacity:var(--event-bg-overlay,.72)}
     /* Top-RIGHT: the screen-identity badge owns the top-left corner. */
     #eventLogo{position:fixed;top:1.6vw;right:1.6vw;z-index:5;max-height:7vh;max-width:18vw;object-fit:contain;pointer-events:none}
 
@@ -309,6 +309,15 @@ export function renderDisplayPage(): string {
      image in the CMS clears it on every TV at the next snapshot instead of
      leaving the old one until someone reloads. */
   function applyEventImages(cfg){
+    /* CMS-10: the dim is the operator's number now, not a constant of ours.
+       A heavy default kept white type legible over a bright photograph, and
+       made a deliberately dark backdrop invisible — which is a judgement about
+       the customer's own artwork that this code is in no position to make.
+       Clamped here too: the projection clamps, and a page that trusts a number
+       it was handed is a page one bad row away from an unreadable wall. */
+    var ov=typeof cfg.backgroundOverlay==='number'?cfg.backgroundOverlay:72;
+    ov=Math.min(100,Math.max(0,ov));
+    document.documentElement.style.setProperty('--event-bg-overlay',String(ov/100));
     var bg=document.querySelector('#eventBg');
     if(bg){
       if(cfg.backgroundUrl){

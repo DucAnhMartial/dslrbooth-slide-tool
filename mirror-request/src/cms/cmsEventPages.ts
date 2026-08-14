@@ -75,6 +75,8 @@ export const FIELD_CAPS = {
 
 /** How many photos the slideshow holds. */
 export const PHOTO_COUNT_RANGE = { min: 1, max: 50 } as const;
+/** CMS-10: percent, so 0 means the operator's artwork is shown untouched. */
+export const BACKGROUND_OVERLAY_RANGE = { min: 0, max: 100 } as const;
 
 /**
  * How long each photo is held, in milliseconds. The floor is a legibility
@@ -479,6 +481,7 @@ export const FIELD_SCREEN_MAP: Record<string, ScreenTagKey> = {
   name: 'cmsOnly',
   logo_url: 'both',
   background_url: 'both',
+  background_overlay: 'both',
   color_dominant: 'both',
   color_secondary: 'both',
   color_accent: 'both',
@@ -640,6 +643,16 @@ export function renderCmsEventFormPage(data: {
         value: event.backgroundUrl,
         hint: 'Ảnh nền của màn hình phòng, cũng là ảnh hiển thị ở trạng thái chờ khi chưa có khách nào.',
       })}
+
+      <div class="field">
+        <label for="background_overlay">Độ mờ phủ lên ảnh nền (%)${screenTag('background_overlay')}</label>
+        <input id="background_overlay" name="background_overlay" type="number"
+          min="${BACKGROUND_OVERLAY_RANGE.min}" max="${BACKGROUND_OVERLAY_RANGE.max}"
+          value="${event.backgroundOverlay}">
+        <p class="muted">Từ ${BACKGROUND_OVERLAY_RANGE.min} đến ${BACKGROUND_OVERLAY_RANGE.max}.
+          <b>0 = hiện nguyên ảnh nền, không phủ gì.</b> Số càng cao thì ảnh nền càng mờ đi và chữ càng dễ đọc.
+          Ảnh nền sáng và nhiều chi tiết thì cần số cao; ảnh tối, đơn giản thì để thấp hoặc 0.</p>
+      </div>
 
       <h2>Màu sắc</h2>
       <div class="grid">
