@@ -4,6 +4,14 @@ import type { LocalStore } from '../src/state/localStore';
 import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
 import { NO_PHOTO_SWEEP_STUB } from './helpers/noPhotoSweep';
 
+const CONFIG = {
+  SESSION_TIMEOUT_MS: 300_000,
+  NEXT_GUEST_COUNTDOWN_MS: 7_000,
+  SESSION_MAX_RETRIES: 2,
+  BOOTH_RELEASE_TIMEOUT_MS: 120_000,
+  RETAKE_GRACE_MS: 3_000,
+};
+
 describe('Queue countdown with multiple registrations', () => {
   afterEach(() => vi.useRealTimers());
 
@@ -12,20 +20,30 @@ describe('Queue countdown with multiple registrations', () => {
     const queued = [{ id: 'form-a' }, { id: 'form-b' }, { id: 'form-c' }];
     let booth = 'IDLE';
     let currentJobId: string | undefined;
+    let attemptOpen = false;
+    let attemptNo = 0;
+    const jobStatus: Record<string, string> = {};
     const store = {
       getBoothState: () => booth,
+      getBoothStateDetailed: () => ({ state: booth, updated_at: new Date().toISOString() }),
+      getInFlightJobs: () => [],
       getNextQueuedJob: () => queued[0],
-      setBoothState: (state: string) => { booth = state; currentJobId = undefined; },
-      setBoothBusy: (jobId?: string | null) => { booth = 'BUSY'; currentJobId = jobId ?? undefined; },
-      setBoothIdle: () => { booth = 'IDLE'; currentJobId = undefined; },
-      setBoothTimeout: () => { booth = 'IDLE'; currentJobId = undefined; },
+      setBoothState: (state: string) => { booth = state; currentJobId = undefined; attemptOpen = false; attemptNo = 0; },
+      setBoothBusy: (jobId?: string | null) => { booth = 'BUSY'; currentJobId = jobId ?? undefined; attemptOpen = false; attemptNo = 0; },
+      setBoothIdle: () => { booth = 'IDLE'; currentJobId = undefined; attemptOpen = false; attemptNo = 0; },
+      setBoothTimeout: () => { booth = 'IDLE'; currentJobId = undefined; attemptOpen = false; attemptNo = 0; },
       getBoothCurrentJobId: () => currentJobId,
       setBoothCurrentJob: (jobId: string | null) => { currentJobId = jobId ?? undefined; },
-      getJob: () => undefined,
+      getBoothAttempt: () => ({ attemptOpen, attemptNo }),
+      openBoothAttempt: () => { attemptOpen = true; attemptNo += 1; return { attemptOpen, attemptNo }; },
+      closeBoothAttempt: () => { attemptOpen = false; },
+      getJob: (id: string) => (id in jobStatus ? { id, status: jobStatus[id] } : { id, status: 'queued' }),
       updateJobStatus: (id: string, status: string) => {
+        jobStatus[id] = status;
         if (status === 'dispatched') queued.splice(queued.findIndex(job => job.id === id), 1);
       },
-      completeJob: () => true,
+      completeJob: (id: string) => { jobStatus[id] = 'completed'; return true; },
+      closeJobNoPhoto: (id: string) => { jobStatus[id] = 'no_photo'; return true; },
       getQueuePosition: () => 1,
       getQueueLength: () => queued.length,
       getQueuedGuestSummaries: () => queued.map((job, index) => ({ jobId: job.id, name: `Guest ${job.id}`, position: index + 1 })),
@@ -36,11 +54,15 @@ describe('Queue countdown with multiple registrations', () => {
       // cannot drift away from the SQL they stand in for (07-03).
       ...createPendingPrintRegistry().registry,
       getJobRegistration: () => undefined,
+      getActiveEventId: () => undefined,
+      requeueWithRetry: () => ({ retries: 1 }),
+      failJob: () => {},
       ...NO_PHOTO_SWEEP_STUB,
     } as unknown as LocalStore;
-    const service = new QueueService(store);
+    const service = new QueueService(store, CONFIG);
     const dispatched: string[] = [];
     service.bindSendCommand(command => dispatched.push(command.jobId));
+    service.bindAnnouncement(() => {});
 
     service.start();
     vi.advanceTimersByTime(250);
@@ -52,9 +74,18 @@ describe('Queue countdown with multiple registrations', () => {
     expect(dispatched).toEqual(['form-a']);
     expect(booth).toBe('BUSY');
 
-    service.onAgentAck('form-a', true);
-    service.sessionEnded();
+    // D11-01/D11-06: an approving `printing` — not a bare Agent ack — is what
+    // both opens and finalizes an attempt now. The real dslrBooth session_start
+    // event (not onAgentAck, which only confirms the dispatch command itself)
+    // is what opens the attempt, and a matching `printing` finalizes it
+    // immediately (D11-05 door 1, 0s wait) so FIFO ordering can be asserted
+    // without waiting out RETAKE_GRACE_MS.
+    service.onAgentEvent('session_start', 'form-a');
+    const composite = 'C:\\dslrBooth\\Test_event\\Prints\\form-a.jpg';
+    service.onAgentEvent('processing_start', 'form-a', { param2: composite });
+    service.onAgentEvent('printing', 'form-a', { param1: composite });
     expect(service.getAnnouncement()?.jobId).toBe('form-b');
+
     vi.advanceTimersByTime(7_000);
     expect(dispatched).toEqual(['form-a', 'form-b']);
     expect(queued.map(job => job.id)).toEqual(['form-c']);
@@ -78,6 +109,8 @@ describe('booth state transitions', () => {
     // than only the latest value.
     const boothSequence: string[] = ['IDLE'];
     let booth = 'IDLE';
+    let attemptOpen = false;
+    let attemptNo = 0;
     const queued = [
       { id: 'job-1', name: 'Guest One' },
       { id: 'job-2', name: 'Guest Two' },
@@ -90,7 +123,7 @@ describe('booth state transitions', () => {
       boothSequence.push(state);
     };
 
-    const requeueWithRetry = vi.fn();
+    const requeueWithRetry = vi.fn(() => ({ retries: 1 }));
     const failJob = vi.fn();
 
     const store = {
@@ -103,12 +136,15 @@ describe('booth state transitions', () => {
         const next = queued.find((j) => jobStatus[j.id] === 'queued');
         return next ? { id: next.id } : undefined;
       },
-      setBoothState: (state: string) => { pushState(state); currentJobId = undefined; },
-      setBoothBusy: (jobId?: string | null) => { pushState('BUSY'); currentJobId = jobId ?? undefined; },
-      setBoothIdle: () => { pushState('IDLE'); currentJobId = undefined; },
-      setBoothTimeout: () => { pushState('IDLE'); currentJobId = undefined; },
+      setBoothState: (state: string) => { pushState(state); currentJobId = undefined; attemptOpen = false; attemptNo = 0; },
+      setBoothBusy: (jobId?: string | null) => { pushState('BUSY'); currentJobId = jobId ?? undefined; attemptOpen = false; attemptNo = 0; },
+      setBoothIdle: () => { pushState('IDLE'); currentJobId = undefined; attemptOpen = false; attemptNo = 0; },
+      setBoothTimeout: () => { pushState('IDLE'); currentJobId = undefined; attemptOpen = false; attemptNo = 0; },
       getBoothCurrentJobId: () => currentJobId,
       setBoothCurrentJob: (jobId: string | null) => { currentJobId = jobId ?? undefined; },
+      getBoothAttempt: () => ({ attemptOpen, attemptNo }),
+      openBoothAttempt: () => { attemptOpen = true; attemptNo += 1; return { attemptOpen, attemptNo }; },
+      closeBoothAttempt: () => { attemptOpen = false; },
       getJob: (id: string) => (id in jobStatus ? { id, status: jobStatus[id] } : undefined),
       updateJobStatus: (id: string, status: string) => {
         jobStatus[id] = status;
@@ -123,6 +159,11 @@ describe('booth state transitions', () => {
         jobStatus[jobId] = 'completed';
         return true;
       },
+      closeJobNoPhoto: (jobId: string) => {
+        if (jobStatus[jobId] !== 'in_progress') return false;
+        jobStatus[jobId] = 'no_photo';
+        return true;
+      },
       getQueuePosition: () => 1,
       // tick() sweeps the pending-print registry on every interval and
       // onPrintComposite() opens a slot, so the mocked store must satisfy
@@ -134,6 +175,7 @@ describe('booth state transitions', () => {
         job: { id: jobId },
         registration: { id: 'reg-1', name: 'Guest One', email: '', phone: '', mode: 'boomerang', registered_at: '' },
       }),
+      getActiveEventId: () => undefined,
       requeueWithRetry,
       failJob,
       ...NO_PHOTO_SWEEP_STUB,
@@ -145,9 +187,10 @@ describe('booth state transitions', () => {
   it('IDLE with two queued guests: the first tick writes ANNOUNCING and sends no Agent command; getAnnouncement() reports the first guest', () => {
     vi.useFakeTimers();
     const { store, boothSequence } = buildStore();
-    const service = new QueueService(store);
+    const service = new QueueService(store, CONFIG);
     const dispatched: Array<{ type: string; action: string; jobId: string }> = [];
     service.bindSendCommand((cmd) => dispatched.push(cmd));
+    service.bindAnnouncement(() => {});
 
     service.start();
     vi.advanceTimersByTime(250);
@@ -162,8 +205,9 @@ describe('booth state transitions', () => {
   it('while ANNOUNCING, further ticks announce nothing else and dispatch nothing — the second guest waits', () => {
     vi.useFakeTimers();
     const { store, boothSequence } = buildStore();
-    const service = new QueueService(store);
+    const service = new QueueService(store, CONFIG);
     service.bindSendCommand(() => {});
+    service.bindAnnouncement(() => {});
 
     service.start();
     vi.advanceTimersByTime(250);
@@ -179,9 +223,10 @@ describe('booth state transitions', () => {
   it('the countdown elapsing: booth is BUSY, the job is dispatched, and exactly one command is sent shaped {type, action, jobId, mode} (QUE-03, AGT-02)', () => {
     vi.useFakeTimers();
     const { store, boothSequence, jobStatus } = buildStore();
-    const service = new QueueService(store);
+    const service = new QueueService(store, CONFIG);
     const dispatched: Array<{ type: string; action: string; jobId: string; mode?: string }> = [];
     service.bindSendCommand((cmd) => dispatched.push(cmd));
+    service.bindAnnouncement(() => {});
 
     service.start();
     vi.advanceTimersByTime(250);
@@ -198,8 +243,9 @@ describe('booth state transitions', () => {
   it('session_start moves the job to in_progress and leaves the booth BUSY; no second guest is announced', () => {
     vi.useFakeTimers();
     const { store, boothSequence, jobStatus } = buildStore();
-    const service = new QueueService(store);
+    const service = new QueueService(store, CONFIG);
     service.bindSendCommand(() => {});
+    service.bindAnnouncement(() => {});
 
     service.start();
     vi.advanceTimersByTime(250);
@@ -219,11 +265,12 @@ describe('booth state transitions', () => {
     service.stop();
   });
 
-  it('a print composite completes the in-flight job, and session_end then releases the booth to announce the second guest without further external input (QUE-04, D-01/D-02)', () => {
+  it('a print composite alone does not begin the announcement — an unapproved session_end holds the booth (and the second guest) through the whole grace window; only grace expiry (or an approving printing) frees it (QUE-04, D-01/D-02, D11-02/D11-06)', () => {
     vi.useFakeTimers();
     const { store, boothSequence, jobStatus } = buildStore();
-    const service = new QueueService(store);
+    const service = new QueueService(store, CONFIG);
     service.bindSendCommand(() => {});
+    service.bindAnnouncement(() => {});
 
     service.start();
     vi.advanceTimersByTime(250);
@@ -231,12 +278,27 @@ describe('booth state transitions', () => {
     service.onAgentEvent('session_start', 'job-1');
     service.onAgentEvent('processing_start', 'job-1', { param5: 'C:\\dslrBooth\\Test_event\\Prints\\composite.jpg' });
 
-    expect(jobStatus['job-1']).toBe('completed');
-    // Completion alone does not release the booth — that is D-02's split.
+    // D11-02: the composite alone opens the slot and completes nothing.
+    expect(jobStatus['job-1']).toBe('in_progress');
     expect(boothSequence).toEqual(['IDLE', 'ANNOUNCING', 'BUSY']);
 
-    service.onAgentEvent('session_end');
+    service.onAgentEvent('session_end'); // unapproved — opens grace, does NOT release
 
+    // THE HELD WINDOW NOW INCLUDES GRACE, NOT ONLY THE DISPATCHED WINDOW: no
+    // new booth-state entry, and job-2 is not announced, for the entire
+    // grace duration — the announcement must not begin while the booth is
+    // still held for a possible retake.
+    expect(boothSequence).toEqual(['IDLE', 'ANNOUNCING', 'BUSY']);
+    expect(service.getAnnouncement()).toBeNull();
+    vi.advanceTimersByTime(CONFIG.RETAKE_GRACE_MS - 1);
+    expect(boothSequence).toEqual(['IDLE', 'ANNOUNCING', 'BUSY']);
+    expect(service.getAnnouncement()).toBeNull();
+
+    // Grace expires: no retake arrived, no photo was ever uploaded, so the
+    // grace door closes job-1 as no_photo and releases the booth — only then
+    // is job-2 announced.
+    vi.advanceTimersByTime(1);
+    expect(jobStatus['job-1']).toBe('no_photo');
     expect(boothSequence).toEqual(['IDLE', 'ANNOUNCING', 'BUSY', 'IDLE', 'ANNOUNCING']);
     expect(service.getAnnouncement()?.jobId).toBe('job-2');
 
@@ -246,14 +308,17 @@ describe('booth state transitions', () => {
   it('neither requeueWithRetry nor failJob is called anywhere on the happy path', () => {
     vi.useFakeTimers();
     const { store, requeueWithRetry, failJob } = buildStore();
-    const service = new QueueService(store);
+    const service = new QueueService(store, CONFIG);
     service.bindSendCommand(() => {});
+    service.bindAnnouncement(() => {});
 
     service.start();
     vi.advanceTimersByTime(250);
     vi.advanceTimersByTime(7_000);
     service.onAgentEvent('session_start', 'job-1');
-    service.onAgentEvent('session_end');
+    const composite = 'C:\\dslrBooth\\Test_event\\Prints\\composite.jpg';
+    service.onAgentEvent('processing_start', 'job-1', { param5: composite });
+    service.onAgentEvent('printing', 'job-1', { param1: composite }); // approves — releases with 0s wait
     vi.advanceTimersByTime(7_000);
 
     expect(requeueWithRetry).not.toHaveBeenCalled();
@@ -265,9 +330,10 @@ describe('booth state transitions', () => {
   it('after stop(), advancing timers produces no further dispatch', () => {
     vi.useFakeTimers();
     const { store } = buildStore();
-    const service = new QueueService(store);
+    const service = new QueueService(store, CONFIG);
     const dispatched: string[] = [];
     service.bindSendCommand((cmd) => dispatched.push(cmd.jobId));
+    service.bindAnnouncement(() => {});
 
     service.start();
     vi.advanceTimersByTime(250);

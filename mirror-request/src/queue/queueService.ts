@@ -480,6 +480,23 @@ export class QueueService {
     const currentJobId = this.store.getBoothCurrentJobId();
 
     if (currentJobId !== undefined && jobId === currentJobId) {
+      // 11-02 (Rule 1/2 fix, found while pinning CR-01 against the retake
+      // branch): the retake branch below returns WITHOUT ever calling
+      // sessionAcked(), which is the ONLY place the terminal-status guard
+      // lived until now. `attempt.attemptNo >= 1` alone cannot distinguish a
+      // legitimate retake from a job that reached a terminal state while the
+      // booth was — unexpectedly — still bound to it (finalizePendingPrint()
+      // always clears the binding in the same act, so this should never
+      // happen in practice, but "should never happen" is exactly the class
+      // of assumption D-06/D-09's own terminal-status guard exists to not
+      // depend on). Checked here, before the retake branch, so the guard is
+      // exactly as strict on this path as it already is on sessionAcked()'s.
+      const job = this.store.getJob(jobId);
+      if (job && (job.status === 'completed' || job.status === 'failed' || job.status === 'no_photo')) {
+        queueLogger.warn(`session_start ignored for ${jobId}: already ${job.status}`);
+        return;
+      }
+
       const attempt = this.store.getBoothAttempt();
       if (attempt.attemptNo >= 1) {
         // A retake: clear the grace timer, open a new attempt, restart the
