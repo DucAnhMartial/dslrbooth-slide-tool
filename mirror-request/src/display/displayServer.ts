@@ -217,6 +217,25 @@ export class DisplayServer {
    * is idle and nothing has moved.
    */
   private maybeBroadcast(): void {
+    // No screen is listening: skip the whole tick before building anything.
+    // buildSnapshot() issues roughly eight store reads, so an unattended
+    // service was running ~32 queries a second against a growing database
+    // forever, for an audience of nobody.
+    //
+    // Returning BEFORE the build, rather than before the send, is the point —
+    // a guard placed after the build would still pay the queries. And it is
+    // safe to leave `lastSent` untouched (deliberately not cleared) because
+    // the connection handler above always sends an unconditional fresh
+    // snapshot and reseeds `lastSent` from it. Whatever staleness accrues
+    // while the room is empty is therefore overwritten by the first client to
+    // arrive, before any diff is ever computed against it.
+    //
+    // The interval itself is left running rather than stopped and restarted
+    // on connect/disconnect: an empty tick is one Set size check, whereas a
+    // start/stop pair introduces a second piece of lifecycle state that
+    // stop() and the connection/close handlers would all have to agree on.
+    if (this.clients.size === 0) return;
+
     const msg = JSON.stringify({ type: 'snapshot', data: this.buildSnapshot() });
     if (msg === this.lastSent) return;
     this.lastSent = msg;

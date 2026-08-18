@@ -183,6 +183,19 @@ export function renderCmsDashboardPage(data: {
     .empty{padding:var(--sp-2xl) 0;text-align:center}
     .create{display:flex;gap:var(--sp-md);margin-bottom:var(--sp-lg)}
     .create input{flex:1}
+    /* The health strip. Two visual states and no third: silent when nothing is
+       wrong (a muted one-liner, so an operator learns what "fine" looks like
+       and notices when it changes), and a bordered warning list when something
+       is. Deliberately NOT a red alert bar — every condition it reports is a
+       service that is still serving, and a page that cries outage for a stale
+       notification is a page people stop reading. */
+    .health{margin-bottom:var(--sp-lg);font-size:14px}
+    .health .ok{color:var(--text-muted)}
+    .health .bad{background:var(--surface);border:1px solid var(--destructive);
+      border-radius:8px;padding:var(--sp-md)}
+    .health .bad strong{color:var(--destructive)}
+    .health ul{list-style:disc;padding-left:var(--sp-lg);margin:var(--sp-sm) 0 0;max-height:none}
+    .health li{padding:2px 0;border:0}
   </style>
 </head>
 <body>
@@ -191,6 +204,7 @@ export function renderCmsDashboardPage(data: {
     <h1>Bảng điều khiển sự kiện</h1>
     <form method="post" action="/cms/logout"><button class="secondary" type="submit">Đăng xuất</button></form>
   </header>
+  <div class="health" id="healthStrip"></div>
   <div class="card">
     <form class="create" id="createForm">
       <label class="sr-only" for="newName" hidden>Tên sự kiện</label>
@@ -201,6 +215,42 @@ export function renderCmsDashboardPage(data: {
   </div>
 </main>
 <script>
+  // Health strip. Fetched from /health rather than rendered server-side into
+  // this page, for one reason: the operator's laptop is already on
+  // CMS_IP_WHITELIST, which is a subset of what /health's own gate allows, so
+  // the browser can read it directly — and doing it this way means the CMS
+  // store interface does not have to grow two counting methods it otherwise
+  // has no use for, just to carry numbers through to a template.
+  //
+  // Built with createElement/textContent, never innerHTML with interpolated
+  // strings. The warning text is this service's own and contains no user
+  // input today; assembling it as DOM rather than as markup is what keeps
+  // that true if a future warning ever quotes an event name.
+  (async function(){
+    var strip=document.querySelector('#healthStrip');
+    try{
+      var res=await fetch('/health');
+      if(!res.ok)return;                       // 403 from a stricter deployment: show nothing.
+      var h=await res.json();
+      if(!h.warnings||!h.warnings.length){
+        var ok=document.createElement('p');
+        ok.className='ok';ok.style.margin='0';
+        ok.textContent='Hệ thống bình thường · chế độ '+h.mode+' · booth '+h.boothState+
+          ' · Agent '+(h.agentOnline?'đã kết nối':'chưa kết nối');
+        strip.appendChild(ok);
+        return;
+      }
+      var box=document.createElement('div');box.className='bad';
+      var title=document.createElement('strong');
+      title.textContent='Cần chú ý ('+h.warnings.length+')';
+      box.appendChild(title);
+      var list=document.createElement('ul');
+      h.warnings.forEach(function(w){var li=document.createElement('li');li.textContent=w;list.appendChild(li)});
+      box.appendChild(list);
+      strip.appendChild(box);
+    }catch(e){/* the dashboard's own job must not depend on this */}
+  })();
+
   // Both controls below are mutating, so both take the shared in-flight
   // disable (UI-SPEC G1) and both reload on success — the server re-renders
   // the list rather than this page maintaining its own copy of the state.

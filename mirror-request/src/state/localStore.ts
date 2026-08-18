@@ -189,6 +189,8 @@ export class LocalStore {
     this.db.pragma('journal_mode = WAL');
     this.bootstrap();
     this.migrate();
+    // After migrate(), never before — see createIndexes()'s header.
+    this.createIndexes();
   }
 
   bootstrap(): void {
@@ -398,6 +400,51 @@ export class LocalStore {
         previous_json TEXT,
         updated_at    TEXT NOT NULL DEFAULT 'now'
       );
+    `);
+  }
+
+  /**
+   * Indexes, created AFTER migrate() rather than inside bootstrap() — the
+   * ordering is load-bearing, not stylistic. `idx_notification_status_due`
+   * indexes `notification_record.dueAt`, and on a database written before
+   * plan 07-xx that column does not exist until migrate()'s ALTER TABLE has
+   * run. Creating the index in bootstrap() would therefore crash at startup
+   * on exactly the databases migrate() exists to rescue. Any index added
+   * here may safely reference a migrated column; one added to bootstrap()
+   * may not.
+   *
+   * `CREATE INDEX IF NOT EXISTS` is idempotent, so this runs on every boot as
+   * a no-op, matching bootstrap()'s own idiom. Adding an index is additive
+   * and reversible, so this respects D-14's never-destroy rule: no DROP, no
+   * table recreate, no data touched.
+   *
+   * Each of the three exists because a query on the 4 Hz display path or the
+   * 3-second notification sweep would otherwise scan a table that grows for
+   * the whole event and is never trimmed — D-11 forbids automatic expiry on
+   * `event_photo`, so it only ever gets longer.
+   */
+  createIndexes(): void {
+    this.db.exec(`
+      -- listEventPhotos()/getMostRecentEventPhoto(): WHERE event_id = ?
+      -- ORDER BY captured_at DESC, evaluated on every buildSnapshot(). DESC is
+      -- declared in the index so SQLite can walk it in the query's own
+      -- direction and skip the sort step entirely, not merely the scan.
+      CREATE INDEX IF NOT EXISTS idx_event_photo_event_captured
+        ON event_photo (event_id, captured_at DESC);
+
+      -- getQueuedGuestSummaries()/getNextQueuedJob()/getQueuedJobs():
+      -- WHERE status = 'queued' ORDER BY queued_at ASC. Leading column is the
+      -- equality predicate, trailing column is the sort — the order that lets
+      -- one index serve both halves.
+      CREATE INDEX IF NOT EXISTS idx_queue_job_status_queued_at
+        ON queue_job (status, queued_at);
+
+      -- getDueNotifications(): WHERE status IN (...) AND dueAt <= ?
+      -- ORDER BY dueAt ASC, run every NOTIFY_SWEEP_INTERVAL_MS. Terminal rows
+      -- ('delivered'/'failed') accumulate for the whole event and are exactly
+      -- the rows this predicate must keep stepping over without an index.
+      CREATE INDEX IF NOT EXISTS idx_notification_status_due
+        ON notification_record (status, dueAt);
     `);
   }
 
@@ -881,8 +928,95 @@ export class LocalStore {
     return idx >= 0 ? idx + 1 : undefined;
   }
 
+  /**
+   * COUNT(*), not `getQueuedJobs().length`.
+   *
+   * This is called from DisplayServer.buildSnapshot(), which runs four times a
+   * second for the whole event. The previous implementation answered "how
+   * many" by selecting every queued row — all twelve columns of each — and
+   * taking the length of the resulting array. Measured 2026-08-16 against the
+   * COUNT(*) below, at queue depths a real event reaches:
+   *
+   *      depth      old        new     ratio
+   *         10   0.193ms    0.017ms      11x
+   *        100   0.964ms    0.022ms      43x
+   *        400   3.416ms    0.041ms      84x
+   *       1000   8.308ms    0.092ms      91x
+   *
+   * For scale: building the ENTIRE rest of the snapshot against a 10,000-photo
+   * history costs 2.6ms. At a 400-deep queue this one count cost more than
+   * everything else in the tick combined, and it grew with the queue while
+   * every other read stayed flat.
+   *
+   * Found by a full-journey load test, not by inspection — it is invisible
+   * until real people are actually waiting in line. Uses
+   * idx_queue_job_status_queued_at's leading column, so the count never scans
+   * past a non-queued row either.
+   */
   getQueueLength(): number {
-    return this.getQueuedJobs().length;
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM queue_job WHERE status = 'queued'")
+      .get() as { n: number };
+    return row.n;
+  }
+
+  /**
+   * The longest-running job the booth currently owns, or undefined when the
+   * booth owns nothing.
+   *
+   * Exists for the health report, and for one specific failure mode that has
+   * no other observable signature: an Agent that is connected and
+   * authenticated but is not acting on commands — a version skew in the
+   * protocol, a booth whose dslrBooth has died behind a still-live relay.
+   * From the outside that is indistinguishable from a guest taking their time.
+   * `isAgentOnline()` says true, the room screen renders normally, and nothing
+   * is logged until startBusyTimer() gives up SESSION_TIMEOUT_MS later — five
+   * minutes per guest, with the whole queue stopped behind it.
+   *
+   * Observed for real: a client that answered every heartbeat but ignored an
+   * action name it did not recognise held the queue for the full timeout while
+   * every surface reported health.
+   *
+   * A narrow projection, never a raw row — three scalar columns, no guest
+   * name, and nothing that could reach a display or a health payload by
+   * accident.
+   */
+  getOldestInFlightJob(): { id: string; status: string; dispatchedAt: number } | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT id, status, dispatched_at AS dispatchedAt FROM queue_job
+         WHERE status IN ('dispatched','in_progress') AND dispatched_at IS NOT NULL
+         ORDER BY dispatched_at ASC LIMIT 1`,
+      )
+      .get() as { id: string; status: string; dispatchedAt: number } | undefined;
+    return row;
+  }
+
+  /**
+   * Row counts per status, for the two tables an operator needs a number from
+   * when something has gone quiet. Both return a plain object keyed by the
+   * status values actually present — never a fixed shape — so a status added
+   * later cannot silently vanish from the health report by being absent from
+   * a hard-coded key list.
+   *
+   * These are COUNT(*) aggregates by design: no row, and therefore no guest
+   * name, email or phone, is read. That keeps them safe to expose on an
+   * operational endpoint, which is the same structural guarantee
+   * DisplayServer.buildSnapshot() relies on (see its header note) — the
+   * absence of a raw-row read IS the guarantee.
+   */
+  countQueueJobsByStatus(): Record<string, number> {
+    const rows = this.db
+      .prepare('SELECT status, COUNT(*) AS n FROM queue_job GROUP BY status')
+      .all() as Array<{ status: string; n: number }>;
+    return Object.fromEntries(rows.map((r) => [r.status, r.n]));
+  }
+
+  countNotificationsByStatus(): Record<string, number> {
+    const rows = this.db
+      .prepare('SELECT status, COUNT(*) AS n FROM notification_record GROUP BY status')
+      .all() as Array<{ status: string; n: number }>;
+    return Object.fromEntries(rows.map((r) => [r.status, r.n]));
   }
 
   // D-02's poisoned-sample exclusion, expressed structurally. The

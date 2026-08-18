@@ -25,14 +25,49 @@ const formatFile = winston.format.combine(
   })
 );
 
-const fileTransport = new DailyRotateFile({
-  filename: 'logs/extension-service-%DATE%.log',
-  datePattern: 'YYYY-MM-DD',
-  zippedArchive: true,
-  maxSize: '20m',
-  maxFiles: '14d',
-  format: formatFile,
-});
+/**
+ * The rotating operational log — every mode EXCEPT test.
+ *
+ * Measured 2026-08-16: a single `vitest run` wrote 20 `error` lines into
+ * `logs/extension-service-<today>.log`, the same file an operator reads to
+ * find out what a booth did during an event. None of the 20 was real — they
+ * were synthetic fixtures (`job-a ... boom`, `weird_unmapped_status`) from
+ * suites deliberately exercising failure paths. Deciding the running service
+ * was healthy that day meant reading the file and hand-filtering fixtures out
+ * of it.
+ *
+ * That is worse than untidy. This log is diagnostic evidence, and evidence
+ * that has to be filtered before it can be trusted is evidence people stop
+ * consulting — which is exactly the failure this phase's /health endpoint was
+ * added to end. A suite that manufactures errors on purpose must not deposit
+ * them where real errors are looked for.
+ *
+ * Suppressed by NODE_ENV rather than by an opt-out flag, matching the console
+ * transport's own gate immediately below: no supported way to switch the
+ * production log OFF, only a mode in which it was never on. Tests keep the
+ * console transport (LOG_LEVEL=error under vitest, so it stays near-silent)
+ * and every logger method stays live, because suites spy on `logger.warn` /
+ * `logger.error` to assert what was reported — suppressing the transport must
+ * not become suppressing the logger. All three properties are pinned by
+ * test/logging-test-isolation.test.ts, which is also the only place in the
+ * suite that reads a log file or inspects `logger.transports`.
+ */
+const isTestEnv = process.env.NODE_ENV === 'test';
+
+// Constructed conditionally, not constructed-then-excluded: DailyRotateFile
+// opens its stream and creates `logs/` on instantiation, so building one and
+// leaving it out of `transports` would still touch the directory it is
+// supposed to leave alone.
+const fileTransport = isTestEnv
+  ? null
+  : new DailyRotateFile({
+      filename: 'logs/extension-service-%DATE%.log',
+      datePattern: 'YYYY-MM-DD',
+      zippedArchive: true,
+      maxSize: '20m',
+      maxFiles: '14d',
+      format: formatFile,
+    });
 
 const formatConsole = winston.format.combine(
   winston.format.colorize(),
@@ -51,7 +86,7 @@ export const logger = winston.createLogger({
     winston.format.errors({ stack: true }),
     winston.format.splat(),
   ),
-  transports: [fileTransport],
+  transports: fileTransport ? [fileTransport] : [],
   exitOnError: false,
 });
 

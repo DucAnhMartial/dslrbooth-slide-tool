@@ -11,6 +11,7 @@ import { readAgentConfigForAgent } from './agent/agentConfigContract';
 import { renderDisplayPage } from './display/displayPage';
 import { renderSlidesPage } from './display/slidesPage';
 import { createStatusRouter } from './status/statusRoute';
+import { createHealthRouter } from './ops/healthRoute';
 import { createCmsIpGate } from './cms/cmsIpGate';
 import { createCmsRouter } from './cms/cmsRouter';
 import { serveUploadedAsset } from './cms/uploadHandler';
@@ -203,6 +204,17 @@ export function createApp(deps: ServiceDeps): express.Express {
   agentServer.registerConfigRequestHandler(() => readAgentConfigForAgent(store));
 
   app.use(createStatusRouter(store, queue, agentServer, config));
+
+  // GET /health — the service-level operational report. Distinct from
+  // createStatusRouter above, which serves GET /status/:jobId, a per-guest
+  // lookup: one answers "where is my photo", the other "is anything quietly
+  // broken". They share no data and no audience, so they are not merged.
+  //
+  // Mounted here, above the CMS gate, because it carries its own gate (loopback
+  // ∪ CMS list) — see src/ops/healthRoute.ts for why that union and not either
+  // list alone. Mounting it under '/cms' instead would have inherited the
+  // session requirement and made the loopback case unusable.
+  app.use(createHealthRouter({ store, agent: agentServer, config }));
 
   // D-13's two layers, in the ONE order that makes them two layers: the IP
   // allow-list gate is mounted BEFORE the router, so a non-whitelisted peer is
