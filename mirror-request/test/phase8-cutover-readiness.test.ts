@@ -145,11 +145,23 @@ const PRE_PHASE_8_QUEUE_JOB_SQL = `CREATE TABLE queue_job (
 // to be measuring Phase 8. What is asserted is the whole runtime definition,
 // which is the thing that would actually change if this phase had touched the
 // booth state machine.
-const PRE_PHASE_8_BOOTH_STATE_SQL = `CREATE TABLE booth_state (
+//
+// `attempt_open`/`attempt_no` are NOT Phase 8 columns either, and are not
+// Phase 7's — they are Phase 11's own D11-01 attempt spine, added by two more
+// `ALTER TABLE ... ADD COLUMN` statements in the same `migrate()` method
+// (`src/state/localStore.ts`, measured directly against a fresh database this
+// session: `SELECT sql FROM sqlite_master WHERE name='booth_state'`). D-01's
+// claim was always scoped to Phase 8 specifically ("Phase 8 is additive to
+// Phases 1-7"), not to every phase for all time — a later, DELIBERATE phase
+// legitimately extending booth_state does not retroactively make Phase 8's own
+// claim false. What would make it false is an UNEXPECTED column appearing here
+// that this file does not already know about and name, which is exactly what
+// the character-for-character comparison below still catches.
+const CURRENT_BOOTH_STATE_SQL = `CREATE TABLE booth_state (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         state TEXT NOT NULL DEFAULT 'IDLE',
         updated_at TEXT NOT NULL DEFAULT 'now'
-      , current_job_id TEXT)`;
+      , current_job_id TEXT, attempt_open INTEGER NOT NULL DEFAULT 0, attempt_no INTEGER NOT NULL DEFAULT 0)`;
 
 // --- the one service under test -------------------------------------------
 
@@ -423,6 +435,15 @@ describe('Phase 8 cutover readiness — the replacement path, end to end', () =>
       openedAt: Date.now() - 60_000,
       expiresAt: Date.now() + 60_000,
     });
+    // Legitimate setup, not the thing under test: booth_state's single row is
+    // created lazily by its own writers (bootstrap()'s CREATE TABLE seeds no
+    // row), and this probe deliberately never calls queue.start() — the only
+    // path that would otherwise have seeded it via beginAnnouncement()'s
+    // setBoothState('ANNOUNCING'), well before any real Agent event could
+    // arrive. A production boot always calls queue.start() first, so this
+    // gap is a property of this probe's own "leave the timers stopped" design
+    // (see this file's header), not of the production boot sequence.
+    store.setBoothIdle();
 
     agentSocket = new WebSocket(`${baseUrl.replace('http', 'ws')}/agent`, {
       headers: { authorization: `Bearer ${AGENT_TOKEN}` },
@@ -432,12 +453,32 @@ describe('Phase 8 cutover readiness — the replacement path, end to end', () =>
       agentSocket?.once('error', reject);
     });
 
+    // D11-01/D11-04/D11-05 (phase 11): a `file_upload` alone only WRITES the
+    // URL into the pending-print slot; delivery (and the display's
+    // `justCaptured` hero moment) now waits for one of the finalize gate's
+    // three doors. `session_start` opens the attempt exactly as a real
+    // dslrBooth session would, and the approving `printing` — whose composite
+    // stem matches the slot `openPendingPrint()` opened above — is what
+    // finalizes it, all driven over the same authenticated Agent socket
+    // production uses, per this file's own "no direct store manipulation for
+    // the thing under test" discipline.
+    agentSocket.send(
+      JSON.stringify({ type: 'event', event: 'session_start', jobId: JOB_ID, payload: {} }),
+    );
     agentSocket.send(
       JSON.stringify({
         type: 'event',
         event: 'file_upload',
         jobId: JOB_ID,
         payload: { param2: PRINT_URL, param3: 'print', param4: 'Test event' },
+      }),
+    );
+    agentSocket.send(
+      JSON.stringify({
+        type: 'event',
+        event: 'printing',
+        jobId: JOB_ID,
+        payload: { param1: 'C:\\dslrBooth\\Test_event\\Prints\\20260812_131547_837_1x.jpg' },
       }),
     );
 
@@ -511,12 +552,15 @@ describe('Phase 8 cutover readiness — the replacement path, end to end', () =>
     expect(full.dslrBoothPassword).toBe('booth-local-secret');
   });
 
-  it('leaves queue_job and booth_state character-for-character as Phase 7 left them (D-01)', () => {
+  it('leaves queue_job exactly as Phase 7 left it, and booth_state with no column beyond the ones Phase 7 and Phase 11 deliberately added (D-01)', () => {
     // The whole phase's premise in one assertion. Everything above ran against
     // this database — an event created, a logo attached, an event activated, a
-    // capture recorded — and neither of the two tables the queue and the booth
-    // state machine live in has a byte of difference from commit 697380b.
+    // capture recorded — and `queue_job`, the table Phase 8 could most easily
+    // have reached into, has not one byte of difference from commit 697380b.
+    // `booth_state` gained exactly the two columns Phase 11's own D11-01
+    // migration is documented to add, above — and nothing else. Either table
+    // picking up an UNDOCUMENTED column would still fail this assertion.
     expect(readStoreSql('queue_job')).toBe(PRE_PHASE_8_QUEUE_JOB_SQL);
-    expect(readStoreSql('booth_state')).toBe(PRE_PHASE_8_BOOTH_STATE_SQL);
+    expect(readStoreSql('booth_state')).toBe(CURRENT_BOOTH_STATE_SQL);
   });
 });

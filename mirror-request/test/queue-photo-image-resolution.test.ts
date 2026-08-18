@@ -18,10 +18,19 @@ import { QueueService } from '../src/queue/queueService';
 //
 // The resolver is injected. A suite that reached fotoshare.co would go red
 // whenever someone's wifi did, and would prove nothing about this ordering.
+//
+// D11-02/D11-04/D11-05 (phase 11): `writePhotoHistory()` is now called from
+// `finalizePendingPrint()`, not from `onFileUpload()` directly — an upload
+// only WRITES the URL into the pending-print slot (D11-04); the history row,
+// and the resolver call this whole file is about, both wait for one of
+// D11-05's three finalize doors to open. Every case below adds the approving
+// `printing` this phase requires — the ordering guarantee under test (row
+// written before the resolver answers) is otherwise completely unchanged.
 // ---------------------------------------------------------------------------
 
 const SHARE = 'https://fotoshare.co/i/3knbmax';
 const DIRECT = 'https://cdn-bz-op.fotoshare.co/b/833cf/x/20260813_135523_092_1x.jpg';
+const COMPOSITE = 'C:\\dslrBooth\\Prints\\x_2x.jpg';
 
 const tmpDirs: string[] = [];
 const openStores: LocalStore[] = [];
@@ -46,7 +55,7 @@ function harness() {
   // exactly as a real session does.
   store.openPendingPrint({
     jobId: 'JOB1',
-    compositePath: 'C:\\dslrBooth\\Prints\\x_2x.jpg',
+    compositePath: COMPOSITE,
     openedAt: Date.now(),
     expiresAt: Date.now() + 600_000,
   });
@@ -56,6 +65,20 @@ function harness() {
 
   const qs = new QueueService(store);
   return { store, qs, eventId, dbPath };
+}
+
+/**
+ * D11-05 door 1. Every case in this file needs the finalize gate to actually
+ * open before `writePhotoHistory()`/the resolver can be reached — an upload
+ * alone (D11-04) only writes the URL. Binds the booth and opens an attempt
+ * directly (this harness never runs a full dispatch/session_start cycle),
+ * then sends an approving `printing` whose composite stem matches the one
+ * `harness()` already opened the slot with.
+ */
+function approve(store: LocalStore, qs: QueueService): void {
+  store.setBoothBusy('JOB1');
+  store.openBoothAttempt();
+  qs.onAgentEvent('printing', 'JOB1', { param1: COMPOSITE });
 }
 
 function rawImageUrl(dbPath: string, jobId = 'JOB1'): string | null {
@@ -87,6 +110,11 @@ describe('the print upload records first and resolves after', () => {
     qs.bindImageUrlResolver(() => new Promise<string | undefined>((res) => { release = res; }));
 
     qs.onAgentEvent('file_upload', 'JOB1', { param3: 'print', param2: SHARE });
+    // D11-04: written to the slot, not yet resolved — no history row exists
+    // until a door opens.
+    expect(store.getMostRecentEventPhoto(eventId)).toBeUndefined();
+
+    approve(store, qs);
 
     // The resolver is still hanging. The row must already exist, with the
     // share URL standing in — a guest's photo cannot be contingent on a
@@ -103,6 +131,7 @@ describe('the print upload records first and resolves after', () => {
     qs.bindImageUrlResolver(async () => DIRECT);
 
     qs.onAgentEvent('file_upload', 'JOB1', { param3: 'print', param2: SHARE });
+    approve(store, qs);
 
     await vi.waitFor(() => {
       expect(store.getMostRecentEventPhoto(eventId)?.photoUrl).toBe(DIRECT);
@@ -115,8 +144,9 @@ describe('the print upload records first and resolves after', () => {
       throw new Error('fotoshare exploded');
     });
 
+    qs.onAgentEvent('file_upload', 'JOB1', { param3: 'print', param2: SHARE });
     // The synchronous handler must not observe the rejection.
-    expect(() => qs.onAgentEvent('file_upload', 'JOB1', { param3: 'print', param2: SHARE })).not.toThrow();
+    expect(() => approve(store, qs)).not.toThrow();
 
     await new Promise((r) => setTimeout(r, 20));
     expect(store.getMostRecentEventPhoto(eventId)?.photoUrl).toBe(SHARE);
@@ -128,6 +158,7 @@ describe('the print upload records first and resolves after', () => {
     qs.bindImageUrlResolver(async () => undefined);
 
     qs.onAgentEvent('file_upload', 'JOB1', { param3: 'print', param2: SHARE });
+    approve(store, qs);
 
     await new Promise((r) => setTimeout(r, 20));
     expect(store.getMostRecentEventPhoto(eventId)?.photoUrl).toBe(SHARE);
@@ -135,7 +166,7 @@ describe('the print upload records first and resolves after', () => {
   });
 
   it('the guest is still sent the SHARE page, never the resolved file', async () => {
-    const { qs } = harness();
+    const { store, qs } = harness();
     const delivered: Array<[string, string]> = [];
     qs.bindNotificationService({
       sendPhotoLink: async (jobId, url) => { delivered.push([jobId, url]); },
@@ -143,6 +174,7 @@ describe('the print upload records first and resolves after', () => {
     qs.bindImageUrlResolver(async () => DIRECT);
 
     qs.onAgentEvent('file_upload', 'JOB1', { param3: 'print', param2: SHARE });
+    approve(store, qs);
     await new Promise((r) => setTimeout(r, 20));
 
     // NOT-01/NOT-02: the guest wants a page they can open and download from.
@@ -174,17 +206,19 @@ describe('the print upload records first and resolves after', () => {
     qs.bindImageUrlResolver(async (u) => { calls.push(u); return DIRECT; });
 
     qs.onAgentEvent('file_upload', 'JOB1', { param3: 'print', param2: SHARE });
+    approve(store, qs);
 
     await new Promise((r) => setTimeout(r, 20));
     expect(calls).toEqual([]);
   });
 
   it('IS reached, with the share url, for a real print upload', async () => {
-    const { qs } = harness();
+    const { store, qs } = harness();
     const calls: string[] = [];
     qs.bindImageUrlResolver(async (u) => { calls.push(u); return DIRECT; });
 
     qs.onAgentEvent('file_upload', 'JOB1', { param3: 'print', param2: SHARE });
+    approve(store, qs);
 
     await vi.waitFor(() => expect(calls).toEqual([SHARE]));
   });
