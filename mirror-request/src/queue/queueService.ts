@@ -64,28 +64,29 @@ export class QueueService {
   private timer: NodeJS.Timeout | null = null;
   private busyTimer: NodeJS.Timeout | null = null;
   /**
-   * D-02: a deliberate sibling of busyTimer, not a variant of it — the same
-   * discipline localStore.ts's requeueNoRetry() applies to SQL writers,
-   * applied here to timers. Routing a completed job's release timeout
-   * through handleStall() would requeue an already-photographed guest and
-   * call them back to the camera, so this timer must NEVER be collapsed
-   * into busyTimer or call handleStall()/requeueWithRetry()/
-   * requeueNoRetry()/failJob()/setBoothTimeout(), and must never write a
-   * stall_reason — stall_reason is a closed, server-authored vocabulary
-   * (OPS-RUNBOOK §6) that must not gain a value here.
-   */
-  private releaseTimer: NodeJS.Timeout | null = null;
-  /**
-   * D11-06 (phase 11): a deliberate sibling of releaseTimer above, not a
-   * variant of it — releaseTimer is D-02's "release even if session_end never
-   * comes for an ALREADY-COMPLETED job"; this one is "finalize via the grace
-   * door if session_start never comes back for an UNAPPROVED, ENDED attempt".
+   * D11-06 (phase 11): the grace timer. RETIRED here is Phase 7's D-02
+   * release-fallback timer this field's sibling used to be — the field, its
+   * start/clear pair, and every clear-call site are GONE, on the record,
+   * not merely unused. That timer existed because a job could complete at
+   * the composite while the booth was released later by session_end or, if
+   * that never came, by the fallback. D11-05 changes what "complete" means:
+   * finalizePendingPrint() completes the job AND releases the booth in the
+   * same act, so the fallback's only trigger site (the old onPrintComposite,
+   * rewritten by D11-02) disappeared with it — keeping the timer would have
+   * left dead code with no caller. The guarantee it used to provide moved to
+   * two places instead: an attempt that ends unapproved is bounded by THIS
+   * timer (RETAKE_GRACE_MS); a session that never ends at all is bounded by
+   * startBusyTimer()'s SESSION_TIMEOUT_MS, unchanged. Phase 7's D-02
+   * principle — release and completion are separate anchors — is unchanged;
+   * only its fallback implementation is superseded.
+   *
    * Started only from sessionEnded()'s unapproved branch, fires
-   * finalizePendingPrint(jobId, 'grace') and nothing else. Same discipline as
-   * every other timer here: it must NEVER route through handleStall()/
-   * requeueWithRetry()/requeueNoRetry()/failJob()/setBoothTimeout(), and must
-   * never write a stall_reason — copying releaseTimer's own header comment's
-   * letter, not just its spirit.
+   * finalizePendingPrint(jobId, 'grace') and nothing else. Same discipline
+   * every timer in this file follows: it must NEVER route through
+   * handleStall()/requeueWithRetry()/requeueNoRetry()/failJob()/
+   * setBoothTimeout(), and must never write a stall_reason — stall_reason is
+   * a closed, server-authored vocabulary (OPS-RUNBOOK §6) that must not gain
+   * a value here.
    */
   private releaseGraceTimer: NodeJS.Timeout | null = null;
   private announcementTimer: NodeJS.Timeout | null = null;
@@ -228,7 +229,6 @@ export class QueueService {
     this.running = false;
     if (this.timer) clearInterval(this.timer);
     if (this.busyTimer) clearTimeout(this.busyTimer);
-    this.clearReleaseTimer();
     this.clearReleaseGraceTimer();
     if (this.announcementTimer) clearTimeout(this.announcementTimer);
     this.announcementTimer = null;
@@ -256,14 +256,43 @@ export class QueueService {
    * earlier incident have no link back to the current booth_state
    * (RESEARCH.md Pitfall 1), and the single-booth invariant guarantees at
    * most one row can ever be genuinely in flight.
+   *
+   * D11-06 (phase 11), 11-RESEARCH.md Pitfall 2: a THIRD branch, checked
+   * before the BUSY/possibly-live one above. A persisted BUSY booth with a
+   * bound job and a CLOSED attempt (booth_state.attempt_open === 0) means
+   * the process died mid-grace — the in-memory grace timer that would have
+   * fired finalizePendingPrint(jobId, 'grace') is gone with it, but the
+   * persisted fact survives. Re-arming startBusyTimer() here would be the
+   * WRONG timer: the guest already ended their attempt, and the session
+   * timer's job is "bound the wait for the NEXT event", not "resume a grace
+   * countdown". Finalizing immediately through the same grace door a live
+   * expiry would have used is simplest and safe-by-design (never wrong, at
+   * worst early). Flagged assumption A2 (11-01-PLAN.md, RESEARCH.md
+   * Pitfall 2): the remaining window is deliberately NOT reconstructed —
+   * doing so would require also persisting the attempt's end timestamp.
+   *
+   * This branch never calls handleStall() — the job it resolves is either
+   * genuinely finished or genuinely abandoned, and neither is a stall, the
+   * same discipline finalizePendingPrint() itself is built on. Only the
+   * SWEEP loop below (for every OTHER orphaned in-flight row) goes through
+   * handleStall()'s bounded-retry policy.
    */
   recover(): void {
     const { state, updated_at } = this.store.getBoothStateDetailed();
     const inFlight = this.store.getInFlightJobs();
+    const currentJobId = this.store.getBoothCurrentJobId();
 
     let survivorId: string | null = null;
 
-    if (state === 'BUSY') {
+    if (state === 'BUSY' && currentJobId !== undefined && !this.store.getBoothAttempt().attemptOpen) {
+      queueLogger.info(
+        `Recovery: job ${currentJobId} was mid-grace at restart; finalizing immediately via the grace door (remaining window not reconstructed — A2)`,
+      );
+      this.finalizePendingPrint(currentJobId, 'grace');
+      // Already resolved by finalize above — exclude from the stall sweep
+      // below, which must never requeue an already-terminal job.
+      survivorId = currentJobId;
+    } else if (state === 'BUSY') {
       const ageMs = Date.now() - Date.parse(updated_at);
       const isPossiblyLive = Number.isFinite(ageMs) && ageMs >= 0 && ageMs < this.sessionTimeoutMs && inFlight.length > 0;
 
@@ -737,7 +766,13 @@ export class QueueService {
   onAgentDisconnected(): void {
     if (this.store.getBoothState() !== 'BUSY') return;
     this.clearBusyTimer();
-    this.clearReleaseTimer();
+    // D11-06 (phase 11): a disconnect during a grace window (the booth stays
+    // BUSY throughout grace — Pattern A3, no 5th BoothState value — so this
+    // guard already covers it unmodified) must clear the grace timer BEFORE
+    // the requeue below, or it fires later via finalizePendingPrint() against
+    // a job that has since been requeued and possibly re-dispatched to
+    // someone else.
+    this.clearReleaseGraceTimer();
     this.store.setBoothIdle();
     for (const job of this.store.getInFlightJobs()) {
       this.store.requeueNoRetry(job.id);
@@ -1097,37 +1132,14 @@ export class QueueService {
   }
 
   /**
-   * D-02's release-fallback timer. A deliberate sibling of startBusyTimer()
-   * above, shaped identically, but its callback does only three things: null
-   * the field, release the booth (setBoothIdle(), which also clears
-   * current_job_id), and tick() — plus one warn naming the job whose booth
-   * was released by the fallback. It must NEVER call handleStall(),
-   * requeueWithRetry(), requeueNoRetry(), failJob() or setBoothTimeout() —
-   * the job is already terminal, and routing its release through the same
-   * path as a genuine stall would requeue an already-photographed guest and
-   * call them back to the camera.
-   */
-  private startReleaseTimer(jobId: string): void {
-    this.clearReleaseTimer();
-    this.releaseTimer = setTimeout(() => {
-      this.releaseTimer = null;
-      this.store.setBoothIdle();
-      queueLogger.warn(`Booth released for job ${jobId} by the fallback timer — no session_end arrived within ${this.boothReleaseTimeoutMs}ms`);
-      this.tick();
-    }, this.boothReleaseTimeoutMs);
-  }
-
-  private clearReleaseTimer(): void {
-    if (this.releaseTimer) clearTimeout(this.releaseTimer);
-    this.releaseTimer = null;
-  }
-
-  /**
-   * D11-06's grace timer. Shaped identically to startReleaseTimer() above —
-   * nullable field, start clears first then setTimeout, clear clears+nulls —
-   * but its callback does exactly one thing: fire finalizePendingPrint's door
-   * 2. finalizePendingPrint() itself releases the booth and ticks; this
-   * timer's only job is to call it.
+   * D11-06's grace timer (Phase 7's D-02 release-fallback timer this one
+   * replaced is retired — see the field's own header comment above for the
+   * full reasoning and where its guarantee moved). Nullable field, start
+   * clears first then setTimeout, clear clears+nulls — the shape every timer
+   * in this file follows. Its callback does exactly one thing: fire
+   * finalizePendingPrint's door 2 — never handleStall(), never a retry,
+   * never a stall_reason. finalizePendingPrint() itself releases the booth
+   * and ticks; this timer's only job is to call it.
    */
   private startReleaseGraceTimer(jobId: string): void {
     this.clearReleaseGraceTimer();
