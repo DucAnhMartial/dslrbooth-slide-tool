@@ -622,7 +622,14 @@ export class QueueService {
 
     const compositePath = this.extractCompositePath(eventType, payload);
     if (!compositePath) {
-      queueLogger.warn(`${eventType} carried no usable composite path`);
+      // 11-04 (Rule 2 — deviation): every other warn/info line on this path
+      // names the job id (or 'unknown'), following the very next branch's
+      // own established convention; this one did not, which is a real
+      // diagnosability gap — an operator grepping by job id would silently
+      // miss this line. Not locked by any D11-03 literal wording (unlike
+      // the two 'printing ignored: ...' lines below, which ARE the exact
+      // strings 11-CONTEXT.md's D11-03 specifies verbatim).
+      queueLogger.warn(`${eventType} for job ${jobId ?? 'unknown'} carried no usable composite path`);
       return;
     }
 
