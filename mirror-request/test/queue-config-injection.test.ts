@@ -10,6 +10,14 @@ import { NO_PHOTO_SWEEP_STUB } from './helpers/noPhotoSweep';
 // the constructor's second argument. This file never reaches for the shared
 // store singleton (02-VALIDATION.md, binding: booth_state is a single
 // global row) — each case drives its own hand-built mock instead.
+//
+// D11-06 (phase 11): RETAKE_GRACE_MS joins the timing knobs this file proves
+// follow the injected config, not the environment — the one D11-06 key that
+// IS a real EnvConfig/.env member (unlike PENDING_PRINT_EXPIRY_MS/
+// NO_PHOTO_CLOSE_DELAY_MS, which are deliberately module constants, D-12).
+// The store builder below grew the booth_state.attempt_open/attempt_no
+// surface every queue-* fixture gained this phase, so a case here can drive
+// a real session_start -> session_end -> grace-expiry sequence.
 
 interface BuildStoreOptions {
   // requeueWithRetry's successive return values, so a case can control
@@ -20,6 +28,10 @@ interface BuildStoreOptions {
 function buildStore(opts: BuildStoreOptions = {}) {
   let booth = 'IDLE';
   let jobAlive = true;
+  let currentJobId: string | undefined;
+  let attemptOpen = false;
+  let attemptNo = 0;
+  const jobStatus: Record<string, string> = {};
   const job = { id: 'job-x' };
   const requeueSequence = opts.requeueSequence ?? [];
   let requeueCallIndex = 0;
@@ -35,28 +47,49 @@ function buildStore(opts: BuildStoreOptions = {}) {
 
   const store = {
     getBoothState: () => booth,
+    getBoothStateDetailed: () => ({ state: booth, updated_at: new Date().toISOString() }),
+    getInFlightJobs: () => [],
     getNextQueuedJob: () => (jobAlive ? job : undefined),
     setBoothState: (state: string) => {
       booth = state;
+      currentJobId = undefined;
+      attemptOpen = false;
+      attemptNo = 0;
     },
-    setBoothBusy: () => {
+    setBoothBusy: (jobId?: string | null) => {
       booth = 'BUSY';
+      currentJobId = jobId ?? job.id;
+      attemptOpen = false;
+      attemptNo = 0;
     },
     setBoothIdle: () => {
       booth = 'IDLE';
+      currentJobId = undefined;
+      attemptOpen = false;
+      attemptNo = 0;
     },
     setBoothTimeout: () => {
       booth = 'IDLE';
+      currentJobId = undefined;
+      attemptOpen = false;
+      attemptNo = 0;
     },
-    updateJobStatus: () => {},
+    updateJobStatus: (id: string, status: string) => { jobStatus[id] = status; },
     getQueuedGuestSummaries: () => (jobAlive ? [{ jobId: job.id, name: 'Guest', position: 1 }] : []),
     getQueueLength: () => (jobAlive ? 1 : 0),
-    completeJob: () => false,
-    getBoothCurrentJobId: () => undefined,
-    setBoothCurrentJob: () => {},
+    completeJob: (id: string) => { jobStatus[id] = 'completed'; return true; },
+    closeJobNoPhoto: (id: string) => { jobStatus[id] = 'no_photo'; return true; },
+    getJob: (id: string) => (id in jobStatus ? { id, status: jobStatus[id] } : { id, status: 'in_progress' }),
+    getBoothCurrentJobId: () => currentJobId,
+    setBoothCurrentJob: (id: string | null) => { currentJobId = id ?? undefined; },
+    getBoothAttempt: () => ({ attemptOpen, attemptNo }),
+    openBoothAttempt: () => { attemptOpen = true; attemptNo += 1; return { attemptOpen, attemptNo }; },
+    closeBoothAttempt: () => { attemptOpen = false; },
     getJobRegistration: () => undefined,
+    getActiveEventId: () => undefined,
     requeueWithRetry,
     failJob,
+    requeueNoRetry: vi.fn(),
     // tick() sweeps the pending-print registry on its first statement, above
     // the IDLE guard, so every mocked store a QueueService is built with has to
     // satisfy that part of the real LocalStore surface. The shared helper is
@@ -66,7 +99,7 @@ function buildStore(opts: BuildStoreOptions = {}) {
     ...NO_PHOTO_SWEEP_STUB,
   } as unknown as LocalStore;
 
-  return { store, requeueWithRetry, failJob, jobId: job.id };
+  return { store, requeueWithRetry, failJob, jobId: job.id, jobStatus };
 }
 
 describe('QueueService — timing and retry budget follow the injected config, not the environment (D-13)', () => {
@@ -271,6 +304,43 @@ describe('QueueService — timing and retry budget follow the injected config, n
     expect(dispatched).toEqual([]);
     vi.advanceTimersByTime(1);
     expect(dispatched).toEqual(['job-x']);
+
+    service.stop();
+  });
+
+  // D11-06 (phase 11): an absent RETAKE_GRACE_MS must fall back to the
+  // 20000ms default the constructor's own comment documents — never a
+  // NaN-based timer. `Number.isFinite(undefined)` is false, so the fallback
+  // branch is what runs when the key is simply missing from the config
+  // object, exactly the shape every pre-11-01 CONFIG fixture in this suite
+  // still uses (none of them declare RETAKE_GRACE_MS at all).
+  it('an absent RETAKE_GRACE_MS falls back to the 20000ms default rather than producing a not-a-number timer', () => {
+    vi.useFakeTimers();
+    const { store, jobStatus } = buildStore();
+    const service = new QueueService(store, {
+      SESSION_TIMEOUT_MS: 300_000,
+      NEXT_GUEST_COUNTDOWN_MS: 5_000,
+      SESSION_MAX_RETRIES: 2,
+      // RETAKE_GRACE_MS deliberately omitted.
+    } as never);
+    service.bindSendCommand(() => {});
+    service.bindAnnouncement(() => {});
+
+    service.start();
+    vi.advanceTimersByTime(250); // announce
+    vi.advanceTimersByTime(5_000); // dispatch, booth BUSY
+    service.onAgentEvent('session_start', 'job-x'); // opens the attempt
+    service.onAgentEvent('session_end'); // unapproved — opens grace
+
+    expect(store.getBoothState()).toBe('BUSY'); // still held, not stuck forever on NaN
+
+    vi.advanceTimersByTime(19_999);
+    expect(store.getBoothState()).toBe('BUSY');
+    expect(jobStatus['job-x']).not.toBe('no_photo');
+
+    vi.advanceTimersByTime(1); // the 20000ms default, exactly
+    expect(jobStatus['job-x']).toBe('no_photo');
+    expect(store.getBoothCurrentJobId()).not.toBe('job-x');
 
     service.stop();
   });

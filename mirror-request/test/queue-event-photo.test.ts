@@ -7,17 +7,17 @@ import { createPendingPrintRegistry, type PendingPrintRow } from './helpers/pend
  * D-10 photo history, written at the attribution point Phase 4 already proved
  * correct: the pending-print registry's resolve, not the booth's current job.
  *
- * The four branches of `onFileUpload()` are the whole subject. Two of them are
- * real captures and must each leave exactly one durable `event_photo` row; the
- * other two must leave none. Getting that split wrong is silent in both
- * directions — a lost branch loses a guest's photo from the wall forever, and
- * a spurious branch fabricates history for a guest who never shot.
- *
- * D-04 is pinned alongside it in every case: this write is ADDITIVE. The
- * webhook keeps delivering the guest their photo on exactly the branches it
- * delivers on today, so every case asserts the `sendPhotoLink` call count as
- * well as the row count. A change that moved delivery onto the history write's
- * condition would pass a row-count-only suite.
+ * D11-05 (phase 11): the resolve itself moved. `recordPhotoHistory()` is now
+ * called from ONE of two places — `finalizePendingPrint()` (the normal
+ * printing/grace/operator doors) or `onFileUpload()`'s own D-11 late-arrival
+ * branch (a print upload arriving for a job already finalized with no URL —
+ * unchanged by this phase). It is never called directly off an ordinary
+ * `file_upload` any more; `onFileUpload()` only WRITES the URL now (D11-04).
+ * Every guarantee this file proved before phase 11 — the four-branch split,
+ * the additive-to-delivery invariant, the replay no-op, the registration
+ * join, the masked no-active-event warn — survives unchanged; each case is
+ * re-reached by adding the approving `printing` that now stands between an
+ * upload and its history row.
  *
  * The store is mocked at the SQLite seam. `recordEventPhoto`'s own SQL —
  * including the INSERT OR IGNORE that makes a replay a no-op at the database
@@ -39,7 +39,9 @@ interface RecordedPhoto {
 /**
  * `pendingStatus: 'none'` seeds NO row at all — the D-04 branch where no
  * session ever opened a slot for this job, which is a different thing from a
- * slot that exists and has already been resolved.
+ * slot that exists and has already been resolved. Every other seed also
+ * binds the booth to `jobId` with an attempt already open — the shape every
+ * case in this file assumes, since D11-03's approval guard requires both.
  */
 function buildStore(opts: {
   pendingStatus: 'awaiting' | 'expired' | 'resolved' | 'none';
@@ -57,6 +59,7 @@ function buildStore(opts: {
           status: opts.pendingStatus,
           openedAt: Date.now() - 60_000,
           expiresAt: Date.now() - 1_000,
+          attemptNo: 1,
         }];
   const registry = createPendingPrintRegistry(seed);
 
@@ -82,14 +85,28 @@ function buildStore(opts: {
     },
   }));
 
+  let currentJobId: string | undefined = opts.pendingStatus === 'none' ? undefined : jobId;
+  let attemptOpen = opts.pendingStatus !== 'none';
+  let attemptNo = opts.pendingStatus === 'none' ? 0 : 1;
+  const jobStatus: Record<string, string> = { [jobId]: 'in_progress' };
+
   const store = {
-    getBoothState: () => 'IDLE',
-    getBoothStateDetailed: () => ({ state: 'IDLE', updated_at: new Date().toISOString() }),
+    getBoothState: () => 'BUSY',
+    getBoothStateDetailed: () => ({ state: 'BUSY', updated_at: new Date().toISOString() }),
     getInFlightJobs: () => [],
     getNextQueuedJob: () => undefined,
-    getBoothCurrentJobId: () => undefined,
-    getJob: (id: string) => ({ id, status: 'in_progress' }),
-    updateJobStatus: () => {},
+    getBoothCurrentJobId: () => currentJobId,
+    setBoothCurrentJob: (id: string | null) => { currentJobId = id ?? undefined; },
+    setBoothBusy: (id?: string | null) => { currentJobId = id ?? undefined; attemptOpen = false; attemptNo = 0; },
+    setBoothIdle: () => { currentJobId = undefined; attemptOpen = false; attemptNo = 0; },
+    setBoothTimeout: () => { currentJobId = undefined; attemptOpen = false; attemptNo = 0; },
+    getBoothAttempt: () => ({ attemptOpen, attemptNo }),
+    openBoothAttempt: () => { attemptOpen = true; attemptNo += 1; return { attemptOpen, attemptNo }; },
+    closeBoothAttempt: () => { attemptOpen = false; },
+    getJob: (id: string) => (id in jobStatus ? { id, status: jobStatus[id] } : { id, status: 'in_progress' }),
+    updateJobStatus: (id: string, status: string) => { jobStatus[id] = status; },
+    completeJob: (id: string) => { jobStatus[id] = 'completed'; return true; },
+    closeJobNoPhoto: (id: string) => { jobStatus[id] = 'no_photo'; return true; },
     getQueuedGuestSummaries: () => [],
     getQueueLength: () => 0,
     getQueuePosition: () => undefined,
@@ -105,11 +122,12 @@ function buildStore(opts: {
 
 /** The QueueService is never started here: `onAgentEvent` is called directly,
  * so no dispatch tick, announcement or busy timer runs and nothing but the
- * upload path can touch the spies. */
+ * upload/finalize path can touch the spies. */
 function buildService(store: LocalStore) {
   const sendPhotoLink = vi.fn(async () => {});
   const service = new QueueService(store);
   service.bindSendCommand(() => {});
+  service.bindAnnouncement(() => {});
   service.bindNotificationService({ sendPhotoLink });
   return { service, sendPhotoLink };
 }
@@ -122,17 +140,25 @@ function upload(service: QueueService, jobId: string): void {
   });
 }
 
-describe('QueueService.onFileUpload — photo history (D-10) is additive to delivery (D-04)', () => {
+/** D11-05 door 1: the approving printing that now stands between an upload
+ * and its history row/delivery. */
+function approve(service: QueueService, jobId: string): void {
+  service.onAgentEvent('printing', jobId, { param1: COMPOSITE_PATH });
+}
+
+describe('QueueService — photo history (D-10) is written by the finalize gate and is additive to delivery (D-04, D11-05)', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
-  it('writes exactly one event_photo row on the ordinary awaiting resolve, and still delivers', async () => {
+  it('writes exactly one event_photo row once the approving printing finalizes an ordinary awaiting resolve, and still delivers', async () => {
     const { store, recorded, jobId } = buildStore({ pendingStatus: 'awaiting', activeEventId: 'evt-1' });
     const { service, sendPhotoLink } = buildService(store);
 
     upload(service, jobId);
+    expect(recorded).toHaveLength(0); // D11-04: written, not yet resolved
+    approve(service, jobId);
     await vi.waitFor(() => expect(sendPhotoLink).toHaveBeenCalledTimes(1));
 
     expect(recorded).toHaveLength(1);
@@ -147,11 +173,12 @@ describe('QueueService.onFileUpload — photo history (D-10) is additive to deli
     expect(sendPhotoLink).toHaveBeenCalledWith(jobId, PHOTO_URL);
   });
 
-  it('writes exactly one event_photo row on the late-but-legitimate expired resolve', async () => {
+  it('writes exactly one event_photo row once the approving printing finalizes a late-but-legitimate expired-slot resolve', async () => {
     const { store, recorded, jobId } = buildStore({ pendingStatus: 'expired', activeEventId: 'evt-1' });
     const { service, sendPhotoLink } = buildService(store);
 
-    upload(service, jobId);
+    upload(service, jobId); // D11-05: an expired pending-print row still accepts a late write
+    approve(service, jobId);
     await vi.waitFor(() => expect(sendPhotoLink).toHaveBeenCalledTimes(1));
 
     // A real photo arriving late is still a real photo — it belongs in history
@@ -176,23 +203,25 @@ describe('QueueService.onFileUpload — photo history (D-10) is additive to deli
     expect(sendPhotoLink).not.toHaveBeenCalled();
   });
 
-  it('writes no second row and sends no second notification for a replayed resolve', async () => {
+  it('writes no second row and sends no second notification for a replayed upload after finalize', async () => {
     const { store, recorded, jobId } = buildStore({ pendingStatus: 'awaiting', activeEventId: 'evt-1' });
     const { service, sendPhotoLink } = buildService(store);
 
     upload(service, jobId);
+    approve(service, jobId);
     await vi.waitFor(() => expect(sendPhotoLink).toHaveBeenCalledTimes(1));
     expect(recorded).toHaveLength(1);
 
     const warn = vi.spyOn(queueLogger, 'warn');
-    upload(service, jobId); // the replay: resolvePendingPrint now returns false
+    const info = vi.spyOn(queueLogger, 'info');
+    upload(service, jobId); // the replay: setPendingPrintPhotoUrl now returns false
 
     expect(recorded).toHaveLength(1);
     expect(sendPhotoLink).toHaveBeenCalledTimes(1);
     // No warning storm: the replay is an ordinary, expected no-op, not an
-    // incident. The 'resolved' row is neither undefined nor 'expired', so it
-    // takes the silent false-return path.
+    // incident — logged at info, not warn.
     expect(warn).not.toHaveBeenCalled();
+    expect(info.mock.calls.some((c) => String(c[0]).includes(jobId) && String(c[0]).includes('already finalized'))).toBe(true);
   });
 
   it('writes no row and logs exactly one masked warn naming the job when no event is active', async () => {
@@ -201,6 +230,7 @@ describe('QueueService.onFileUpload — photo history (D-10) is additive to deli
     const { service, sendPhotoLink } = buildService(store);
 
     upload(service, jobId);
+    approve(service, jobId);
     await vi.waitFor(() => expect(sendPhotoLink).toHaveBeenCalledTimes(1));
 
     expect(recorded).toHaveLength(0);
@@ -223,6 +253,7 @@ describe('QueueService.onFileUpload — photo history (D-10) is additive to deli
     const { service, sendPhotoLink } = buildService(store);
 
     service.onAgentEvent('file_upload', jobId, { param2: PHOTO_URL, param3: 'original' });
+    approve(service, jobId); // no URL was ever written — finalizes as no_photo, still no history row
 
     expect(recordEventPhoto).not.toHaveBeenCalled();
     expect(sendPhotoLink).not.toHaveBeenCalled();
@@ -237,6 +268,7 @@ describe('QueueService.onFileUpload — photo history (D-10) is additive to deli
     const { service, sendPhotoLink } = buildService(store);
 
     upload(service, jobId);
+    approve(service, jobId);
     await vi.waitFor(() => expect(sendPhotoLink).toHaveBeenCalledTimes(1));
 
     // statusRoute.ts:134's join, reused identically — the method that already
