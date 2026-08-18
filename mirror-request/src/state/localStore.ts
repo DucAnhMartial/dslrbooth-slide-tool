@@ -504,6 +504,47 @@ export class LocalStore {
       this.db.exec('ALTER TABLE booth_state ADD COLUMN current_job_id TEXT');
     }
 
+    // booth_state.attempt_open / attempt_no — D11-01 (phase 11). The
+    // persisted "is a capture attempt currently open" flag and its counter,
+    // same row and same restart-survival mechanism as current_job_id above.
+    // NOT NULL DEFAULT 0 is safe for the same reason as event.show_guest_name
+    // below: every pre-existing row reads back as "no open attempt, zero
+    // attempts", which is correct for a database with no attempt in progress
+    // at deploy time. Every REPLACE-style booth_state writer below must name
+    // both columns explicitly — see the writers' own comments.
+    const hasAttemptOpen = boothColumns.some((c) => c.name === 'attempt_open');
+    if (!hasAttemptOpen) {
+      this.db.exec('ALTER TABLE booth_state ADD COLUMN attempt_open INTEGER NOT NULL DEFAULT 0');
+    }
+    const hasAttemptNo = boothColumns.some((c) => c.name === 'attempt_no');
+    if (!hasAttemptNo) {
+      this.db.exec('ALTER TABLE booth_state ADD COLUMN attempt_no INTEGER NOT NULL DEFAULT 0');
+    }
+
+    // pending_print.{photo_url, attempt_no, approved_by, approved_at} —
+    // D11-04/D11-05 (phase 11). photo_url is written by the rewritten
+    // onFileUpload() independently of status; attempt_no ties the slot's
+    // composite to the attempt that wrote it (D11-03's stem comparison reads
+    // this rather than re-deriving it); approved_by/approved_at are written
+    // only at finalize (D11-05's audit trail — 'printing' | 'grace' |
+    // 'operator'). All four are nullable with no backfill: NULL is the
+    // correct "not yet known" reading for every pre-existing row, and the
+    // existing three-word `status` vocabulary ('awaiting'/'resolved'/
+    // 'expired') is unchanged by this migration.
+    const pendingPrintColumns = this.db.prepare('PRAGMA table_info(pending_print)').all() as Array<{ name: string }>;
+    if (!pendingPrintColumns.some((c) => c.name === 'photo_url')) {
+      this.db.exec('ALTER TABLE pending_print ADD COLUMN photo_url TEXT');
+    }
+    if (!pendingPrintColumns.some((c) => c.name === 'attempt_no')) {
+      this.db.exec('ALTER TABLE pending_print ADD COLUMN attempt_no INTEGER');
+    }
+    if (!pendingPrintColumns.some((c) => c.name === 'approved_by')) {
+      this.db.exec('ALTER TABLE pending_print ADD COLUMN approved_by TEXT');
+    }
+    if (!pendingPrintColumns.some((c) => c.name === 'approved_at')) {
+      this.db.exec('ALTER TABLE pending_print ADD COLUMN approved_at INTEGER');
+    }
+
     // event.show_guest_name / event.hero_enabled — D9-04/D9-05. Phase 8
     // shipped `event` with zero ALTER TABLE, and that fact was used as
     // deployment-safety evidence during the Phase 8 cutover; this is the
@@ -873,15 +914,19 @@ export class LocalStore {
   // INSERT OR REPLACE deletes the row and inserts a new one, so any column
   // left out of the column list silently reverts to its default. Every
   // writer below names current_job_id explicitly rather than relying on
-  // that side effect.
+  // that side effect — and, since D11-01 (phase 11), names attempt_open and
+  // attempt_no too, writing 0 for both in every one of these four: a booth
+  // being announced, dispatched, released or timed out has no open attempt
+  // and no attempt history. setBoothCurrentJob() below is the one exception
+  // — it is an UPDATE, not an INSERT OR REPLACE, and must NOT touch them.
   setBoothState(state: BoothState): void {
     // Its only production caller is beginAnnouncement()'s 'ANNOUNCING'
     // write, when no job owns the booth yet — current_job_id stays NULL.
-    this.db.prepare("INSERT OR REPLACE INTO booth_state (id, state, updated_at, current_job_id) VALUES (1, ?, ?, NULL)").run(state, new Date().toISOString());
+    this.db.prepare("INSERT OR REPLACE INTO booth_state (id, state, updated_at, current_job_id, attempt_open, attempt_no) VALUES (1, ?, ?, NULL, 0, 0)").run(state, new Date().toISOString());
   }
 
   setBoothBusy(jobId: string | null = null): void {
-    this.db.prepare("INSERT OR REPLACE INTO booth_state (id, state, updated_at, current_job_id) VALUES (1, 'BUSY', ?, ?)").run(new Date().toISOString(), jobId);
+    this.db.prepare("INSERT OR REPLACE INTO booth_state (id, state, updated_at, current_job_id, attempt_open, attempt_no) VALUES (1, 'BUSY', ?, ?, 0, 0)").run(new Date().toISOString(), jobId);
   }
 
   // The explicit NULL here IS D-06's "cleared when the booth is released"
@@ -889,13 +934,45 @@ export class LocalStore {
   // must not be replaced by an application-level clear that a later edit
   // could delete. current_job_id's absence from the booth once it is IDLE is
   // enforced by this write itself, not by a caller remembering to clear it.
+  // attempt_open/attempt_no reset to 0 for the same reason: whoever holds the
+  // booth next starts their own attempt count at zero.
   setBoothIdle(): void {
-    this.db.prepare("INSERT OR REPLACE INTO booth_state (id, state, updated_at, current_job_id) VALUES (1, 'IDLE', ?, NULL)").run(new Date().toISOString());
+    this.db.prepare("INSERT OR REPLACE INTO booth_state (id, state, updated_at, current_job_id, attempt_open, attempt_no) VALUES (1, 'IDLE', ?, NULL, 0, 0)").run(new Date().toISOString());
   }
 
   setBoothTimeout(reason: string): void {
-    this.db.prepare("INSERT OR REPLACE INTO booth_state (id, state, updated_at, current_job_id) VALUES (1, 'IDLE', ?, NULL)").run(new Date().toISOString());
+    this.db.prepare("INSERT OR REPLACE INTO booth_state (id, state, updated_at, current_job_id, attempt_open, attempt_no) VALUES (1, 'IDLE', ?, NULL, 0, 0)").run(new Date().toISOString());
     logger.warn(`Booth timeout reset: ${reason}`);
+  }
+
+  // D11-01 (phase 11): the persisted attempt flag and counter, read together
+  // so a caller never has to reconcile two separate queries. Both live in
+  // booth_state, id = 1, the same single-row table current_job_id already
+  // uses.
+  getBoothAttempt(): { attemptOpen: boolean; attemptNo: number } {
+    const row = this.db.prepare('SELECT attempt_open, attempt_no FROM booth_state WHERE id = 1').get() as
+      | { attempt_open: number; attempt_no: number }
+      | undefined;
+    return { attemptOpen: Boolean(row?.attempt_open ?? 0), attemptNo: row?.attempt_no ?? 0 };
+  }
+
+  // Opens a new attempt AND increments the counter in the same write — this
+  // is what makes attempt_no double as both "an attempt is open" (indirectly,
+  // via attempt_open) and "how many attempts has this job had" (D11-09's
+  // SESSION_SUMMARY attempts= field). Called once after the ordinary
+  // session_start ack (attempt 1) and once per retake (sessionAckedFromEvent,
+  // D11-01/D11-06).
+  openBoothAttempt(): { attemptOpen: boolean; attemptNo: number } {
+    this.db.prepare('UPDATE booth_state SET attempt_open = 1, attempt_no = attempt_no + 1 WHERE id = 1').run();
+    return this.getBoothAttempt();
+  }
+
+  // Closes the open attempt WITHOUT touching attempt_no or current_job_id —
+  // an unapproved session_end (D11-06) must leave the job bound to the booth
+  // so a retake's session_start still finds it, and must leave the attempt
+  // count intact so the eventual SESSION_SUMMARY still reports it.
+  closeBoothAttempt(): void {
+    this.db.prepare('UPDATE booth_state SET attempt_open = 0 WHERE id = 1').run();
   }
 
   // D-06: the server-held attribution source of truth. A NULL column and a
@@ -1189,9 +1266,18 @@ export class LocalStore {
   // here: filtering expired rows out would make a late-but-legitimate print
   // indistinguishable from a photo produced with no session awaiting one, and
   // the service would drop a real guest's photo.
-  getPendingPrint(jobId: string): { jobId: string; compositePath: string; status: string; openedAt: number; expiresAt: number } | undefined {
-    const row = this.db.prepare('SELECT jobId, composite_path, status, opened_at, expires_at FROM pending_print WHERE jobId = ?').get(jobId) as
-      | { jobId: string; composite_path: string | null; status: string; opened_at: number; expires_at: number }
+  getPendingPrint(jobId: string): {
+    jobId: string; compositePath: string; status: string; openedAt: number; expiresAt: number;
+    photoUrl: string | undefined; attemptNo: number | undefined;
+    approvedBy: string | undefined; approvedAt: number | undefined;
+  } | undefined {
+    const row = this.db.prepare(
+      'SELECT jobId, composite_path, status, opened_at, expires_at, photo_url, attempt_no, approved_by, approved_at FROM pending_print WHERE jobId = ?'
+    ).get(jobId) as
+      | {
+          jobId: string; composite_path: string | null; status: string; opened_at: number; expires_at: number;
+          photo_url: string | null; attempt_no: number | null; approved_by: string | null; approved_at: number | null;
+        }
       | undefined;
     return row
       ? {
@@ -1200,28 +1286,125 @@ export class LocalStore {
           status: row.status,
           openedAt: row.opened_at,
           expiresAt: row.expires_at,
+          photoUrl: row.photo_url ?? undefined,
+          attemptNo: row.attempt_no ?? undefined,
+          approvedBy: row.approved_by ?? undefined,
+          approvedAt: row.approved_at ?? undefined,
         }
       : undefined;
   }
 
-  // Same omission-as-guarantee discipline as getDueNotifications() above:
-  // 'resolved' is deliberately ABSENT from this predicate, and that absence IS
-  // the guarantee that a repeated or replayed print upload cannot enqueue a
-  // second notification for the same job (T-07-12). There is no
-  // application-level `if (alreadySent)` anywhere for a later edit to delete —
-  // the second UPDATE simply matches zero rows and this returns false.
-  //
-  // 'expired' is deliberately PRESENT for the opposite reason: D-11 says a
-  // print that arrives after its slot expired is still delivered to the guest,
-  // so an expired row must remain resolvable. Getting the photo late beats not
-  // getting it.
-  resolvePendingPrint(jobId: string, resolvedAt: number): boolean {
+  // D11-02 (phase 11): the retake-aware sibling of openPendingPrint() above,
+  // NOT a change to that method's semantics — its ON CONFLICT DO NOTHING stays
+  // load-bearing for the double-fire case (same composite path re-arriving).
+  // This one is called from processing_start instead, and tells apart the two
+  // situations a second processing_start can mean:
+  //   - a genuinely new attempt (the composite path differs) → overwrite the
+  //     slot with the new attempt's composite/attempt_no/deadline, and clear
+  //     the discarded attempt's photo_url/approval so a later grace expiry
+  //     can never send a rejected attempt's URL (the "never send a discarded
+  //     attempt's URL" prohibition);
+  //   - the double-fire of the SAME attempt's processing_start/printing pair
+  //     (composite path unchanged) → do nothing, matching openPendingPrint's
+  //     DO-NOTHING guarantee.
+  // Read-then-branch in application code, deliberately, over a single ON
+  // CONFLICT ... WHERE clause: the three-way outcome report below (opened vs.
+  // overwritten vs. unchanged) is what lets the caller log exactly which one
+  // happened, and a caller cannot distinguish "no prior row" from "prior row,
+  // no change" from a bare INSERT ... ON CONFLICT changes count alone.
+  openOrOverwritePendingPrint(entry: {
+    jobId: string; compositePath: string; attemptNo: number; openedAt: number; expiresAt: number;
+  }): 'opened' | 'overwritten' | 'unchanged' {
+    const existing = this.db.prepare(
+      'SELECT composite_path FROM pending_print WHERE jobId = ?'
+    ).get(entry.jobId) as { composite_path: string | null } | undefined;
+    const now = new Date().toISOString();
+
+    if (existing === undefined) {
+      this.db.prepare(`
+        INSERT INTO pending_print (jobId, composite_path, attempt_no, status, opened_at, expires_at, resolved_at, updated_at)
+        VALUES (?, ?, ?, 'awaiting', ?, ?, NULL, ?)
+      `).run(entry.jobId, entry.compositePath, entry.attemptNo, entry.openedAt, entry.expiresAt, now);
+      return 'opened';
+    }
+
+    if (existing.composite_path === entry.compositePath) {
+      return 'unchanged';
+    }
+
+    this.db.prepare(`
+      UPDATE pending_print
+      SET composite_path = ?, attempt_no = ?, opened_at = ?, expires_at = ?, updated_at = ?,
+          photo_url = NULL, approved_by = NULL, approved_at = NULL
+      WHERE jobId = ?
+    `).run(entry.compositePath, entry.attemptNo, entry.openedAt, entry.expiresAt, now, entry.jobId);
+    return 'overwritten';
+  }
+
+  // D11-04 (phase 11): writes the print URL into the slot WITHOUT changing
+  // `status` — sending happens only at finalize (D11-05). The predicate is
+  // deliberately the same "still open" set finalize's predicate reads from
+  // ('awaiting'/'expired'): a slot already finalized ('resolved') must not
+  // silently accept a late URL here — see onFileUpload()'s own late-arrival
+  // handling for what happens to an upload that misses this window.
+  setPendingPrintPhotoUrl(jobId: string, photoUrl: string): boolean {
     const result = this.db.prepare(`
       UPDATE pending_print
-      SET status = 'resolved', resolved_at = ?, updated_at = ?
+      SET photo_url = ?, updated_at = ?
       WHERE jobId = ? AND status IN ('awaiting','expired')
-    `).run(resolvedAt, new Date().toISOString(), jobId);
+    `).run(photoUrl, new Date().toISOString(), jobId);
     return result.changes === 1;
+  }
+
+  // D11-05 (phase 11): the ONE finalize predicate — replacing the old
+  // single-status resolve accessor rather than wrapping it, per D11-05's own
+  // text — extended with the two approval columns. Same omission-as-
+  // guarantee discipline: 'resolved' is absent from the read/write predicate,
+  // so a second call for an already-finalized job matches nothing and returns
+  // matched: false, with no application-level "already sent" flag anywhere.
+  //
+  // Reads the row BEFORE writing, in one transaction, so the caller gets back
+  // the URL and attempt number the slot held at the moment of finalize — the
+  // booth is about to be released and booth_state.attempt_no reset to 0, so
+  // this is the only place those values can still be read.
+  //
+  // Handles the case where NO slot was ever opened for this job (an unapproved
+  // attempt that produced no composite at all, e.g. the empty-session case —
+  // Q3 in 11-CONTEXT.md's open questions) by inserting a resolved row
+  // directly, so this gate still reaches exactly one durable, idempotent
+  // record of the decision and the booth is never stranded waiting for a slot
+  // that will never exist.
+  markPendingPrintFinalized(
+    jobId: string,
+    approvedBy: 'printing' | 'grace' | 'operator',
+    approvedAt: number,
+  ): { matched: boolean; photoUrl: string | undefined; attemptNo: number | undefined } {
+    const txn = this.db.transaction(() => {
+      const existing = this.db.prepare(
+        'SELECT status, photo_url, attempt_no FROM pending_print WHERE jobId = ?'
+      ).get(jobId) as { status: string; photo_url: string | null; attempt_no: number | null } | undefined;
+
+      const now = new Date().toISOString();
+
+      if (existing) {
+        if (existing.status !== 'awaiting' && existing.status !== 'expired') {
+          return { matched: false, photoUrl: undefined, attemptNo: undefined };
+        }
+        this.db.prepare(`
+          UPDATE pending_print
+          SET status = 'resolved', resolved_at = ?, updated_at = ?, approved_by = ?, approved_at = ?
+          WHERE jobId = ?
+        `).run(approvedAt, now, approvedBy, approvedAt, jobId);
+        return { matched: true, photoUrl: existing.photo_url ?? undefined, attemptNo: existing.attempt_no ?? undefined };
+      }
+
+      this.db.prepare(`
+        INSERT INTO pending_print (jobId, composite_path, status, opened_at, expires_at, resolved_at, updated_at, approved_by, approved_at)
+        VALUES (?, NULL, 'resolved', ?, ?, ?, ?, ?, ?)
+      `).run(jobId, approvedAt, approvedAt, approvedAt, now, approvedBy, approvedAt);
+      return { matched: true, photoUrl: undefined, attemptNo: undefined };
+    });
+    return txn();
   }
 
   // The select and the mark share ONE transaction, and that is not a

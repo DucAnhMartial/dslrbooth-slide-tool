@@ -75,6 +75,19 @@ export class QueueService {
    * (OPS-RUNBOOK §6) that must not gain a value here.
    */
   private releaseTimer: NodeJS.Timeout | null = null;
+  /**
+   * D11-06 (phase 11): a deliberate sibling of releaseTimer above, not a
+   * variant of it — releaseTimer is D-02's "release even if session_end never
+   * comes for an ALREADY-COMPLETED job"; this one is "finalize via the grace
+   * door if session_start never comes back for an UNAPPROVED, ENDED attempt".
+   * Started only from sessionEnded()'s unapproved branch, fires
+   * finalizePendingPrint(jobId, 'grace') and nothing else. Same discipline as
+   * every other timer here: it must NEVER route through handleStall()/
+   * requeueWithRetry()/requeueNoRetry()/failJob()/setBoothTimeout(), and must
+   * never write a stall_reason — copying releaseTimer's own header comment's
+   * letter, not just its spirit.
+   */
+  private releaseGraceTimer: NodeJS.Timeout | null = null;
   private announcementTimer: NodeJS.Timeout | null = null;
   private announcingJobId: string | null = null;
   private announcementEndsAt: number | null = null;
@@ -82,6 +95,7 @@ export class QueueService {
   private countdownMs: number;
   private sessionMaxRetries: number;
   private boothReleaseTimeoutMs: number;
+  private retakeGraceMs: number;
 
   private notificationService: { sendPhotoLink: (jid: string, url: string) => Promise<void> } | null = null;
   /**
@@ -163,7 +177,7 @@ export class QueueService {
     // optional property is the test-injection seam, matching Phase 2's
     // constructor-injection pattern for every other timing value here — never
     // read from getConfig() inside a method body.
-    config: Pick<EnvConfig, 'SESSION_TIMEOUT_MS' | 'NEXT_GUEST_COUNTDOWN_MS' | 'SESSION_MAX_RETRIES' | 'BOOTH_RELEASE_TIMEOUT_MS'>
+    config: Pick<EnvConfig, 'SESSION_TIMEOUT_MS' | 'NEXT_GUEST_COUNTDOWN_MS' | 'SESSION_MAX_RETRIES' | 'BOOTH_RELEASE_TIMEOUT_MS' | 'RETAKE_GRACE_MS'>
       & { PENDING_PRINT_EXPIRY_MS?: number; NO_PHOTO_CLOSE_DELAY_MS?: number } = getConfig(),
   ) {
     this.store = store;
@@ -194,6 +208,14 @@ export class QueueService {
       this.pendingPrintExpiryMs + this.countdownMs,
       Number.isFinite(configuredNoPhotoMs) ? (configuredNoPhotoMs as number) : NO_PHOTO_CLOSE_DELAY_MS,
     );
+    // D11-06: no lower-bound clamp — unlike boothReleaseTimeoutMs, D11-06
+    // places no floor on RETAKE_GRACE_MS beyond "a positive number of ms",
+    // and the operator's own text says explicitly it may be lowered per
+    // event. Many pre-Phase-11 mocked-store tests supply a CONFIG object that
+    // predates this key entirely, so the fallback keeps every one of them
+    // green without them having to be touched.
+    const configuredGraceMs = config.RETAKE_GRACE_MS;
+    this.retakeGraceMs = Number.isFinite(configuredGraceMs) ? (configuredGraceMs as number) : 20_000;
   }
 
   start(): void {
@@ -207,6 +229,7 @@ export class QueueService {
     if (this.timer) clearInterval(this.timer);
     if (this.busyTimer) clearTimeout(this.busyTimer);
     this.clearReleaseTimer();
+    this.clearReleaseGraceTimer();
     if (this.announcementTimer) clearTimeout(this.announcementTimer);
     this.announcementTimer = null;
     this.announcingJobId = null;
@@ -320,10 +343,16 @@ export class QueueService {
   enqueueJob(_jobId: string): void { if (!this.running) this.tick(); }
 
   /**
-   * D-02: booth-release logic only. Job completion moved to
-   * onPrintComposite() — this method no longer completes anything, so a
-   * stray duplicate session_end (measured 3x in 52s for one session) has
-   * nothing left to damage.
+   * D-02/D11-06: booth-release logic only. Job completion never happens
+   * here — it happens inside finalizePendingPrint(), the one gate D11-05
+   * defines. A stray duplicate session_end (measured 3x in 52s for one
+   * session, 07-EVIDENCE §A/§B) has nothing left to damage.
+   *
+   * D11-06 splits what used to be an unconditional release into two
+   * branches. 07-EVIDENCE §D proved that a session_end mid-retake is NOT
+   * the guest leaving — the booth must stay bound to the same job across
+   * the retake gap, or the next guest gets dispatched into a session that
+   * is still live (07-EVIDENCE conclusion 7).
    */
   sessionEnded(): void {
     const currentJobId = this.store.getBoothCurrentJobId();
@@ -345,11 +374,34 @@ export class QueueService {
     // `No print upload seen` warning now lives on pending-print registry
     // expiry (sweepPendingPrints), which is the only anchor that can be right.
 
-    this.store.setBoothIdle(); // clears current_job_id in the same write
     this.clearBusyTimer();
-    this.clearReleaseTimer(); // this session_end IS the release the fallback exists to guard against missing
-    queueLogger.info(`Released booth held by job ${currentJobId}`);
-    this.tick();
+
+    // D11-05/D11-06: if this attempt was already approved (a valid `printing`
+    // already reached finalizePendingPrint's door 1), that call already
+    // released the booth — 0 giây chờ, per D11-05's own text — so in
+    // practice currentJobId is already undefined by the time we get here and
+    // this branch is unreachable. It is kept anyway, deliberately, as the
+    // documented fallback D11-06 names explicitly: "session_end của attempt
+    // ĐÃ duyệt → nhả ngay, không ân hạn."
+    const pending = this.store.getPendingPrint(currentJobId);
+    if (pending?.status === 'resolved') {
+      this.store.setBoothIdle(); // clears current_job_id in the same write
+      this.clearReleaseGraceTimer();
+      queueLogger.info(`Released booth held by job ${currentJobId}`);
+      this.tick();
+      return;
+    }
+
+    // D11-06: this attempt was never approved. Do NOT release the booth —
+    // close the attempt (booth stays bound to currentJobId, so a retake's
+    // session_start still finds it) and start the grace window. Grace
+    // expiry finalizes through the same gate as an approval, via door 2.
+    this.store.closeBoothAttempt();
+    const attempt = this.store.getBoothAttempt();
+    this.startReleaseGraceTimer(currentJobId);
+    queueLogger.info(
+      `Grace opened for job ${currentJobId}: attempt ${attempt.attemptNo} ended unapproved, ${this.retakeGraceMs}ms to retake`,
+    );
   }
 
   /**
@@ -383,19 +435,54 @@ export class QueueService {
    * An UNBOUND booth still accepts the event. That is the real first
    * `session_start` of a dispatched session, and rejecting it would break every
    * session rather than protect anyone.
+   *
+   * D11-01/D11-06 (phase 11): before today's mismatch check, a retake branch.
+   * 07-EVIDENCE §D proved a retake is a brand-new dslrBooth session — its own
+   * session_start, naming the SAME job the booth is already bound to, arriving
+   * while a grace window may still be open. That is structurally
+   * indistinguishable from an ordinary event UNLESS at least one attempt has
+   * already been counted for this job — which is exactly the discriminator
+   * used below (booth_state.attempt_no >= 1), since the very first
+   * session_start of a genuinely new dispatch also finds jobId === currentJobId
+   * (setBoothBusy() already wrote current_job_id at dispatch time) but with
+   * attempt_no still at its post-release 0.
    */
   private sessionAckedFromEvent(jobId: string): void {
     const currentJobId = this.store.getBoothCurrentJobId();
+
+    if (currentJobId !== undefined && jobId === currentJobId) {
+      const attempt = this.store.getBoothAttempt();
+      if (attempt.attemptNo >= 1) {
+        // A retake: clear the grace timer, open a new attempt, restart the
+        // busy timer, and return WITHOUT calling sessionAcked() — the job's
+        // acknowledged_at must survive the retake untouched.
+        this.clearReleaseGraceTimer();
+        const opened = this.store.openBoothAttempt();
+        this.startBusyTimer(jobId);
+        queueLogger.info(`Retake detected for job ${jobId}: attempt ${opened.attemptNo} opened`);
+        return;
+      }
+    }
+
     if (currentJobId !== undefined && jobId !== currentJobId) {
       queueLogger.warn(
         `session_start ignored for ${jobId}: booth is bound to ${currentJobId}`,
       );
       return;
     }
-    this.sessionAcked(jobId);
+
+    const acked = this.sessionAcked(jobId);
+    if (acked) {
+      this.store.openBoothAttempt();
+    }
   }
 
-  sessionAcked(jobId: string): void {
+  /**
+   * Returns whether the ack actually applied — sessionAckedFromEvent() needs
+   * this to decide whether to open attempt 1, and onAgentAck() ignores it, as
+   * it always has.
+   */
+  sessionAcked(jobId: string): boolean {
     const job = this.store.getJob(jobId);
     // 'no_photo' is terminal too (D-09) and belongs in this guard for the same
     // reason 'completed' and 'failed' do: a stray session_start naming a job
@@ -403,21 +490,79 @@ export class QueueService {
     // would become a fresh candidate for the same sweep on the next tick.
     if (job && (job.status === 'completed' || job.status === 'failed' || job.status === 'no_photo')) {
       queueLogger.warn(`session_start ignored for ${jobId}: already ${job.status}`);
-      return;
+      return false;
     }
     this.store.updateJobStatus(jobId, 'in_progress', 'acknowledged_at', Date.now());
     this.store.setBoothCurrentJob(jobId);
     this.clearBusyTimer();
     this.startBusyTimer(jobId);
+    return true;
   }
 
   /**
-   * D-01/D-02/D-06: the completion anchor. dslrBooth's print-composite
-   * events (`processing_start`, `printing`) both carry the same completed
-   * file in the measured evidence, so either one completes the job — the
-   * event's own jobId is a cross-check only, never the source of truth,
-   * because the Agent stamps a stale activeJobId on every forwarded event
-   * and never clears it.
+   * D11-07 (phase 11): the ONE place "which param is the composite" is
+   * decided — called from both onPrintComposite() below and
+   * agentEventDetail()'s log line, replacing today's independent
+   * `str('param5')`/`str('param1')` reads (the duplication that let the
+   * param5 hardcode drift unnoticed onto every layout that isn't the 4-shot
+   * one it was measured against).
+   *
+   * `printing` stays `param1` (unchanged, D11-07). `processing_start` scans
+   * every `paramN` key in ascending numeric order and keeps the LAST value
+   * whose text names a `\Prints\` path — 07-EVIDENCE conclusion 12: the
+   * vendor's own docs list originals first, composite last, and the
+   * composite's position is layout-dependent (param5 on the 4-shot layout,
+   * param2 on the 1-shot layout measured in §C/§D). If no param matches
+   * `\Prints\`, falls back to the highest-indexed non-empty param — never a
+   * hardcoded index.
+   */
+  private extractCompositePath(eventType: string, payload: Record<string, unknown>): string {
+    const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+
+    if (eventType === 'printing') {
+      return str(payload.param1) ?? '';
+    }
+
+    const paramEntries: Array<{ index: number; value: string }> = [];
+    for (const key of Object.keys(payload)) {
+      const match = /^param(\d+)$/.exec(key);
+      if (!match) continue;
+      const value = str(payload[key]);
+      if (value === undefined) continue;
+      paramEntries.push({ index: Number(match[1]), value });
+    }
+    paramEntries.sort((a, b) => a.index - b.index);
+
+    let lastPrintsMatch: string | undefined;
+    for (const entry of paramEntries) {
+      if (/\\Prints\\/i.test(entry.value)) lastPrintsMatch = entry.value;
+    }
+    if (lastPrintsMatch !== undefined) return lastPrintsMatch;
+
+    return paramEntries.length > 0 ? paramEntries[paramEntries.length - 1].value : '';
+  }
+
+  /**
+   * D11-03 (phase 11), 07-EVIDENCE conclusion 15: `processing_start` and
+   * `printing` were measured to carry the SAME timestamp stem with different
+   * copy-count suffixes (`..._1x.jpg` vs `..._2x.jpg`) for one composite on
+   * the 4-shot layout. A raw string comparison would make a legitimate
+   * approval silently fail D11-03's guard, so every composite comparison in
+   * this service goes through this stem, never the raw path: the filename
+   * (Windows-or-POSIX separator, either survives a WS relay), with its
+   * extension and any trailing `_Nx` copy suffix stripped.
+   */
+  private compositeStem(compositePath: string): string {
+    const normalized = compositePath.replace(/\\/g, '/').trim();
+    const base = normalized.split('/').pop() ?? normalized;
+    const withoutExtension = base.replace(/\.[^./]+$/, '');
+    return withoutExtension.replace(/_\d+x$/i, '');
+  }
+
+  /**
+   * D11-02 (phase 11): the print-composite events, split by role. Cross-check,
+   * mismatch throttle and no-bound-job warn are unchanged from before this
+   * phase — only what happens once a composite path is in hand changes.
    */
   private onPrintComposite(eventType: string, jobId: string | undefined, payload: Record<string, unknown>): void {
     const currentJobId = this.store.getBoothCurrentJobId();
@@ -428,11 +573,9 @@ export class QueueService {
       this.jobIdMismatchWarnLogged = false;
     }
 
-    const paramField = eventType === 'processing_start' ? 'param5' : 'param1';
-    const rawPath = payload[paramField];
-    const compositePath = typeof rawPath === 'string' ? rawPath.trim() : '';
+    const compositePath = this.extractCompositePath(eventType, payload);
     if (!compositePath) {
-      queueLogger.warn(`${eventType} carried no usable composite path in ${paramField}`);
+      queueLogger.warn(`${eventType} carried no usable composite path`);
       return;
     }
 
@@ -454,49 +597,96 @@ export class QueueService {
       return;
     }
 
-    const completed = this.store.completeJob(currentJobId, Date.now());
-    if (!completed) {
-      // The second of the processing_start/printing pair — the job was
-      // already closed. No further side effect.
-      queueLogger.info(`${eventType} composite for ${currentJobId} arrived after the job was already closed`);
+    if (eventType === 'processing_start') {
+      // D11-02/D11-07: a composite exists. This opens or overwrites the
+      // pending-print slot — it never completes anything and never starts
+      // the (retired) release-fallback timer.
+      const attempt = this.store.getBoothAttempt();
+      const now = Date.now();
+      const outcome = this.store.openOrOverwritePendingPrint({
+        jobId: currentJobId,
+        compositePath,
+        attemptNo: attempt.attemptNo,
+        openedAt: now,
+        expiresAt: now + this.pendingPrintExpiryMs,
+      });
+      queueLogger.info(
+        `Pending-print slot for ${currentJobId} ${outcome} at attempt ${attempt.attemptNo} (${compositePath})`,
+      );
       return;
     }
 
-    queueLogger.info(`Completed job ${currentJobId} via ${eventType} composite ${compositePath}`);
-    this.clearBusyTimer(); // the completed job can no longer be stalled and requeued by BTH-02's session timer
-    this.startReleaseTimer(currentJobId); // D-02: falls back to releasing the booth if session_end never arrives
-
-    // D-07: the pending-print slot is opened HERE, at the composite anchor —
-    // before the upload exists — rather than when the upload arrives. That
-    // ordering is the whole mechanism: by the time a `file_upload` shows up the
-    // booth may already have been released and rebound to the next guest, so
-    // the only record of who is owed this photo has to have been written
-    // earlier, and durably.
-    const now = Date.now();
-    const opened = this.store.openPendingPrint({
-      jobId: currentJobId,
-      compositePath,
-      openedAt: now,
-      expiresAt: now + this.pendingPrintExpiryMs,
-    });
-    if (!opened) {
-      // The processing_start/printing double fire. Not an error — the first
-      // event already opened the slot, and ON CONFLICT DO NOTHING kept its
-      // deadline and composite path intact.
-      queueLogger.info(`Pending-print slot for ${currentJobId} was already open; ${eventType} did not reopen it`);
+    // eventType === 'printing' — D11-03's two-part approval guard, checked in
+    // the order 11-CONTEXT.md/11-RESEARCH.md's Pitfall 3 specifies: whether
+    // an attempt is open at all comes FIRST (07-EVIDENCE §E — a gallery
+    // reprint with no session_start must log "no attempt open", not a
+    // misleading composite-mismatch line naming an attempt that does not
+    // exist), and the composite-stem match only SECOND.
+    const attempt = this.store.getBoothAttempt();
+    if (!attempt.attemptOpen) {
+      queueLogger.info('printing ignored: no attempt open');
+      return;
     }
 
-    // D-14, and this is the CLOSE path, not the release path. It sits after the
-    // registry slot is opened so the line is emitted once the job's close is
-    // fully settled. The double fire cannot reach here twice: the second event
-    // returns at the `!completed` branch above.
-    //
-    // It is deliberately NOT called from sessionEnded(). D-02 separates release
-    // from completion: a release can happen minutes after the job closed, or be
-    // driven by the fallback timer instead, or — on the stray-duplicate path
-    // dslrBooth produces three times in 52 seconds — correspond to no session
-    // at all. A summary attached there would report the wrong session or none.
-    this.logSessionSummary(currentJobId, 'completed', true);
+    const pending = this.store.getPendingPrint(currentJobId);
+    const heldPath = pending?.compositePath ?? '';
+    if (this.compositeStem(compositePath) !== this.compositeStem(heldPath)) {
+      queueLogger.info(`printing ignored: composite ${compositePath} is not this attempt's ${heldPath}`);
+      return;
+    }
+
+    this.finalizePendingPrint(currentJobId, 'printing');
+  }
+
+  /**
+   * D11-05 (phase 11): the ONE place a guest's photo is sent. Three callers —
+   * a valid `printing` (door 1, above), the grace timer's expiry (door 2,
+   * below), and — in a later plan in this phase — the CMS operator override
+   * (door 3). Idempotent: a second call for an already-finalized job is a
+   * no-op, because LocalStore.markPendingPrintFinalized()'s predicate is the
+   * same omission-as-guarantee SQL idiom every other terminal write in this
+   * codebase uses.
+   *
+   * Never calls handleStall()/requeueWithRetry()/requeueNoRetry()/failJob()/
+   * setBoothTimeout() and never writes a stall_reason — the job this closes
+   * is either genuinely finished or genuinely abandoned, and neither is a
+   * stall.
+   */
+  private finalizePendingPrint(jobId: string, door: 'printing' | 'grace' | 'operator'): boolean {
+    // Read BEFORE any write below: setBoothIdle() (called further down, via
+    // completeJob/closeJobNoPhoto's release) resets booth_state.attempt_no to
+    // 0, and this is the last moment the attempt count for THIS job can still
+    // be read for the summary line.
+    const attemptsForSummary = this.store.getBoothAttempt().attemptNo;
+    const now = Date.now();
+
+    const result = this.store.markPendingPrintFinalized(jobId, door, now);
+    if (!result.matched) {
+      queueLogger.info(`finalizePendingPrint ignored for ${jobId}: already finalized (door=${door})`);
+      return false;
+    }
+
+    if (door === 'grace') {
+      queueLogger.info(`Grace expired for job ${jobId}`);
+    }
+
+    const photoUrl = result.photoUrl;
+    if (photoUrl) {
+      this.store.completeJob(jobId, now);
+      this.recordPhotoHistory(jobId, photoUrl);
+      void this.sendNotification(jobId, photoUrl);
+    } else {
+      this.store.closeJobNoPhoto(jobId, now);
+    }
+
+    this.clearBusyTimer();
+    this.clearReleaseGraceTimer();
+    this.store.setBoothIdle();
+
+    this.logSessionSummary(jobId, photoUrl ? 'completed' : 'no_photo', Boolean(photoUrl), attemptsForSummary, door);
+
+    this.tick();
+    return true;
   }
 
   onAgentAck(jobId: string, ok: boolean, errorMessage?: string): void {
@@ -615,13 +805,13 @@ export class QueueService {
     };
     switch (eventType) {
       // The print composite, from the two events measured to carry the same
-      // completed file in different positional params.
-      case 'processing_start': {
-        const composite = str('param5');
-        return composite ? `composite=${composite}` : '';
-      }
+      // completed file in different positional params. D11-07: the SAME
+      // extractCompositePath() onPrintComposite() calls — one implementation,
+      // two callers, so the param-position rule can never drift between the
+      // log line and the code that acts on it.
+      case 'processing_start':
       case 'printing': {
-        const composite = str('param1');
+        const composite = this.extractCompositePath(eventType, payload);
         return composite ? `composite=${composite}` : '';
       }
       // param3 ONLY — 'original' or 'print'. param1 (the local path) and
@@ -680,8 +870,24 @@ export class QueueService {
    *
    * A template string, never an object: the masking formatters only run on
    * strings (see logAgentEvent()). No guest name, email or phone is read here.
+   *
+   * D11-09 (phase 11): two trailing fields, APPENDED — every existing field
+   * and its order is untouched, so no existing grep breaks. `attempts` is
+   * read by the caller at finalize time, before booth_state.attempt_no is
+   * reset to 0 by the release that follows (finalizePendingPrint()'s own
+   * comment explains why); `undefined` here means "not read at finalize" —
+   * the 15-minute no-photo sweep, which never went through the finalize
+   * gate — and prints as `unknown`, the same convention `captures` already
+   * uses. `approvedBy` is `'none'` for that same sweep path, since no door
+   * fired.
    */
-  private logSessionSummary(jobId: string, outcome: 'completed' | 'no_photo', compositeSeen: boolean): void {
+  private logSessionSummary(
+    jobId: string,
+    outcome: 'completed' | 'no_photo',
+    compositeSeen: boolean,
+    attempts: number | undefined,
+    approvedBy: 'printing' | 'grace' | 'operator' | 'none',
+  ): void {
     const job = this.store.getJob(jobId);
     const acknowledgedAt = job?.acknowledged_at;
     const durationMs = typeof acknowledgedAt === 'number' ? `${Date.now() - acknowledgedAt}` : 'unknown';
@@ -692,7 +898,8 @@ export class QueueService {
 
     queueLogger.info(
       `SESSION_SUMMARY job=${jobId} outcome=${outcome} captures=${captures ?? 'unknown'}`
-      + ` print_composite=${compositeSeen ? 'yes' : 'no'} duration_ms=${durationMs}`,
+      + ` print_composite=${compositeSeen ? 'yes' : 'no'} duration_ms=${durationMs}`
+      + ` attempts=${attempts ?? 'unknown'} approved_by=${approvedBy}`,
     );
   }
 
@@ -796,7 +1003,7 @@ export class QueueService {
       // anyway — the signature of that residual firing in production. Without
       // the count on this line it would be indistinguishable from a guest who
       // walked away before the first shot.
-      this.logSessionSummary(jobId, 'no_photo', false);
+      this.logSessionSummary(jobId, 'no_photo', false, undefined, 'none');
     }
   }
 
@@ -916,6 +1123,26 @@ export class QueueService {
   }
 
   /**
+   * D11-06's grace timer. Shaped identically to startReleaseTimer() above —
+   * nullable field, start clears first then setTimeout, clear clears+nulls —
+   * but its callback does exactly one thing: fire finalizePendingPrint's door
+   * 2. finalizePendingPrint() itself releases the booth and ticks; this
+   * timer's only job is to call it.
+   */
+  private startReleaseGraceTimer(jobId: string): void {
+    this.clearReleaseGraceTimer();
+    this.releaseGraceTimer = setTimeout(() => {
+      this.releaseGraceTimer = null;
+      this.finalizePendingPrint(jobId, 'grace');
+    }, this.retakeGraceMs);
+  }
+
+  private clearReleaseGraceTimer(): void {
+    if (this.releaseGraceTimer) clearTimeout(this.releaseGraceTimer);
+    this.releaseGraceTimer = null;
+  }
+
+  /**
    * Translate one dslrBooth `file_upload` trigger into at most one guest
    * notification.
    *
@@ -938,6 +1165,15 @@ export class QueueService {
    * photo depend on whether the notification sweeper happened to fire between two
    * uploads — a race deciding what the guest receives. Exactly one `print` exists
    * per session, so filtering on it is deterministic.
+   *
+   * D11-04 (phase 11): this method no longer sends anything. Every attempt —
+   * kept or discarded — produces its own `print` upload (07-EVIDENCE
+   * conclusion 8), so sending here would deliver the REJECTED attempt's photo
+   * whenever the guest retakes: measured on §D, upload `5g719qt` (attempt 1,
+   * discarded) arrives before upload `2z2d7s2` (attempt 2, kept). Sending
+   * only ever happens from finalizePendingPrint(), the one D11-05 gate — this
+   * method's whole job now is writing the URL into the slot so that gate has
+   * something to send when a door finally opens.
    */
   private onFileUpload(jobId: string, payload: Record<string, unknown>): void {
     const kind = typeof payload.param3 === 'string' ? payload.param3 : undefined;
@@ -960,8 +1196,6 @@ export class QueueService {
     // ordering, or drop it if the booth were idle. The registry is the only
     // thing that still remembers who is owed this photo once the booth has
     // moved on.
-    //
-    // Three answers, and all three are load-bearing:
     const pending = this.store.getPendingPrint(jobId);
 
     if (pending === undefined) {
@@ -974,33 +1208,64 @@ export class QueueService {
       return;
     }
 
-    if (pending.status === 'expired') {
-      // D-11: the slot expired but the photo is real. Getting it late beats
-      // not getting it, so deliver anyway. The job's own status is
-      // deliberately NOT touched here — a terminal row is never re-armed, and
-      // that guarantee is enforced by Phase 4's SQL, not by a condition on
-      // this path. The warn exists because a recurring one means the deadline
-      // is set too tight.
-      const lateByMs = Date.now() - pending.expiresAt;
-      queueLogger.warn(
-        `Print upload for ${jobId} arrived ${Math.round(lateByMs / 1000)}s after its pending-print slot expired; delivering late and leaving the job status unchanged`,
-      );
-      if (this.store.resolvePendingPrint(jobId, Date.now())) {
-        this.recordPhotoHistory(jobId, photoUrl);
-        void this.sendNotification(jobId, photoUrl);
+    if (pending.status === 'awaiting' || pending.status === 'expired') {
+      // The ordinary path — 'expired' here means the PENDING_PRINT_EXPIRY_MS
+      // window elapsed (D-11's late-but-legitimate print), which is a
+      // completely different timer from RETAKE_GRACE_MS and must not be
+      // collapsed with it: this slot has NOT been finalized, so the URL is
+      // still write-able and D11-05's gate will read it whenever a door
+      // opens. Overwrites any prior URL — the last upload for the CURRENT
+      // attempt always wins, matching D11-02's "overwrite, don't append".
+      const wrote = this.store.setPendingPrintPhotoUrl(jobId, photoUrl);
+      if (wrote) {
+        queueLogger.info(`Print URL written for ${jobId} attempt ${pending.attemptNo ?? 'unknown'}`);
+      } else {
+        // Race: the slot was finalized between the read above and this
+        // write. Rare, and handled the same way the already-finalized branch
+        // below handles it — treat as a late arrival rather than dropping it
+        // silently.
+        this.deliverLateUpload(jobId, photoUrl, pending);
       }
       return;
     }
 
-    // 'awaiting' — the ordinary path. Resolving BEFORE delivering is
-    // deliberate and follows Phase 4's durable-work-item-before-the-network-
-    // call precedent: the resolve is what makes a duplicate or replayed upload
-    // a no-op, so it has to land first. A false return means another delivery
-    // already claimed this slot.
-    if (this.store.resolvePendingPrint(jobId, Date.now())) {
-      this.recordPhotoHistory(jobId, photoUrl);
-      void this.sendNotification(jobId, photoUrl);
+    // pending.status === 'resolved' — this attempt was already finalized
+    // (D11-05's gate already ran, through whichever door). Two distinguishable
+    // outcomes, matching D11-04's own text:
+    if (pending.photoUrl) {
+      // A double delivery / replay of the SAME upload the finalize gate
+      // already sent. No-op, but logged — this closes today's silent
+      // fall-through branch (WINDOWS-style).
+      queueLogger.info(`Print upload for ${jobId} ignored: this attempt was already finalized with a photo already sent`);
+      return;
     }
+
+    // Finalized with NO URL — the job was closed no_photo (grace/operator
+    // door with an empty slot) and the photo arrived afterward. D-11's
+    // late-arrival guarantee, carried forward: getting it late beats not
+    // getting it, delivered directly rather than through the finalize gate
+    // (which has already run and will not run again for this job).
+    this.deliverLateUpload(jobId, photoUrl, pending);
+  }
+
+  /**
+   * D-11's late-arrival guarantee, carried forward from Phase 7 and now
+   * reachable from two places in onFileUpload() above (a finalized slot with
+   * no URL, and the write-race fallback) — kept as one method so the two
+   * call sites cannot drift into different wording or different side
+   * effects.
+   */
+  private deliverLateUpload(
+    jobId: string,
+    photoUrl: string,
+    pending: { approvedAt?: number },
+  ): void {
+    const lateByMs = pending.approvedAt !== undefined ? Date.now() - pending.approvedAt : undefined;
+    queueLogger.warn(
+      `Print upload for ${jobId} arrived${lateByMs !== undefined ? ` ${Math.round(lateByMs / 1000)}s` : ''} after its job was already closed with no photo; delivering late`,
+    );
+    this.recordPhotoHistory(jobId, photoUrl);
+    void this.sendNotification(jobId, photoUrl);
   }
 
   /**
@@ -1011,10 +1276,11 @@ export class QueueService {
    *
    * It is deliberately NOT called on the two no-op branches. `pending ===
    * undefined` (D-04) means no session ever opened a slot for this job, so
-   * there is no guest to attribute the photo to; a `false` return from
-   * `resolvePendingPrint` means a duplicate or replayed upload, and the first
-   * write already recorded the real capture. Writing on either would fabricate
-   * history — the mirror image of losing a real capture, and just as silent.
+   * there is no guest to attribute the photo to; a slot already finalized
+   * with a photo already sent means a duplicate or replayed upload, and the
+   * first write already recorded the real capture. Writing on either would
+   * fabricate history — the mirror image of losing a real capture, and just
+   * as silent.
    *
    * ADDITIVE, never a replacement (D-04): every `sendNotification()` call site
    * is exactly where it was, and none of them is gated on this write

@@ -138,6 +138,13 @@ export function loadConfig(): EnvConfig {
     // that observed headroom before the queue is unblocked on the guest's
     // behalf.
     BOOTH_RELEASE_TIMEOUT_MS: toNum('BOOTH_RELEASE_TIMEOUT_MS', 120_000),
+    // D11-06 (phase 11): the retake grace window. 20000ms sits at roughly 1.6x
+    // the largest measured retake gap (12.3s, 07-EVIDENCE-dslrbooth-triggers.md
+    // §D). Unlike BOOTH_RELEASE_TIMEOUT_MS's sibling PENDING_PRINT_EXPIRY_MS
+    // (a D-12 module constant), this key is deliberately a real .env value —
+    // D11-06 says explicitly it must be lowerable at the event without a
+    // rebuild. Read once at startup; no SIGHUP reload (see types.ts comment).
+    RETAKE_GRACE_MS: toNum('RETAKE_GRACE_MS', 20_000),
     // D-04: the cold-start fallback. Below WAIT_ESTIMATE_MIN_SAMPLES real
     // completed sessions the estimator uses WAIT_ESTIMATE_DEFAULT_MS rather
     // than computing a median from one or two sessions. The production

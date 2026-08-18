@@ -231,6 +231,14 @@ export interface EnvConfig {
   // that never got acknowledged and charges a retry through handleStall();
   // this one releases an already-completed job and must never charge one.
   BOOTH_RELEASE_TIMEOUT_MS: number;
+  // D11-06 (phase 11): how long an unapproved attempt's session_end holds the
+  // booth open before the grace door (finalizePendingPrint(jobId, 'grace'))
+  // fires. A REAL environment key — unlike PENDING_PRINT_EXPIRY_MS/
+  // NO_PHOTO_CLOSE_DELAY_MS (D-12 module constants, deliberately NOT here) —
+  // because D11-06 explicitly wants operator-tunable-without-rebuild. Read
+  // once at startup; SIGHUP reloads only LOG_LEVEL, so changing this needs a
+  // process restart, not a rebuild.
+  RETAKE_GRACE_MS: number;
   // D-04: both the minimum sample count and the cold-start duration are
   // configuration, not literals. No literal for either may appear outside
   // config.ts — an estimator that hardcodes its own fallback cannot be tuned
