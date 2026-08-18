@@ -740,34 +740,62 @@ describe('LocalStore persistence — webhook replay + poll cursor', () => {
       expect(row?.status).toBe('awaiting');
     });
 
-    it('resolvePendingPrint moves an awaiting row to resolved once, and a second call matches zero rows', () => {
+    it('markPendingPrintFinalized moves an awaiting row to resolved once, and a second call matches zero rows', () => {
       store = new LocalStore(dbPath);
       const now = Date.now();
       store.openPendingPrint({ jobId: 'job-P3', compositePath: COMPOSITE, openedAt: now, expiresAt: now + 600_000 });
 
-      expect(store.resolvePendingPrint('job-P3', now + 1_000)).toBe(true);
+      const first = store.markPendingPrintFinalized('job-P3', 'printing', now + 1_000);
+      expect(first.matched).toBe(true);
       expect(store.getPendingPrint('job-P3')?.status).toBe('resolved');
+      expect(store.getPendingPrint('job-P3')?.approvedBy).toBe('printing');
 
-      // T-07-12: the absence of 'resolved' from the predicate IS the guarantee
-      // that a replayed file_upload cannot enqueue a second notification.
-      expect(store.resolvePendingPrint('job-P3', now + 2_000)).toBe(false);
+      // D11-05: the absence of 'resolved' from the predicate IS the guarantee
+      // that a second door firing for the same job cannot enqueue a second
+      // notification — the same T-07-12 discipline the old resolve accessor
+      // pinned, now extended with the approval columns.
+      const second = store.markPendingPrintFinalized('job-P3', 'grace', now + 2_000);
+      expect(second.matched).toBe(false);
       expect(store.getPendingPrint('job-P3')?.status).toBe('resolved');
+      // The second door did NOT overwrite who actually approved it.
+      expect(store.getPendingPrint('job-P3')?.approvedBy).toBe('printing');
     });
 
-    it('resolvePendingPrint moves an EXPIRED row to resolved — D-11s late arrival is still resolvable', () => {
+    it('markPendingPrintFinalized moves an EXPIRED row to resolved — D-11s late arrival is still resolvable', () => {
       store = new LocalStore(dbPath);
       const now = Date.now();
       store.openPendingPrint({ jobId: 'job-P4', compositePath: COMPOSITE, openedAt: now - 10, expiresAt: now - 1 });
       store.expirePendingPrints(now);
       expect(store.getPendingPrint('job-P4')?.status).toBe('expired');
 
-      expect(store.resolvePendingPrint('job-P4', now + 1_000)).toBe(true);
+      const result = store.markPendingPrintFinalized('job-P4', 'grace', now + 1_000);
+      expect(result.matched).toBe(true);
       expect(store.getPendingPrint('job-P4')?.status).toBe('resolved');
     });
 
-    it('resolvePendingPrint on a jobId with no row returns false', () => {
+    it('markPendingPrintFinalized returns the held photoUrl/attemptNo, read before the write, and undefined for the fields that were never set', () => {
       store = new LocalStore(dbPath);
-      expect(store.resolvePendingPrint('job-no-row', Date.now())).toBe(false);
+      const now = Date.now();
+      store.openPendingPrint({ jobId: 'job-P4b', compositePath: COMPOSITE, openedAt: now, expiresAt: now + 600_000 });
+      store.setPendingPrintPhotoUrl('job-P4b', 'https://fotoshare.co/i/held');
+
+      const result = store.markPendingPrintFinalized('job-P4b', 'printing', now + 1_000);
+      expect(result).toEqual({ matched: true, photoUrl: 'https://fotoshare.co/i/held', attemptNo: undefined });
+    });
+
+    it('markPendingPrintFinalized on a jobId with NO row still finalizes — the empty-session case (Q3) never strands the guest', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+
+      const first = store.markPendingPrintFinalized('job-no-row', 'grace', now);
+      expect(first).toEqual({ matched: true, photoUrl: undefined, attemptNo: undefined });
+      expect(store.getPendingPrint('job-no-row')?.status).toBe('resolved');
+      expect(store.getPendingPrint('job-no-row')?.approvedBy).toBe('grace');
+
+      // Idempotent here too: a second door firing for the same never-opened
+      // job is a no-op, exactly like the "a slot existed" case above.
+      const second = store.markPendingPrintFinalized('job-no-row', 'operator', now + 1_000);
+      expect(second.matched).toBe(false);
     });
 
     it('expirePendingPrints returns only awaiting rows already past expires_at, and returns each of them exactly once', () => {
@@ -776,7 +804,7 @@ describe('LocalStore persistence — webhook replay + poll cursor', () => {
       store.openPendingPrint({ jobId: 'job-due', compositePath: COMPOSITE, openedAt: now - 10, expiresAt: now });
       store.openPendingPrint({ jobId: 'job-not-due', compositePath: COMPOSITE, openedAt: now, expiresAt: now + 600_000 });
       store.openPendingPrint({ jobId: 'job-already-resolved', compositePath: COMPOSITE, openedAt: now - 10, expiresAt: now });
-      store.resolvePendingPrint('job-already-resolved', now);
+      store.markPendingPrintFinalized('job-already-resolved', 'printing', now);
 
       const first = store.expirePendingPrints(now);
 
@@ -846,10 +874,284 @@ describe('LocalStore persistence — webhook replay + poll cursor', () => {
       introspect.close();
 
       const columnNames = columns.map((c) => c.name);
-      expect(columnNames).toHaveLength(7);
-      for (const expected of ['jobId', 'composite_path', 'status', 'opened_at', 'expires_at', 'resolved_at', 'updated_at']) {
+      expect(columnNames).toHaveLength(11);
+      for (const expected of [
+        'jobId', 'composite_path', 'status', 'opened_at', 'expires_at', 'resolved_at', 'updated_at',
+        'photo_url', 'attempt_no', 'approved_by', 'approved_at',
+      ]) {
         expect(columnNames).toContain(expected);
       }
+    });
+  });
+
+  // =========================================================================
+  // Phase 11 (D11-01/D11-02/D11-04/D11-05) — the retake migration and its
+  // accessors, proven against a real database rather than the mocked
+  // registry test/helpers/pendingPrintRegistry.ts stands in for elsewhere.
+  //
+  // The migration cases below deliberately build the PRE-Phase-11 shape of
+  // booth_state/pending_print with a raw better-sqlite3 handle FIRST, the
+  // same idiom this file already uses for notification_record above
+  // (createOldShapeTable) — bootstrap() gives a brand-new temp database the
+  // new columns directly, so constructing a store against a freshly-created
+  // file would never exercise the "at least one column was actually added"
+  // migration gate at all. This is the only version of this test that can
+  // catch a booth-state writer silently reverting a real pre-existing row.
+  // =========================================================================
+  describe('D11-01/D11-04/D11-05 pending-print/booth-state migration and accessors', () => {
+    const COMPOSITE_11 = 'C:\\dslrBooth\\Test_event\\Prints\\20260818_101511_776.jpg';
+
+    function createPreP11Tables(row: {
+      boothState: string;
+      boothCurrentJobId: string | null;
+      pendingJobId: string;
+      pendingCompositePath: string;
+      pendingStatus: string;
+      pendingOpenedAt: number;
+      pendingExpiresAt: number;
+    }) {
+      const raw = new Database(dbPath);
+      raw.exec(`
+        CREATE TABLE booth_state (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          state TEXT NOT NULL DEFAULT 'IDLE',
+          updated_at TEXT NOT NULL DEFAULT 'now',
+          current_job_id TEXT
+        );
+        CREATE TABLE pending_print (
+          jobId          TEXT PRIMARY KEY,
+          composite_path TEXT,
+          status         TEXT NOT NULL DEFAULT 'awaiting',
+          opened_at      INTEGER NOT NULL,
+          expires_at     INTEGER NOT NULL,
+          resolved_at    INTEGER,
+          updated_at     TEXT NOT NULL DEFAULT 'now'
+        );
+      `);
+      raw.prepare(
+        'INSERT INTO booth_state (id, state, updated_at, current_job_id) VALUES (1, ?, ?, ?)'
+      ).run(row.boothState, new Date().toISOString(), row.boothCurrentJobId);
+      raw.prepare(
+        `INSERT INTO pending_print (jobId, composite_path, status, opened_at, expires_at, resolved_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, NULL, ?)`
+      ).run(row.pendingJobId, row.pendingCompositePath, row.pendingStatus, row.pendingOpenedAt, row.pendingExpiresAt, new Date().toISOString());
+      raw.close();
+    }
+
+    it('opening a LocalStore on a temp file that already carries pre-Phase-11 booth_state and pending_print rows adds the six columns and preserves every existing value', () => {
+      const now = Date.now();
+      createPreP11Tables({
+        boothState: 'BUSY',
+        boothCurrentJobId: 'job-pre11',
+        pendingJobId: 'job-pre11',
+        pendingCompositePath: COMPOSITE_11,
+        pendingStatus: 'awaiting',
+        pendingOpenedAt: now - 1_000,
+        pendingExpiresAt: now + 600_000,
+      });
+
+      store = new LocalStore(dbPath);
+
+      const boothColumns = (
+        new Database(dbPath, { readonly: true }).prepare('PRAGMA table_info(booth_state)').all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      expect(boothColumns).toEqual(['id', 'state', 'updated_at', 'current_job_id', 'attempt_open', 'attempt_no']);
+
+      const pendingColumns = (
+        new Database(dbPath, { readonly: true }).prepare('PRAGMA table_info(pending_print)').all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      expect(pendingColumns).toEqual([
+        'jobId', 'composite_path', 'status', 'opened_at', 'expires_at', 'resolved_at', 'updated_at',
+        'photo_url', 'attempt_no', 'approved_by', 'approved_at',
+      ]);
+
+      // Every pre-existing value survives, byte-for-byte.
+      expect(store.getBoothState()).toBe('BUSY');
+      expect(store.getBoothCurrentJobId()).toBe('job-pre11');
+      const pending = store.getPendingPrint('job-pre11');
+      expect(pending?.compositePath).toBe(COMPOSITE_11);
+      expect(pending?.status).toBe('awaiting');
+      expect(pending?.openedAt).toBe(now - 1_000);
+      expect(pending?.expiresAt).toBe(now + 600_000);
+      // And the new columns read back as the correct "not yet known" default.
+      expect(pending?.photoUrl).toBeUndefined();
+      expect(pending?.attemptNo).toBeUndefined();
+      expect(pending?.approvedBy).toBeUndefined();
+      expect(pending?.approvedAt).toBeUndefined();
+    });
+
+    it('running the migration twice against the same pre-Phase-11 file adds nothing the second time and throws nothing', () => {
+      createPreP11Tables({
+        boothState: 'IDLE',
+        boothCurrentJobId: null,
+        pendingJobId: 'job-pre11-idem',
+        pendingCompositePath: COMPOSITE_11,
+        pendingStatus: 'awaiting',
+        pendingOpenedAt: Date.now(),
+        pendingExpiresAt: Date.now() + 600_000,
+      });
+
+      store = new LocalStore(dbPath);
+      store.close();
+
+      expect(() => {
+        store = new LocalStore(dbPath);
+      }).not.toThrow();
+
+      const boothColumns = (
+        new Database(dbPath, { readonly: true }).prepare('PRAGMA table_info(booth_state)').all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      const pendingColumns = (
+        new Database(dbPath, { readonly: true }).prepare('PRAGMA table_info(pending_print)').all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      expect(boothColumns).toEqual(['id', 'state', 'updated_at', 'current_job_id', 'attempt_open', 'attempt_no']);
+      expect(pendingColumns).toHaveLength(11);
+
+      // The pre-existing row is still there, unharmed by the no-op re-migration.
+      const pending = store!.getPendingPrint('job-pre11-idem');
+      expect(pending?.compositePath).toBe(COMPOSITE_11);
+    });
+
+    it('every pre-existing booth_state row reads back with the open flag and the counter at 0 after migration', () => {
+      createPreP11Tables({
+        boothState: 'BUSY',
+        boothCurrentJobId: 'job-attempt-default',
+        pendingJobId: 'job-attempt-default',
+        pendingCompositePath: COMPOSITE_11,
+        pendingStatus: 'awaiting',
+        pendingOpenedAt: Date.now(),
+        pendingExpiresAt: Date.now() + 600_000,
+      });
+
+      store = new LocalStore(dbPath);
+      expect(store.getBoothAttempt()).toEqual({ attemptOpen: false, attemptNo: 0 });
+    });
+
+    it('each of the four booth-state replace-writers leaves attempt_open/attempt_no at 0 after an attempt was open — the INSERT OR REPLACE column-omission hazard cannot revert them silently because it cannot revert what is already explicit', () => {
+      store = new LocalStore(dbPath);
+
+      store.setBoothBusy('job-writer-1');
+      store.openBoothAttempt();
+      expect(store.getBoothAttempt()).toEqual({ attemptOpen: true, attemptNo: 1 });
+      store.setBoothState('ANNOUNCING');
+      expect(store.getBoothAttempt()).toEqual({ attemptOpen: false, attemptNo: 0 });
+
+      store.setBoothBusy('job-writer-2');
+      store.openBoothAttempt();
+      expect(store.getBoothAttempt().attemptOpen).toBe(true);
+      store.setBoothBusy('job-writer-3');
+      expect(store.getBoothAttempt()).toEqual({ attemptOpen: false, attemptNo: 0 });
+
+      store.setBoothBusy('job-writer-4');
+      store.openBoothAttempt();
+      expect(store.getBoothAttempt().attemptOpen).toBe(true);
+      store.setBoothIdle();
+      expect(store.getBoothAttempt()).toEqual({ attemptOpen: false, attemptNo: 0 });
+
+      store.setBoothBusy('job-writer-5');
+      store.openBoothAttempt();
+      expect(store.getBoothAttempt().attemptOpen).toBe(true);
+      store.setBoothTimeout('test-reset');
+      expect(store.getBoothAttempt()).toEqual({ attemptOpen: false, attemptNo: 0 });
+    });
+
+    it('openBoothAttempt() increments attempt_no across repeated retakes; closeBoothAttempt() clears only the open flag', () => {
+      store = new LocalStore(dbPath);
+      store.setBoothBusy('job-attempts');
+
+      expect(store.openBoothAttempt()).toEqual({ attemptOpen: true, attemptNo: 1 });
+      store.closeBoothAttempt();
+      expect(store.getBoothAttempt()).toEqual({ attemptOpen: false, attemptNo: 1 });
+
+      expect(store.openBoothAttempt()).toEqual({ attemptOpen: true, attemptNo: 2 });
+      store.closeBoothAttempt();
+      expect(store.getBoothAttempt()).toEqual({ attemptOpen: false, attemptNo: 2 });
+    });
+
+    it('openOrOverwritePendingPrint with the SAME composite path leaves the stored row byte-identical and reports "unchanged"', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.openOrOverwritePendingPrint({
+        jobId: 'job-ov-1', compositePath: COMPOSITE_11, attemptNo: 1, openedAt: now, expiresAt: now + 600_000,
+      });
+      store.setPendingPrintPhotoUrl('job-ov-1', 'https://fotoshare.co/i/attempt1');
+      const before = store.getPendingPrint('job-ov-1');
+
+      const outcome = store.openOrOverwritePendingPrint({
+        jobId: 'job-ov-1', compositePath: COMPOSITE_11, attemptNo: 1, openedAt: now + 999, expiresAt: now + 999_999,
+      });
+
+      expect(outcome).toBe('unchanged');
+      expect(store.getPendingPrint('job-ov-1')).toEqual(before);
+    });
+
+    it('openOrOverwritePendingPrint with a DIFFERENT composite path replaces the composite, attempt number and deadline, and clears the prior photoUrl — reports "overwritten"', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      const attempt2Composite = 'C:\\dslrBooth\\Test_event\\Prints\\20260818_101548_163.jpg';
+      store.openOrOverwritePendingPrint({
+        jobId: 'job-ov-2', compositePath: COMPOSITE_11, attemptNo: 1, openedAt: now, expiresAt: now + 600_000,
+      });
+      store.setPendingPrintPhotoUrl('job-ov-2', 'https://fotoshare.co/i/rejected-attempt-1');
+
+      const outcome = store.openOrOverwritePendingPrint({
+        jobId: 'job-ov-2', compositePath: attempt2Composite, attemptNo: 2, openedAt: now + 20_000, expiresAt: now + 620_000,
+      });
+
+      expect(outcome).toBe('overwritten');
+      const row = store.getPendingPrint('job-ov-2');
+      expect(row?.compositePath).toBe(attempt2Composite);
+      expect(row?.attemptNo).toBe(2);
+      expect(row?.expiresAt).toBe(now + 620_000);
+      // The discarded attempt's URL must never survive to be sent later.
+      expect(row?.photoUrl).toBeUndefined();
+    });
+
+    it('openOrOverwritePendingPrint on a jobId with no prior row opens it and reports "opened"', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      const outcome = store.openOrOverwritePendingPrint({
+        jobId: 'job-ov-3', compositePath: COMPOSITE_11, attemptNo: 1, openedAt: now, expiresAt: now + 600_000,
+      });
+      expect(outcome).toBe('opened');
+      expect(store.getPendingPrint('job-ov-3')?.status).toBe('awaiting');
+    });
+
+    it('setPendingPrintPhotoUrl writes against an awaiting/expired slot, and — D-11s late-arrival case — exactly once against a resolved slot with no URL yet, never twice', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+
+      // Ordinary path.
+      store.openPendingPrint({ jobId: 'job-url-1', compositePath: COMPOSITE_11, openedAt: now, expiresAt: now + 600_000 });
+      expect(store.setPendingPrintPhotoUrl('job-url-1', 'https://fotoshare.co/i/ordinary')).toBe(true);
+      expect(store.getPendingPrint('job-url-1')?.status).toBe('awaiting');
+
+      // Finalized with NO url (grace/operator closed it no_photo) — the late
+      // write matches exactly once.
+      store.openPendingPrint({ jobId: 'job-url-2', compositePath: COMPOSITE_11, openedAt: now, expiresAt: now + 600_000 });
+      store.markPendingPrintFinalized('job-url-2', 'grace', now + 1_000);
+      expect(store.getPendingPrint('job-url-2')?.photoUrl).toBeUndefined();
+
+      const firstLateWrite = store.setPendingPrintPhotoUrl('job-url-2', 'https://fotoshare.co/i/late');
+      expect(firstLateWrite).toBe(true);
+      expect(store.getPendingPrint('job-url-2')?.status).toBe('resolved'); // untouched
+      expect(store.getPendingPrint('job-url-2')?.photoUrl).toBe('https://fotoshare.co/i/late');
+
+      const secondLateWrite = store.setPendingPrintPhotoUrl('job-url-2', 'https://fotoshare.co/i/late-replay');
+      expect(secondLateWrite).toBe(false);
+      expect(store.getPendingPrint('job-url-2')?.photoUrl).toBe('https://fotoshare.co/i/late');
+    });
+
+    it('setPendingPrintPhotoUrl never matches a resolved slot that already has a URL — the double-delivery no-op', () => {
+      store = new LocalStore(dbPath);
+      const now = Date.now();
+      store.openPendingPrint({ jobId: 'job-url-3', compositePath: COMPOSITE_11, openedAt: now, expiresAt: now + 600_000 });
+      store.setPendingPrintPhotoUrl('job-url-3', 'https://fotoshare.co/i/first');
+      store.markPendingPrintFinalized('job-url-3', 'printing', now + 1_000);
+
+      const replay = store.setPendingPrintPhotoUrl('job-url-3', 'https://fotoshare.co/i/replayed');
+      expect(replay).toBe(false);
+      expect(store.getPendingPrint('job-url-3')?.photoUrl).toBe('https://fotoshare.co/i/first');
     });
   });
 
@@ -902,9 +1204,12 @@ describe('LocalStore persistence — webhook replay + poll cursor', () => {
       store.close();
       store = undefined;
 
-      // The pre-phase baseline, pinned as literals. Phase 8 is additive-only:
-      // if any migration ever adds, drops, or renames a column on one of
-      // these five, this case fails and names the table.
+      // The pre-Phase-8 baseline, pinned as literals. Phase 8 was
+      // additive-only: if any migration ever adds, drops, or renames a
+      // column on one of these five, this case fails and names the table.
+      // booth_state/pending_print's arrays were updated for Phase 11
+      // (D11-01/D11-04/D11-05, both additive — see the migration idempotency
+      // block below for the same two tables proven against a real database).
       const baseline: Record<string, string[]> = {
         registration: ['id', 'name', 'email', 'phone', 'mode', 'registered_at', 'raw_payload', 'received_at'],
         queue_job: [
@@ -912,9 +1217,12 @@ describe('LocalStore persistence — webhook replay + poll cursor', () => {
           'session_started_at', 'session_ended_at', 'completed_at', 'ack_error_message',
           'stall_reason', 'retries',
         ],
-        booth_state: ['id', 'state', 'updated_at', 'current_job_id'],
+        booth_state: ['id', 'state', 'updated_at', 'current_job_id', 'attempt_open', 'attempt_no'],
         notification_record: ['jobId', 'status', 'attempts', 'lastError', 'photoUrl', 'dueAt', 'updatedAt'],
-        pending_print: ['jobId', 'composite_path', 'status', 'opened_at', 'expires_at', 'resolved_at', 'updated_at'],
+        pending_print: [
+          'jobId', 'composite_path', 'status', 'opened_at', 'expires_at', 'resolved_at', 'updated_at',
+          'photo_url', 'attempt_no', 'approved_by', 'approved_at',
+        ],
       };
 
       const introspect = new Database(dbPath, { readonly: true });
@@ -922,7 +1230,7 @@ describe('LocalStore persistence — webhook replay + poll cursor', () => {
         const columns = (
           introspect.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
         ).map((c) => c.name);
-        expect(columns, `${table} changed shape in Phase 8`).toEqual(expected);
+        expect(columns, `${table} changed shape since this baseline was last updated`).toEqual(expected);
       }
       introspect.close();
     });

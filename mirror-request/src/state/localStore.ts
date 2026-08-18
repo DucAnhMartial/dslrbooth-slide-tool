@@ -1342,16 +1342,24 @@ export class LocalStore {
   }
 
   // D11-04 (phase 11): writes the print URL into the slot WITHOUT changing
-  // `status` — sending happens only at finalize (D11-05). The predicate is
-  // deliberately the same "still open" set finalize's predicate reads from
-  // ('awaiting'/'expired'): a slot already finalized ('resolved') must not
-  // silently accept a late URL here — see onFileUpload()'s own late-arrival
-  // handling for what happens to an upload that misses this window.
+  // `status` — sending happens only at finalize (D11-05).
+  //
+  // The predicate has TWO disjuncts, not one, and the second is what makes
+  // D-11's late-arrival guarantee a single idempotent SQL predicate rather
+  // than an application-level "have I already delivered this late upload"
+  // flag: 'awaiting'/'expired' is the ordinary pre-finalize path (status
+  // untouched); 'resolved' with photo_url still NULL is the finalized-with-
+  // no-URL case (grace/operator door closed the job before any upload
+  // arrived) — a late print here must still be deliverable exactly once, and
+  // writing photo_url is what its caller (onFileUpload) uses to tell "wrote
+  // it, deliver late" apart from "already had one, no-op": a SECOND late
+  // upload for the same job finds photo_url no longer NULL and the whole
+  // predicate fails, so this returns false and nothing sends twice.
   setPendingPrintPhotoUrl(jobId: string, photoUrl: string): boolean {
     const result = this.db.prepare(`
       UPDATE pending_print
       SET photo_url = ?, updated_at = ?
-      WHERE jobId = ? AND status IN ('awaiting','expired')
+      WHERE jobId = ? AND (status IN ('awaiting','expired') OR (status = 'resolved' AND photo_url IS NULL))
     `).run(photoUrl, new Date().toISOString(), jobId);
     return result.changes === 1;
   }

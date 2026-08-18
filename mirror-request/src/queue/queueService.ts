@@ -1208,64 +1208,42 @@ export class QueueService {
       return;
     }
 
-    if (pending.status === 'awaiting' || pending.status === 'expired') {
-      // The ordinary path — 'expired' here means the PENDING_PRINT_EXPIRY_MS
-      // window elapsed (D-11's late-but-legitimate print), which is a
-      // completely different timer from RETAKE_GRACE_MS and must not be
-      // collapsed with it: this slot has NOT been finalized, so the URL is
-      // still write-able and D11-05's gate will read it whenever a door
-      // opens. Overwrites any prior URL — the last upload for the CURRENT
-      // attempt always wins, matching D11-02's "overwrite, don't append".
-      const wrote = this.store.setPendingPrintPhotoUrl(jobId, photoUrl);
-      if (wrote) {
-        queueLogger.info(`Print URL written for ${jobId} attempt ${pending.attemptNo ?? 'unknown'}`);
-      } else {
-        // Race: the slot was finalized between the read above and this
-        // write. Rare, and handled the same way the already-finalized branch
-        // below handles it — treat as a late arrival rather than dropping it
-        // silently.
-        this.deliverLateUpload(jobId, photoUrl, pending);
-      }
-      return;
-    }
-
-    // pending.status === 'resolved' — this attempt was already finalized
-    // (D11-05's gate already ran, through whichever door). Two distinguishable
-    // outcomes, matching D11-04's own text:
-    if (pending.photoUrl) {
-      // A double delivery / replay of the SAME upload the finalize gate
-      // already sent. No-op, but logged — this closes today's silent
-      // fall-through branch (WINDOWS-style).
+    // ONE write, ONE idempotent predicate (LocalStore.setPendingPrintPhotoUrl,
+    // D11-04) covers all three write-able answers at once: 'awaiting'/
+    // 'expired' (the ordinary path — this slot has NOT been finalized, so the
+    // URL is written for D11-05's gate to read whenever a door opens later;
+    // overwrites any prior URL, the last upload for the CURRENT attempt
+    // always wins, matching D11-02's "overwrite, don't append"), and
+    // 'resolved' with no photo_url yet (finalized no_photo — grace/operator
+    // door closed the job before any upload arrived — and this IS D-11's
+    // late-arrival case, deliverable exactly once because writing photo_url
+    // here is what makes a SECOND late upload for the same job fail this
+    // same predicate). The only case that does NOT match is 'resolved' WITH
+    // a photo_url already — a double delivery / replay of the upload the
+    // finalize gate already sent, which closes today's silent fall-through
+    // branch (WINDOWS-style) by logging instead of silently doing nothing.
+    const wrote = this.store.setPendingPrintPhotoUrl(jobId, photoUrl);
+    if (!wrote) {
       queueLogger.info(`Print upload for ${jobId} ignored: this attempt was already finalized with a photo already sent`);
       return;
     }
 
-    // Finalized with NO URL — the job was closed no_photo (grace/operator
-    // door with an empty slot) and the photo arrived afterward. D-11's
-    // late-arrival guarantee, carried forward: getting it late beats not
-    // getting it, delivered directly rather than through the finalize gate
-    // (which has already run and will not run again for this job).
-    this.deliverLateUpload(jobId, photoUrl, pending);
-  }
+    if (pending.status === 'resolved') {
+      // D-11's late-arrival guarantee, carried forward from Phase 7: the job
+      // was already closed no_photo and the photo arrived afterward. Getting
+      // it late beats not getting it, delivered directly rather than through
+      // the finalize gate (which has already run and will not run again for
+      // this job).
+      const lateByMs = pending.approvedAt !== undefined ? Date.now() - pending.approvedAt : undefined;
+      queueLogger.warn(
+        `Print upload for ${jobId} arrived${lateByMs !== undefined ? ` ${Math.round(lateByMs / 1000)}s` : ''} after its job was already closed with no photo; delivering late`,
+      );
+      this.recordPhotoHistory(jobId, photoUrl);
+      void this.sendNotification(jobId, photoUrl);
+      return;
+    }
 
-  /**
-   * D-11's late-arrival guarantee, carried forward from Phase 7 and now
-   * reachable from two places in onFileUpload() above (a finalized slot with
-   * no URL, and the write-race fallback) — kept as one method so the two
-   * call sites cannot drift into different wording or different side
-   * effects.
-   */
-  private deliverLateUpload(
-    jobId: string,
-    photoUrl: string,
-    pending: { approvedAt?: number },
-  ): void {
-    const lateByMs = pending.approvedAt !== undefined ? Date.now() - pending.approvedAt : undefined;
-    queueLogger.warn(
-      `Print upload for ${jobId} arrived${lateByMs !== undefined ? ` ${Math.round(lateByMs / 1000)}s` : ''} after its job was already closed with no photo; delivering late`,
-    );
-    this.recordPhotoHistory(jobId, photoUrl);
-    void this.sendNotification(jobId, photoUrl);
+    queueLogger.info(`Print URL written for ${jobId} attempt ${pending.attemptNo ?? 'unknown'}`);
   }
 
   /**

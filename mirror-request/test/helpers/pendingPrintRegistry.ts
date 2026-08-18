@@ -30,7 +30,10 @@
  *   - getPendingPrint — returns the row whatever its status, so the caller
  *     keeps all three answers: 'awaiting', 'expired', and "no row at all".
  *   - setPendingPrintPhotoUrl — writes the URL without touching status;
- *     succeeds only while the slot is still 'awaiting' or 'expired'.
+ *     succeeds while the slot is still 'awaiting'/'expired', OR exactly once
+ *     more against a 'resolved' row that has no URL yet (D-11's late-arrival
+ *     case) — a second late write for the same job finds photoUrl already
+ *     set and fails.
  *   - markPendingPrintFinalized — succeeds once, from 'awaiting' or
  *     'expired', never twice (idempotent, D11-05's one finalize gate); a
  *     job with no slot at all still finalizes, by inserting a resolved row
@@ -107,7 +110,13 @@ export function createPendingPrintRegistry(seed: PendingPrintRow[] = []): {
     },
     setPendingPrintPhotoUrl(jobId, photoUrl) {
       const row = rows.get(jobId);
-      if (!row || (row.status !== 'awaiting' && row.status !== 'expired')) return false;
+      if (!row) return false;
+      const stillOpen = row.status === 'awaiting' || row.status === 'expired';
+      // D-11's late-arrival case: finalized 'resolved' with no URL yet — the
+      // ONLY resolved shape this may still write to, and writing it is what
+      // makes a second late upload for the same job fail this same check.
+      const lateArrival = row.status === 'resolved' && row.photoUrl === undefined;
+      if (!stillOpen && !lateArrival) return false;
       row.photoUrl = photoUrl;
       return true;
     },
