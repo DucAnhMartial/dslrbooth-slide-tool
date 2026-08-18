@@ -59,14 +59,29 @@ export function createCommandHandler(deps: CommandDeps): (msg: CommandMessage) =
     deps.logger.info(`Command received: start_session (mode=${mode}, jobId=${jobId || 'unknown'})`)
 
     await deps.closeDisplay()
+
+    // 11-06: stamp the id BEFORE calling the API that can make dslrBooth
+    // fire session_start, not after awaiting it. Measured live, 2026-08-18
+    // 11:22:53: dslrBooth's own trigger reached the Agent's trigger
+    // listener 20ms after this command was received -- 28ms BEFORE
+    // startSession()'s promise resolved. Every session_start forwarded in
+    // that window used to carry activeJobId === undefined, and the
+    // Extension Service (mirror-request 11-06) had no way to know whose
+    // session_start it was. Stamping here closes the window at its source;
+    // the server-side fallback is defense in depth, not a substitute.
+    deps.setActiveJobId(jobId)
     const result = await deps.dslrBooth.startSession(mode)
 
     if (result.isSuccessful) {
-      deps.setActiveJobId(jobId)
       deps.updateDisplay({ phase: 'busy', endsAt: null })
       deps.logger.info(`dslrBooth API success: ${result.rawResponse}`)
       deps.send({ type: 'ack', jobId, ok: true, errorMessage: '' })
     } else {
+      // A failed start never actually opened a dslrBooth session for this
+      // jobId -- leaving activeJobId stamped would misattribute whatever
+      // trigger fires next (a stray local session_start, or the operator's
+      // own retry) to a job the booth never started.
+      deps.setActiveJobId(undefined)
       deps.logger.error(`dslrBooth API failed: ${result.errorMessage}`)
       deps.send({ type: 'ack', jobId, ok: false, errorMessage: result.errorMessage })
     }
