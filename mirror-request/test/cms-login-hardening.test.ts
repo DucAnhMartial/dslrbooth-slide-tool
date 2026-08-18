@@ -7,6 +7,7 @@ import path from 'node:path';
 import { LocalStore } from '../src/state/localStore';
 import { createCmsRouter } from '../src/cms/cmsRouter';
 import { createSessionStore, hashPassword, MAX_SESSIONS } from '../src/cms/cmsAuth';
+import { BOOTH_LINK } from './helpers/cmsBoothLink';
 
 // ---------------------------------------------------------------------------
 // Phase 8 code review, WR-01 and WR-02 — the login route's two unbounded
@@ -64,7 +65,7 @@ function makeApp(clock: { now: number }): express.Express {
     Object.defineProperty(req, 'ip', { value: WHITELISTED_IP, configurable: true });
     next();
   });
-  app.use('/cms', createCmsRouter(makeStore(), CMS_CFG, OFFLINE_AGENT, { now: () => clock.now }));
+  app.use('/cms', createCmsRouter(makeStore(), CMS_CFG, OFFLINE_AGENT, BOOTH_LINK, { now: () => clock.now }));
   return app;
 }
 

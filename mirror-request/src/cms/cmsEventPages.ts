@@ -331,6 +331,7 @@ export function renderCmsEventListPage(data: {
   <div class="card">
     <div class="actions" style="margin-bottom:var(--sp-lg)">
       <a class="btn" href="/cms/events/new">+ Tạo sự kiện mới</a>
+      <a class="btn secondary" href="/cms/booth">Kết thúc khách này</a>
     </div>
     ${list}
   </div>

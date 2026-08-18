@@ -19,6 +19,7 @@ import {
 } from '../src/cms/cmsPhotoPages';
 import { QueueService } from '../src/queue/queueService';
 import { mask } from '../src/logging/logger';
+import { BOOTH_LINK } from './helpers/cmsBoothLink';
 
 // ---------------------------------------------------------------------------
 // Plan 08-05 — the CMS photo-history surface (CMS-03, CMS-04, D-10, D-11).
@@ -98,9 +99,19 @@ function build(store: LocalStore = makeStore()): Harness {
 
 /**
  * Drives ONE photo in the way production does: a registration, a queued job, an
- * open pending-print slot, then the Agent's `file_upload` event through
- * `QueueService.onAgentEvent`. Inserting into `event_photo` directly would test
- * this page against a row shape nothing in the system actually writes.
+ * open pending-print slot, the Agent's `file_upload` event, then an approving
+ * `printing` through `QueueService.onAgentEvent`. Inserting into `event_photo`
+ * directly would test this page against a row shape nothing in the system
+ * actually writes.
+ *
+ * D11-02/D11-04/D11-05 (phase 11): `file_upload` alone only WRITES the URL
+ * into the pending-print slot now — the history row this file asserts on is
+ * written by `finalizePendingPrint()`, reached through one of D11-05's three
+ * finalize doors. This harness never runs a full dispatch/session_start
+ * cycle, so the booth is bound and the attempt opened directly, matching
+ * `test/queue-photo-image-resolution.test.ts`'s own `approve()` helper —
+ * then an approving `printing` is sent whose composite stem matches the slot
+ * opened below.
  */
 function captureThroughUpload(
   store: LocalStore,
@@ -115,9 +126,10 @@ function captureThroughUpload(
     registered_at: new Date().toISOString(),
   });
   store.enqueueJob({ id: opts.jobId, queued_at: Date.now() });
+  const compositePath = 'C:\\dslrBooth\\Prints\\20260812_143526_970.jpg';
   store.openPendingPrint({
     jobId: opts.jobId,
-    compositePath: 'C:\\dslrBooth\\Prints\\20260812_143526_970.jpg',
+    compositePath,
     openedAt: Date.now() - 60_000,
     expiresAt: Date.now() + 60_000,
   });
@@ -131,6 +143,10 @@ function captureThroughUpload(
     param3: 'print',
     param4: 'Test_event',
   });
+
+  store.setBoothBusy(opts.jobId);
+  store.openBoothAttempt();
+  service.onAgentEvent('printing', opts.jobId, { param1: compositePath });
 }
 
 /** Seeds history in bulk, for the pagination and no-trim cases. */
@@ -322,7 +338,7 @@ describe('CMS photo history — unreachable without BOTH the IP layer and a sess
     });
     // The REAL router, mounted exactly as index.ts mounts it. This is also what
     // proves the photo routes are wired into the CMS at all.
-    app.use('/cms', createCmsIpGate([WHITELISTED_IP]), createCmsRouter(store, CMS_CFG, OFFLINE_AGENT));
+    app.use('/cms', createCmsIpGate([WHITELISTED_IP]), createCmsRouter(store, CMS_CFG, OFFLINE_AGENT, BOOTH_LINK));
     return app;
   }
 

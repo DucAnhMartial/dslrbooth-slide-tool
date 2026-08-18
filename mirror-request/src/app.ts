@@ -227,7 +227,7 @@ export function createApp(deps: ServiceDeps): express.Express {
   // config.CMS_IP_WHITELIST, never config.DISPLAY_IP_WHITELIST: the operator's
   // laptop and the room's TVs are different audiences on different network
   // paths (RESEARCH Pitfall 2).
-  app.use('/cms', createCmsIpGate(config.CMS_IP_WHITELIST), createCmsRouter(store, config, agentServer));
+  app.use('/cms', createCmsIpGate(config.CMS_IP_WHITELIST), createCmsRouter(store, config, agentServer, queue));
 
   // D-15: uploaded branding assets. Gated by the UNION of the two allow-lists,
   // not by either alone — the room's TV has to fetch the event's logo and

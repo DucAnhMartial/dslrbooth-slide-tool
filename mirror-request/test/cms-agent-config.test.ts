@@ -22,6 +22,7 @@ import {
   SAFE_AGENT_CONFIG_FIELDS,
   READ_ONLY_AGENT_CONFIG_FIELDS,
 } from '../src/agent/agentConfigContract';
+import { BOOTH_LINK } from './helpers/cmsBoothLink';
 
 // ---------------------------------------------------------------------------
 // Plan 08-04 Task 3 — the CMS Agent-configuration surface.
@@ -320,7 +321,7 @@ describe('CMS Agent configuration page (UI-02, D-16)', () => {
       Object.defineProperty(req, 'ip', { value: '203.0.113.9', configurable: true });
       next();
     });
-    app.use('/cms', createCmsIpGate([WHITELISTED_IP]), createCmsRouter(store, CMS_CFG, agent));
+    app.use('/cms', createCmsIpGate([WHITELISTED_IP]), createCmsRouter(store, CMS_CFG, agent, BOOTH_LINK));
 
     const refusedByIp = await request(app).get('/cms/agent');
     expect(refusedByIp.status).toBe(403);
@@ -330,7 +331,7 @@ describe('CMS Agent configuration page (UI-02, D-16)', () => {
       Object.defineProperty(req, 'ip', { value: WHITELISTED_IP, configurable: true });
       next();
     });
-    sessionApp.use('/cms', createCmsIpGate([WHITELISTED_IP]), createCmsRouter(makeStore(), CMS_CFG, agent));
+    sessionApp.use('/cms', createCmsIpGate([WHITELISTED_IP]), createCmsRouter(makeStore(), CMS_CFG, agent, BOOTH_LINK));
 
     const refusedBySession = await request(sessionApp).get('/cms/agent');
     expect(refusedBySession.status).not.toBe(200);

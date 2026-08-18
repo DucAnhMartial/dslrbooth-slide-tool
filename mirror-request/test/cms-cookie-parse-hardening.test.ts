@@ -8,6 +8,7 @@ import { LocalStore } from '../src/state/localStore';
 import { createCmsIpGate } from '../src/cms/cmsIpGate';
 import { createCmsRouter } from '../src/cms/cmsRouter';
 import { parseCookies, hashPassword } from '../src/cms/cmsAuth';
+import { BOOTH_LINK } from './helpers/cmsBoothLink';
 
 // ---------------------------------------------------------------------------
 // Phase 8 code review, CR-01 — a malformed `Cookie` header must not become a
@@ -67,7 +68,7 @@ function makeApp(): express.Express {
   app.use(
     '/cms',
     createCmsIpGate([WHITELISTED_IP]),
-    createCmsRouter(makeStore(), CMS_CFG, OFFLINE_AGENT),
+    createCmsRouter(makeStore(), CMS_CFG, OFFLINE_AGENT, BOOTH_LINK),
   );
   return app;
 }

@@ -16,6 +16,7 @@ import { DisplayServer } from '../src/display/displayServer';
 import type { QueueService } from '../src/queue/queueService';
 import type { AgentServer } from '../src/agent/agentServer';
 import type { DisplaySnapshot } from '../src/types';
+import { BOOTH_LINK } from './helpers/cmsBoothLink';
 
 // ---------------------------------------------------------------------------
 // Plan 08-03 Task 1 — the RECEIVING half of D-15, and the structural closure
@@ -248,7 +249,7 @@ describe('D-15: the upload route is authenticated, and an anonymous post writes 
       Object.defineProperty(req, 'ip', { value: WHITELISTED_IP, configurable: true });
       next();
     });
-    app.use('/cms', createCmsIpGate([WHITELISTED_IP]), createCmsRouter(makeStore(), CMS_CFG, OFFLINE_AGENT));
+    app.use('/cms', createCmsIpGate([WHITELISTED_IP]), createCmsRouter(makeStore(), CMS_CFG, OFFLINE_AGENT, BOOTH_LINK));
 
     const res = await request(app).post('/cms/api/assets').send({ data: b64(PNG) });
     expect(res.status).toBe(401);

@@ -11,6 +11,7 @@ import { LocalStore, DEFAULT_EVENT_CONFIG } from '../src/state/localStore';
 import { createCmsIpGate } from '../src/cms/cmsIpGate';
 import { createCmsRouter } from '../src/cms/cmsRouter';
 import { hashPassword, verifyPassword } from '../src/cms/cmsAuth';
+import { BOOTH_LINK } from './helpers/cmsBoothLink';
 import { DisplayServer } from '../src/display/displayServer';
 import { renderDisplayPage } from '../src/display/displayPage';
 import type { QueueService } from '../src/queue/queueService';
@@ -93,7 +94,7 @@ function buildCmsApp(
     next();
   });
   // The exact mount index.ts uses: IP gate FIRST, router second (D-13).
-  app.use('/cms', createCmsIpGate(opts.whitelist ?? [WHITELISTED_IP]), createCmsRouter(store, CMS_CFG, OFFLINE_AGENT));
+  app.use('/cms', createCmsIpGate(opts.whitelist ?? [WHITELISTED_IP]), createCmsRouter(store, CMS_CFG, OFFLINE_AGENT, BOOTH_LINK));
   return app;
 }
 

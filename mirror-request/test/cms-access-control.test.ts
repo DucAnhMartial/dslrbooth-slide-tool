@@ -9,6 +9,7 @@ import { LocalStore } from '../src/state/localStore';
 import { createCmsIpGate } from '../src/cms/cmsIpGate';
 import { createCmsRouter } from '../src/cms/cmsRouter';
 import { createRequireSession, hashPassword, verifyPassword, type SessionStore } from '../src/cms/cmsAuth';
+import { BOOTH_LINK } from './helpers/cmsBoothLink';
 import { serveUploadedAsset } from '../src/cms/uploadHandler';
 import { jsonWithRawBody } from '../src/ingestion/webhookAuth';
 import { clientIp, isWhitelisted } from '../src/security/ipAllowlist';
@@ -127,7 +128,7 @@ describe('CMS-04: the IP layer and the session layer refuse independently (D-13)
 
   it('refuses a whitelisted IP with no cookie, and with a forged token, identically (layer two is live)', async () => {
     const app = withFakeIp(express(), WHITELISTED_IP);
-    app.use('/cms', createCmsIpGate([WHITELISTED_IP]), createCmsRouter(makeStore(), CMS_CFG, OFFLINE_AGENT));
+    app.use('/cms', createCmsIpGate([WHITELISTED_IP]), createCmsRouter(makeStore(), CMS_CFG, OFFLINE_AGENT, BOOTH_LINK));
 
     const noCookie = await request(app).get('/cms/');
     const forged = await request(app).get('/cms/').set('Cookie', 'cms_session=deadbeefdeadbeef');
@@ -144,7 +145,7 @@ describe('CMS-04: the IP layer and the session layer refuse independently (D-13)
     // silently disable the password layer too — the two are independent, and
     // config.ts's production fail-fast is what stops this state shipping.
     const app = withFakeIp(express(), BLOCKED_IP);
-    app.use('/cms', createCmsIpGate([]), createCmsRouter(makeStore(), CMS_CFG, OFFLINE_AGENT));
+    app.use('/cms', createCmsIpGate([]), createCmsRouter(makeStore(), CMS_CFG, OFFLINE_AGENT, BOOTH_LINK));
 
     expect((await request(app).get('/cms/login')).status).toBe(200);
     expect((await request(app).get('/cms/')).status).toBe(401);
