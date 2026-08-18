@@ -973,8 +973,34 @@ export class QueueService {
 
     if (eventType === 'session_end') {
       this.sessionEnded();
-    } else if (eventType === 'session_start' && jobId) {
-      this.sessionAckedFromEvent(jobId);
+    } else if (eventType === 'session_start') {
+      // 11-06: the booth binding is the authority here for the same reason
+      // D-06 already made it authoritative for the completion anchor —
+      // booth_state.current_job_id is written by THIS service, at dispatch
+      // time (setBoothBusy()), so it does not need the Agent to say whose
+      // session_start this is when it already knows.
+      //
+      // Measured defect (2026-08-18 11:22:53): dslrbooth-agent/src/commands.ts
+      // called deps.setActiveJobId(jobId) only AFTER awaiting
+      // dslrBooth.startSession(mode) resolved — 28ms after dslrBooth had
+      // already fired session_start — so the FIRST session_start of every
+      // dispatched session reached here with jobId undefined. The old guard
+      // (`&& jobId`) silently dropped it: no log line, attempt_no never
+      // reached 1, and the retake that followed was never recognised as a
+      // retake, so the grace window finalised the guest on the DISCARDED
+      // photo (07-EVIDENCE-equivalent, live). Fixed in the Agent too
+      // (dslrbooth-agent 11-06 plan) — this fallback is defense in depth, not
+      // a substitute for that fix.
+      const effectiveJobId = jobId ?? this.store.getBoothCurrentJobId();
+      if (effectiveJobId === undefined) {
+        // D-06's stray-session_start guard, preserved: the booth is genuinely
+        // unbound AND the Agent supplied no jobId, so there is no job to open
+        // an attempt for. This must stay a no-op — the fallback above only
+        // ever substitutes the booth's OWN binding, never invents one.
+        queueLogger.warn('session_start ignored: no jobId and no booth binding');
+      } else {
+        this.sessionAckedFromEvent(effectiveJobId);
+      }
     } else if (eventType === 'file_upload' && jobId && payload) {
       this.onFileUpload(jobId, payload);
     } else if (eventType === 'processing_start' && payload) {
