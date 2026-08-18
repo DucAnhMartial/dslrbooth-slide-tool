@@ -30,7 +30,11 @@ const DEFAULT_HERO_MOMENT_MS = 12_000;
 // token (e.g. "Nguyễn Văn A" -> "A"), which is also how a person would
 // actually be addressed (D-14). Falls back to the whole string when there
 // is no whitespace to split on.
-function toGivenName(fullName: string): string {
+//
+// Exported so the CMS operator panel (D11-08, phase 11) shares this exact
+// projection with the room screen rather than re-deriving it — one
+// implementation, two consumers.
+export function toGivenName(fullName: string): string {
   const parts = fullName.trim().split(/\s+/);
   return parts[parts.length - 1] ?? fullName;
 }

@@ -4,6 +4,7 @@ import { getConfig } from '../config';
 import type { EnvConfig } from '../types';
 import { labelLogger } from '../logging/logger';
 import { resolveDirectImageUrl } from '../display/imageUrlResolver';
+import { toGivenName } from '../display/displayServer';
 
 // Exported so tests can spy on the exact instance this module logs through.
 export const queueLogger = labelLogger('queue');
@@ -1401,6 +1402,81 @@ private clearBusyTimer(): void {
       endsAt: this.announcementEndsAt,
       remainingSeconds: Math.max(0, Math.ceil((this.announcementEndsAt - Date.now()) / 1000)),
     };
+  }
+
+  /**
+   * D11-08 (phase 11): `CmsBoothLink`'s read half. Composes existing pieces
+   * and invents nothing — the bound job comes from getBoothCurrentJobId()
+   * (D-06's source of truth), the name from the same getJobRegistration()
+   * join every other guest-facing read in this service uses, projected
+   * through the SAME toGivenName() the room screen applies (one
+   * implementation, two consumers), and the elapsed time from the
+   * acknowledgement timestamp logSessionSummary() already reads — no second
+   * wait clock.
+   *
+   * Returns nothing at all — not an empty object — when there is no guest to
+   * show, so the CMS page's visibility rule is a property of the data, not
+   * of the template.
+   *
+   * The discriminator is booth_state.attempt_no >= 1, not merely "a job is
+   * bound". A job is bound to the booth from dispatch (setBoothBusy)
+   * onward, but attempt_no stays 0 until the guest's own session_start is
+   * acknowledged — the same window sessionAckedFromEvent()'s retake branch
+   * already treats as "no attempt has happened yet". Showing the control in
+   * that window would render a guest who has not yet even walked up, with
+   * an elapsed time that has no honest value (acknowledged_at is unset), so
+   * it is treated the same as no guest at all.
+   */
+  getBoothStallInfo(): { jobId: string; guestName: string; waitingSinceMs: number } | null {
+    const jobId = this.store.getBoothCurrentJobId();
+    if (jobId === undefined) return null;
+
+    const attempt = this.store.getBoothAttempt();
+    if (attempt.attemptNo < 1) return null;
+
+    const job = this.store.getJob(jobId);
+    const acknowledgedAt = job?.acknowledged_at;
+    const waitingSinceMs = typeof acknowledgedAt === 'number' ? Math.max(0, Date.now() - acknowledgedAt) : 0;
+
+    const registration = this.store.getJobRegistration(jobId)?.registration;
+    const guestName = registration ? toGivenName(registration.name) : '';
+
+    return { jobId, guestName, waitingSinceMs };
+  }
+
+  /**
+   * D11-08 (phase 11), D11-05 door 3: `CmsBoothLink`'s write half — the
+   * operator's finalize door.
+   *
+   * Re-checks that the job id it was handed is STILL the job that owns the
+   * booth before touching anything: the CMS page can render a job id that
+   * has since finalized through another door (a retake's printing, a grace
+   * expiry), and this must refuse that race rather than finalize whatever
+   * happens to be bound now. On a match, it calls the exact same idempotent
+   * gate every other door calls — no store handle, no second write path.
+   *
+   * 'wrong_job' and 'already_finished' are reported apart, both refusals
+   * that mutate nothing: the first means the id no longer owns the booth at
+   * all (refused before finalizePendingPrint is ever called); the second
+   * means it does, but finalizePendingPrint's own idempotency predicate
+   * found the slot already resolved (finalized by another door in the gap
+   * between page render and click).
+   */
+  releaseForOperator(jobId: string): 'released' | 'wrong_job' | 'already_finished' {
+    const currentJobId = this.store.getBoothCurrentJobId();
+    if (currentJobId === undefined || jobId !== currentJobId) {
+      queueLogger.info(`Operator release for ${jobId}: refused: not the bound job`);
+      return 'wrong_job';
+    }
+
+    const released = this.finalizePendingPrint(jobId, 'operator');
+    if (!released) {
+      queueLogger.info(`Operator release for ${jobId}: refused: already finished`);
+      return 'already_finished';
+    }
+
+    queueLogger.info(`Operator release for ${jobId}: released`);
+    return 'released';
   }
 }
 
