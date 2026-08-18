@@ -220,7 +220,14 @@ see §5 for the two anchors this governs):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `BOOTH_RELEASE_TIMEOUT_MS` | `120000` (2 min) | How long the booth stays held for a job that has already **completed** at the print composite, waiting for the `session_end` that releases it. If that `session_end` never arrives, this fallback releases the booth anyway and the queue moves on. The effective value is clamped to at least `30000`. **If you set it too low, the deadline fires while the guest is still standing at the sharing screen** — the booth is handed to the next guest, who is announced and dispatched on top of a session that is visibly still running. It never charges a retry and never writes a `stall_reason` (§6), because the job it releases is already terminal — it is a booth-release deadline, not a stall timer. |
+| `BOOTH_RELEASE_TIMEOUT_MS` | `120000` (2 min) | **Vestigial as of Phase 11 (§14) — read into config, clamped, and stored, but no timer is ever started from it any more.** Before Phase 11 it was the release-fallback deadline for a job that had already completed at the print composite. Phase 11's D11-05 finalize gate retired the whole release-fallback timer, its field, and every call site — a job now leaves the booth held (never completed-but-still-bound) between its print composite and its own approval, so there is no "completed but session_end never arrived" state left for this timer to bound. What actually bounds an unapproved attempt now is `RETAKE_GRACE_MS` (below); a session that never even acknowledges (no `session_start` at all) is still bounded by `SESSION_TIMEOUT_MS` (§6), unchanged. Setting this variable in `.env` does nothing functional today — it is accepted for backward compatibility with existing deployments' `.env` files, not because anything reads it for a decision. |
+
+Retake/approval variable added in Phase 11 (optional, working default — see
+§14 for the attempt model and the three approval doors this governs):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RETAKE_GRACE_MS` | `20000` (20 s) | How long the booth stays held — bound, `booth_state.attempt_open = 0` — after an **unapproved** attempt's `session_end`, before the grace door (§14) finalizes it with `approved_by=grace`. Sized against the largest measured retake gap on the real booth, 12.3 s (`07-EVIDENCE-dslrbooth-triggers.md` §D) — 20000 is 1.6× that. Deliberately a real `.env` key, unlike the two Phase 7 module constants below (D11-06): the operator may need to shorten it at a live event. **Read once at process startup — lowering it during an event needs a process restart, not a rebuild** (`pm2 delete` + `start`, §5's pm2-env trap applies here too). `pm2 restart` alone does **not** pick up a new value, and neither does the `SIGHUP` log-level reload (§11) — that signal reloads `LOG_LEVEL` only, nothing else. What you are trading by shortening it: the window is what stops the next guest being called while the current guest is still deciding whether to retake; shortening it shortens exactly that protection. |
 
 ### Phase 7 timing values that are deliberately NOT environment variables
 
@@ -275,22 +282,57 @@ The type `BoothState` in `src/types.ts` declares a fourth value,
 `TIMEOUT_RESET`, which no code path in this service ever writes. It is
 dead by design — do not look for it in the database.
 
-### Completion and release are two separate anchors (Phase 7)
+### The booth still has exactly these three states (Phase 11)
+
+Phase 11 added a retake/approval model (§14) that could easily have needed
+a fourth state — "waiting to see if the guest retakes" looks like it wants
+its own name. It does not have one, on purpose. The attempt is a flag on
+the **same row** — `booth_state.attempt_open` (0/1) and `attempt_no`
+(an integer, reset to 0 on every release) — not a new `BoothState` value.
+Every existing consumer of `booth_state.state` (the `!== 'BUSY'` disconnect
+guard in §7, the in-flight count `/health` reports, the display feed's
+broadcast) keeps working unmodified, because from their point of view the
+booth is still just `BUSY`.
+
+**The grace window (§14) is BUSY with a job bound and no attempt open** —
+`booth_state.state = 'BUSY'`, `current_job_id` still set, `attempt_open = 0`.
+There is no separate "GRACE" value to look for in the database; read
+`attempt_open` alongside `state` if you need to tell "a guest is actively
+being photographed" from "a guest just left the sharing screen unapproved
+and the grace timer is running" — both are `BUSY` at the `booth_state.state`
+column alone.
+
+### Completion and release are two separate anchors (Phase 7, superseded by Phase 11 — see §14)
 
 **Before Phase 7 there was one anchor: `session_end` both completed the job
-and released the booth. That was wrong, and it is the defect Phase 7
-exists to fix.** The two are now split, and an operator diagnosing a
-session has to know which of the two they are looking at.
+and released the booth. That was wrong, and it is the defect Phase 7 fixed.**
+Phase 11 (§14) then split "has a composite" from "guest approved it," because
+retake proved a composite can be a rejected attempt. What is still true from
+Phase 7: completion and release are not the same moment, and an operator
+diagnosing a session has to know which one they are looking at.
 
-- **Completion happens at the print composite.** dslrBooth emits the
-  finished composite file in `processing_start.param5` and again in
-  `printing.param1` — measured pointing at the same file, about 30 seconds
-  *before* that session's `session_end`. Whichever arrives first completes
-  the job, scoped to `booth_state.current_job_id`; the second is absorbed
-  and completes nothing. Completion does **not** release the booth.
-- **Release happens at the first `session_end` after that**, or at the
-  `BOOTH_RELEASE_TIMEOUT_MS` fallback deadline (§3) if no `session_end`
-  ever arrives.
+- **A composite existing is no longer the same thing as completion.**
+  `processing_start` opens (or, on a retake, overwrites) a pending-print slot
+  for the current attempt — it never marks the job `completed` and never
+  starts any timer. The composite path is read by a scan-and-fallback rule
+  (the last parameter pointing into `\Prints\`, or else the highest-indexed
+  non-empty parameter) rather than a hardcoded position — Phase 7's
+  `param5`-only extraction broke on the measured 1-shot layout and is gone.
+- **Completion (approval) happens at a valid `printing`, or at one of the two
+  other finalize doors.** `printing` is only treated as the guest's approval
+  when the attempt it belongs to is still open AND its composite matches (by
+  filename **stem**, not exact string — see §14's D11-03 note) the composite
+  that attempt's own `processing_start` recorded. A `printing` that fails
+  either check is refused and logged, never treated as completion (§14).
+- **Release now happens in the same act as completion**, through the one
+  finalize gate `finalizePendingPrint()` (§14) — not at a following
+  `session_end`. Before that finalize gate runs, an unapproved attempt's
+  `session_end` does **not** release the booth; it opens `RETAKE_GRACE_MS`
+  (§3) instead, so the next guest is not called up while this guest might
+  still be about to retake. The old `BOOTH_RELEASE_TIMEOUT_MS` release
+  fallback (waiting for a `session_end` after an already-completed job) no
+  longer has anything to wait for and was retired — see §3's note on that
+  variable.
 
 **`session_end` fires on every exit from the sharing screen, not once per
 guest.** Measured on the real booth: three `session_end` events in 52
@@ -343,13 +385,17 @@ photographed being closed as `no_photo` and shown "see staff". That is the
 had nothing to do with the 15-minute residual window §6 describes — the theft
 was instant. Job `BZWCWFN6` is the recorded real-world instance.
 
-### The session summary line — one grep per session (Phase 7, D-14)
+### The session summary line — one grep per session (Phase 7, D-14; extended Phase 11, D11-09)
 
 Every job that closes writes exactly one line, at `info`, with a fixed
-leading token and a stable `key=value` field order:
+leading token and a stable `key=value` field order. Phase 11 (D11-09) added
+two fields, `attempts=` and `approved_by=`, **appended at the end** — every
+field that existed before Phase 11 keeps its exact name and position, so an
+existing grep for any of the first four fields keeps working unchanged. The
+shipped line, quoted verbatim from `src/queue/queueService.ts`:
 
 ```
-SESSION_SUMMARY job=<jobId> outcome=<completed|no_photo> captures=<n|unknown> print_composite=<yes|no> duration_ms=<n|unknown>
+SESSION_SUMMARY job=<jobId> outcome=<completed|no_photo> captures=<n|unknown> print_composite=<yes|no> duration_ms=<n|unknown> attempts=<n|unknown> approved_by=<printing|grace|operator|none>
 ```
 
 To read a whole session, grep the job id and take this line — you do not
@@ -361,10 +407,12 @@ grep "SESSION_SUMMARY job=<jobId>" logs/extension-service-*.log
 
 | Field | What it tells you |
 |---|---|
-| `outcome` | `completed` — a print composite was seen and the job closed normally. `no_photo` — the session ended with no composite ever seen (§6). |
-| `captures` | How many `capture_start` events the session produced, which is the shot count **including retakes**. `unknown` means no counter entry existed — the count is held in memory only, so a service restart mid-session degrades it to `unknown` rather than to a wrong `0`. |
-| `print_composite` | Whether a composite was actually seen. |
-| `duration_ms` | Now minus `acknowledged_at`; `unknown` if the job never recorded one. |
+| `outcome` | `completed` — a print composite was seen AND approved through one of the three doors (§14), and the job closed normally. `no_photo` — the session finalized with no photo URL ever approved (§6). |
+| `captures` | How many `capture_start` events the session produced across **every attempt**, including retakes. `unknown` means no counter entry existed — the count is held in memory only, so a service restart mid-session degrades it to `unknown` rather than to a wrong `0`. |
+| `print_composite` | Whether a composite was actually seen (on any attempt), regardless of whether it was ever approved. |
+| `duration_ms` | Now minus `acknowledged_at`; `unknown` if the job never recorded one. Spans the whole job, including every retake — not just the final attempt. |
+| `attempts` | **New in Phase 11.** How many attempts (`session_start`s that opened a slot) this job went through — `1` for an ordinary session, `2` or more for a retake. `unknown` mirrors `captures`' own in-memory-counter caveat. |
+| `approved_by` | **New in Phase 11.** Which of the three finalize doors (§14) closed this job: `printing` — the guest pressed print and it matched their open attempt (the ordinary path, 0s wait); `grace` — `RETAKE_GRACE_MS` (§3) expired with no retake; `operator` — the CMS "end this guest" control (§14) was pressed; `none` — the job closed through the 15-minute no-photo sweep (§6) without ever reaching the finalize gate at all (an attempt was never opened, so there was no door to approve through). |
 
 **The one combination worth alerting on is `outcome=no_photo` with
 `captures` greater than zero.** That is a session which photographed a
@@ -381,15 +429,21 @@ is not written a second time when a duplicate `session_end` arrives.
 |---|---|---|---|
 | IDLE | ANNOUNCING | The 250 ms tick finds a queued job and the booth is idle | The job stays `queued`; its guest name and countdown are broadcast to the display feed |
 | ANNOUNCING | BUSY | The countdown (`NEXT_GUEST_COUNTDOWN_MS`) elapses | The job is marked `dispatched`, `dispatched_at` is stamped, and the dispatch command is sent to the Agent |
-| BUSY | BUSY (unchanged) | The Agent reports a print composite (`processing_start` / `printing`) | **The completion anchor since Phase 7.** The job named by `booth_state.current_job_id` is marked `completed` and `completed_at` is stamped; a pending-print slot is opened for it (§8) and the summary line is written. The booth is **not** released and the queue does **not** advance |
-| BUSY | IDLE | The Agent reports `session_end` | **Release only since Phase 7 — this completes nothing.** The booth is released, `current_job_id` is cleared, and the tick immediately looks for the next guest. If no job is bound to the booth (a stray duplicate), nothing happens at all |
-| BUSY | IDLE | The `BOOTH_RELEASE_TIMEOUT_MS` fallback deadline fires for a completed job whose `session_end` never arrived | The booth is released with a warning naming the job, and the tick looks for the next guest. **No retry is charged and no `stall_reason` is written** — the job is already terminal (§6) |
-| BUSY | BUSY (timer re-armed) | The Agent acknowledges the session (`session_start` or a positive ack) | The job is marked `in_progress`, `acknowledged_at` is stamped, and the busy timer restarts for a full `SESSION_TIMEOUT_MS` |
+| BUSY | BUSY (unchanged) | `processing_start` reports a print composite (any attempt, including a retake's second one) | **D11-02/D11-07: opens or overwrites the pending-print slot** for the CURRENT attempt with that composite's path (the last one written always wins). Nothing is completed and no timer starts. The composite path is read by a scan-and-fallback rule, not a hardcoded `param5` — see §14 |
+| BUSY | BUSY (unchanged) | `printing` arrives with no attempt open, or with a composite that does not match (by stem) the open attempt's own `processing_start` composite | **Refused, not completion (D11-03, §14).** Logged at `info`: `printing ignored: no attempt open` / `printing ignored: composite … is not this attempt's …`. Nothing about the job changes |
+| BUSY | IDLE | `printing`'s composite DOES match the open attempt (D11-03) | **Door 1 of finalize (§14, D11-05): `approved_by=printing`, 0 s wait.** The single finalize gate completes the job with the held photo URL (or closes it `no_photo` if none was ever written), sends the guest's notification, writes photo history, writes the summary line, and releases the booth — all in the same act |
+| BUSY | BUSY (attempt closed, grace running) | The Agent reports `session_end` for an attempt that has **not yet been approved** | **Opens `RETAKE_GRACE_MS` instead of releasing (§14, D11-06).** `booth_state.attempt_open` is cleared, but `current_job_id` stays bound — the booth remains BUSY and the next guest is **not** called |
+| BUSY (mid-grace) | BUSY (new attempt) | A new `session_start` arrives while `RETAKE_GRACE_MS` is still running | **A retake (§14, D11-01/D11-06).** The grace timer is cancelled, a new attempt opens (`attempt_no` increments), the job stays bound to the same booth — no new guest is called and the guest keeps their place |
+| BUSY (mid-grace) | IDLE | `RETAKE_GRACE_MS` expires with no new `session_start` | **Door 2 of finalize (§14, D11-05): `approved_by=grace`.** Same finalize gate as door 1, called with whichever photo URL was last held (or `no_photo` if none) |
+| BUSY | IDLE | The operator presses "Kết thúc khách này" on the CMS booth page (`POST /cms/api/booth/release`, §14) | **Door 3 of finalize (§14, D11-05/D11-08): `approved_by=operator`.** Same gate as doors 1/2, immediately, without waiting for grace. Refused with no mutation if the job id no longer owns the booth, or if it already finalized through another door in the gap between page render and click |
+| BUSY | IDLE (no-op) | The Agent reports `session_end` for a job already finalized (through any of the three doors above) | **Nothing to do — the finalize gate already released the booth in the same act as approval.** This `session_end`, or any later stray one, finds no job bound and is ignored, same as Phase 7's stray-duplicate case below |
+| BUSY | BUSY (timer re-armed) | The Agent acknowledges the session (`session_start` or a positive ack), not during a grace window | The job is marked `in_progress`, `acknowledged_at` is stamped, and the busy timer restarts for a full `SESSION_TIMEOUT_MS` |
 | BUSY | IDLE | The Agent rejects the session (a negative ack / NAK) | The job is requeued under the bounded retry policy (`stall_reason = 'agent_nak'`, see §6) or failed if retries are exhausted, and the tick immediately looks for the next guest |
-| BUSY | IDLE | The busy timer fires — no acknowledgement or `session_end` arrived within `SESSION_TIMEOUT_MS` | The job is requeued under the bounded retry policy (`stall_reason = 'session_ack_timeout'`, see §6) or failed if retries are exhausted, and the tick immediately looks for the next guest |
+| BUSY | IDLE | The busy timer fires — no acknowledgement or `session_end` arrived within `SESSION_TIMEOUT_MS` (an attempt never even opened) | The job is requeued under the bounded retry policy (`stall_reason = 'session_ack_timeout'`, see §6) or failed if retries are exhausted, and the tick immediately looks for the next guest |
 | ANNOUNCING (at startup) | IDLE | The service starts and finds the booth left `ANNOUNCING` from before a restart | The job is left untouched (still `queued`) — the countdown is only 5-10 s, so it is simply re-announced by the next tick rather than resumed |
 | BUSY (at startup, session stale) | IDLE | The service starts and finds the booth `BUSY`, but `now - booth_state.updated_at` is at or past `SESSION_TIMEOUT_MS` (or the timestamp cannot be parsed) | Every in-flight (`dispatched`/`in_progress`) job is swept through the bounded retry policy (`stall_reason = 'restart_recovery_timeout'`, see §6) |
-| BUSY (at startup, session possibly live) | BUSY (timer re-armed) | The service starts and finds the booth `BUSY` with `now - booth_state.updated_at` under `SESSION_TIMEOUT_MS`, and at least one in-flight job | The booth stays `BUSY`; the most recently dispatched job is treated as the survivor and its timer is re-armed for only the *remaining* time (`SESSION_TIMEOUT_MS` minus the elapsed age) — never a fresh full timeout. Any other in-flight job found at the same time is swept through the retry policy as an orphan from an earlier incident |
+| BUSY (at startup, mid-grace) | IDLE | The service starts and finds the booth `BUSY` with `attempt_open = 0` — it was mid-grace when the process stopped | **Finalizes immediately through the grace door (§14, `approved_by=grace`), rather than resuming the remaining countdown.** The remaining grace window is not reconstructed after a restart — a deliberate, working simplicity assumption, not yet re-measured against a live restart-mid-grace |
+| BUSY (at startup, session possibly live) | BUSY (timer re-armed) | The service starts and finds the booth `BUSY` with `attempt_open = 1` and `now - booth_state.updated_at` under `SESSION_TIMEOUT_MS`, and at least one in-flight job | The booth stays `BUSY`; the most recently dispatched job is treated as the survivor and its timer is re-armed for only the *remaining* time (`SESSION_TIMEOUT_MS` minus the elapsed age) — never a fresh full timeout. Any other in-flight job found at the same time is swept through the retry policy as an orphan from an earlier incident |
 
 Startup recovery (the last three rows) runs once, before the first tick,
 every time the service boots. It exists because a restart destroys the
@@ -436,13 +490,27 @@ fixed, server-authored `stall_reason` values — never guest-supplied text:
 | `agent_nak` | The Agent explicitly rejected the dispatched session |
 
 **An empty `stall_reason` on a terminal job is now meaningful, not a bug.**
-Two Phase 7 paths deliberately write no `stall_reason` at all, because
-neither is a stall and `stall_reason` is a closed, server-authored
-vocabulary that must not gain a value for them: the `no_photo` close below,
-and the `BOOTH_RELEASE_TIMEOUT_MS` release fallback (§3, §5). If you find a
+Paths that deliberately write no `stall_reason` at all do so because neither
+is a stall and `stall_reason` is a closed, server-authored vocabulary that
+must not gain a value for them: the `no_photo` close below, and — since
+Phase 11 — every job finalized through any of the three approval doors
+(§14: `printing`, `grace`, `operator`), which is now the ordinary case for
+every completed session, not an edge case. (Phase 7's own
+`BOOTH_RELEASE_TIMEOUT_MS` release fallback, previously the third
+no-`stall_reason` path, was retired in Phase 11 along with the release
+timer it belonged to — see §3's note on that variable.) If you find a
 terminal job with no reason recorded, read its status and its
 `SESSION_SUMMARY` line (§5) rather than treating the empty field as missing
 data.
+
+**Phase 11's `approved_by` (§14) is a `pending_print` column, not a
+`stall_reason` value, and the two vocabularies are never mixed.** A job's
+approval door lives on `pending_print.approved_by` and is read out through
+the `SESSION_SUMMARY` line (§5); `queue_job.stall_reason` stays exactly the
+three-value closed vocabulary in the table above. An empty `stall_reason` on
+a terminal job gained no new meaning from this phase — it is still simply
+"not a stall," whether the job finalized through a door or closed
+`no_photo`.
 
 ### `no_photo` — the sixth job status (Phase 7)
 
@@ -767,14 +835,25 @@ ordering the booth had already been released and rebound, and a real
 guest's photo would have been sent to the **next** guest's email and phone.
 
 Uploads are now resolved against a durable **pending-print registry**. A
-slot is opened for the job at the completion anchor (§5), before the upload
-exists, so the record of who is owed the photo survives the booth moving on.
-Three outcomes, and all three are deliberate:
+slot is opened for the job at `processing_start` — the moment a composite
+exists, before either the upload or the guest's own approval — so the
+record of who is owed the photo survives the booth moving on.
+
+**Phase 11 (§14) changed WHEN delivery fires again, on top of this.** The
+table below still describes the registry-slot mechanics accurately, but
+"delivered" in the `awaiting` row no longer means "at upload time" — since
+Phase 11, `file_upload` only WRITES the URL into the slot; sending happens
+only when one of the three finalize doors (§14) approves that attempt.
+The one exception is the `expired` row below, which — like before Phase 11
+— still delivers directly at upload time, because by the time an `expired`
+upload arrives the job has usually already finalized through one of the
+three doors with no URL, and this is Phase 7's D-11 late-arrival guarantee
+surviving that move (§14 covers the exact wording of that log line).
 
 | Registry state | What happens | What you see in the log |
 |---|---|---|
-| `awaiting` — a slot is open | The ordinary path. The photo is delivered to that job's guest and the slot moves to `resolved`. | Nothing unusual |
-| `expired` — the slot's deadline passed before the upload arrived | **The photo is still delivered.** Getting it late beats not getting it. The job's own status is deliberately left untouched. | A `warn` naming the job and how late it was. **A recurring one means `PENDING_PRINT_EXPIRY_MS` (§3) is set too tight** |
+| `awaiting` — a slot is open | The URL is written into the slot; nothing is sent yet. Delivery happens later, when a finalize door (§14) approves this attempt — see §14 for the full attempt-and-approval model. | Nothing unusual |
+| `expired` — the slot's deadline passed before the upload arrived | **The photo is still delivered, directly, the moment the late upload arrives** — by then the job has normally already finalized (through grace or operator) with no URL held. Getting it late beats not getting it. The job's own status is deliberately left untouched. | A `warn` naming the job and how late it was. **A recurring one means `PENDING_PRINT_EXPIRY_MS` (§3) is set too tight** |
 | no slot was ever opened | **The photo is dropped and reaches nobody.** No session was awaiting a print for that job — this is the case where a stranger pressing start on the booth's own screen would otherwise have their photo sent to the last real guest, because the Agent stamps a stale job id on every event and never clears it. | A `warn`: `Print upload for <job> dropped: no session was awaiting a print for it` |
 
 Expired slots are **marked, never deleted**, which is what keeps the second
@@ -833,7 +912,12 @@ signing must be revisited before that change ships.
 
 ### The delivery model
 
-An Agent `file_upload` event calls `sendPhotoLink()`, which writes a
+**Since Phase 11 (§14), `sendPhotoLink()` is called from the finalize gate**
+— whichever of the three approval doors (`printing`, `grace`, `operator`)
+closes the job — not from `file_upload` itself; `file_upload` only writes
+the photo URL into the pending-print slot (see the table above), except for
+the D-11 late-arrival case, which still delivers directly. Wherever it is
+called from, `sendPhotoLink()` writes a
 durable work item to `notification_record` carrying the photo URL and a due
 time — it performs no network I/O itself and returns immediately. A
 periodic sweeper (`NOTIFY_SWEEP_INTERVAL_MS`, §3) claims and delivers rows
@@ -2165,3 +2249,150 @@ service — it is turned off with the Agent's own `autoOpenDisplay` setting
 (`AUTO_OPEN_DISPLAY=false` in the booth `.env`, or live from `/cms/agent`),
 because the room screen this section documents already serves the purpose
 the popup used to.
+
+## 14. Retake and approval — the attempt model, the three doors, and the new log vocabulary (Phase 11)
+
+Phase 11 answers the question Phase 7 never had to ask: what happens when a
+guest presses **Retake** on the sharing screen? Measured on the real booth
+(`07-EVIDENCE-dslrbooth-triggers.md` §C/D/E), a retake is a brand-new
+dslrBooth session — `session_end` then `session_start` — and every attempt,
+including the one the guest rejects, uploads its own composite. Before this
+phase the server had no way to tell a rejected attempt from an approved one:
+whichever composite arrived first won, the booth released to the next guest
+mid-retake, and a guest could receive the photo they had just thrown away.
+This section is what an operator needs to diagnose any of that today, and it
+assumes nothing from §5's Phase 7 history — read §5 first if a term here
+(attempt, finalize gate, grace) looks unfamiliar.
+
+### The attempt model, in one paragraph
+
+A job can now hold **more than one attempt** — one per `session_start` —
+and exactly one of them gets approved. `booth_state.attempt_open` (0/1) and
+`attempt_no` track whether an attempt is currently open and how many this
+job has had; they live on the same row as `current_job_id` and `state`, not
+as a new booth state (§5). `processing_start` opens (or, on a retake,
+overwrites) a pending-print slot with that attempt's composite path — no
+hardcoded parameter position, a scan-and-fallback rule instead (the last
+parameter pointing into `\Prints\`, or the highest-indexed non-empty
+parameter). `printing` only counts as the guest's approval when the attempt
+is still open AND its composite matches, by filename **stem**
+(`YYYYMMDD_HHMMSS_mmm`, stripping any trailing `_Nx` copy-count suffix — a
+measured `_1x`/`_2x` pair on the same composite is the same photo), the
+composite that attempt's own `processing_start` recorded.
+
+### The three doors — where `approved_by` is set
+
+Exactly one of three doors closes a job, and the door is recorded on
+`pending_print.approved_by` (never `stall_reason` — §6), then published on
+the `SESSION_SUMMARY` line (§5):
+
+| Door | `approved_by` | Fires when | Wait |
+|---|---|---|---|
+| Printing | `printing` | A `printing` event matches the open attempt (above) | 0 s — the ordinary path |
+| Grace | `grace` | `RETAKE_GRACE_MS` (§3) expires after an unapproved attempt's `session_end` with no new `session_start` | Up to `RETAKE_GRACE_MS` |
+| Operator | `operator` | The operator presses "Kết thúc khách này" on the CMS booth page (below) | However long the operator takes |
+
+All three reach the same single idempotent gate
+(`finalizePendingPrint(jobId, door)`), which is the only place a guest's
+photo is ever sent: it completes the job with whatever URL the slot holds
+(or closes it `no_photo` if none was ever written), sends the notification,
+writes photo history, writes the `SESSION_SUMMARY` line, and releases the
+booth — all in the same act. A second door firing for an already-finalized
+job is a no-op, reported at `info`
+(`finalizePendingPrint ignored for <jobId>: already finalized (door=<door>)`),
+never a silent drop and never a second send.
+
+### The operational precondition everything above rests on
+
+**Auto-print must be OFF on every booth** (`DEPLOYMENT.md` §7d). This is a
+dslrBooth checkbox on the booth PC — nothing in this codebase can enforce
+it. With auto-print ON, `printing` fires immediately after the first
+composite regardless of whether the guest ever retakes, which collapses the
+printing door's own precondition (D11-03) and reproduces exactly the
+pre-Phase-11 defect this whole model exists to prevent — pinned as a named
+regression test, `07-EVIDENCE-dslrbooth-triggers.md` sequence C, in
+`test/queue-retake-anchor.test.ts`. Check it the same way `DEPLOYMENT.md`
+§7d does: run one session and do not press print — the Agent log for that
+session must carry no `printing` line at all.
+
+### The five new log tokens
+
+All five are `info` or `warn`, never `debug` — an operator does not need to
+raise `LOG_LEVEL` (§11) to see any of them.
+
+| Token to grep | Level | What it means | What to do |
+|---|---|---|---|
+| `printing ignored: no attempt open` | `info` | A `printing` event arrived with no attempt currently open on the booth — most often a gallery reprint (07-EVIDENCE §E) with no preceding `session_start`. | Nothing, ordinarily — this is the refusal working. If it appears during what should have been an ordinary, uninterrupted guest session (a `session_start` genuinely did precede it), that is a diagnosis to escalate: something between `session_start` and `printing` did not open the attempt as expected. |
+| `printing ignored: composite <X> is not this attempt's <Y>` | `info` | An attempt IS open, but the `printing` event's composite does not match (by stem) the composite this attempt's own `processing_start` recorded — another guest's stray reprint while this attempt is live, or a genuinely different photo. | **On an ordinary, uninterrupted session where the same guest's own composite is what triggered `printing`, this line means the composite-stem comparison itself is wrong — it is a bug report, not an operator action.** Do not dismiss it as "just a mismatch" in that case; capture the two composite paths from the line and file it. |
+| `Retake detected for job <jobId>: attempt <n> opened` | `info` | A new `session_start` arrived while `RETAKE_GRACE_MS` was still running for this job — a legitimate retake. The prior attempt's grace timer is cancelled and a new attempt opens. | Nothing — this is the retake path working. `<n>` is the new attempt number; two or more retakes in a row show `<n>` climbing. |
+| `Grace opened for job <jobId>: attempt <n> ended unapproved, <ms>ms to retake` | `info` | An attempt's `session_end` arrived without ever seeing a matching `printing` — the guest left the sharing screen without pressing print (or without dslrBooth ever emitting `printing`, if auto-print is misconfigured ON). The booth stays held for `<ms>` (`RETAKE_GRACE_MS`, §3) before the grace door fires. | Nothing during the window — this is expected for a guest who is deciding whether to retake, or who is walking away. If this line appears on **every** session across an event, suspect auto-print is ON (precondition above), not a code fault. |
+| `Grace expired for job <jobId>` | `info` | `RETAKE_GRACE_MS` ran out with no new `session_start` — the guest walked away without approving. This IS the grace door firing (`approved_by=grace`); look at the `SESSION_SUMMARY` line for the same job id for the outcome (photo sent late-held, or `no_photo`). | Nothing automatic is required. If this fires constantly for guests who are known to have pressed print, `RETAKE_GRACE_MS` may be too short for your booth's real retake gaps, or `printing`'s composite match is failing (see the composite-mismatch row above). |
+
+### The operator control — "Kết thúc khách này" (D11-08)
+
+**Where:** `GET /cms/booth` — a link labeled "Kết thúc khách này" on the CMS
+event dashboard (§12). Behind the same `CMS_IP_WHITELIST` and session cookie
+as every other CMS page; no separate auth or CSRF mechanism.
+
+**When it appears:** only when there is a guest to end — `attempt_no >= 1`
+for the job currently bound to the booth. It does **not** appear for a
+genuinely idle booth, nor in the brief window right after dispatch before
+the guest's own `session_start` has been acknowledged (in that window
+`acknowledged_at` is unset, so there is no honest elapsed time to show). The
+page shows the guest's given name and how long they have been at the booth,
+and reloads itself every 5 seconds (a plain HTML `<meta refresh>`, not a
+script) so the elapsed time stays current without any action.
+
+**What it writes:** pressing it POSTs to `POST /cms/api/booth/release` with
+the job id, which calls `releaseForOperator(jobId)` — the operator door
+above, `approved_by=operator`. Two races are both refused rather than
+silently mishandled, and reported apart in the log:
+
+```
+Operator release for <jobId>: refused: not the bound job
+Operator release for <jobId>: refused: already finished
+```
+
+The first means the job id the page rendered no longer owns the booth
+(someone else's session started, or a retake was already under way) — reload
+the page. The second means the job DID own the booth, but finalized (through
+printing or grace) in the gap between page render and click — nothing was
+double-sent; that refusal is the proof.
+
+**Why it exists:** the timer (`RETAKE_GRACE_MS`) is a safety net for the
+walk-away case, not the fast path. Only a human watching the booth knows a
+guest has genuinely left rather than being mid-retake; this control lets an
+operator finalize immediately instead of waiting out the grace window when
+they can see the answer with their own eyes.
+
+### Answering a guest who says they got the wrong photo, or no photo
+
+Two greps, in order — you do not need to reconstruct the session from
+per-event lines:
+
+```bash
+# 1. The one-line outcome for that job
+grep "SESSION_SUMMARY job=<jobId>" logs/extension-service-*.log
+
+# 2. Every reason a printing/upload event for that job was NOT what sent their photo
+grep "<jobId>" logs/extension-service-*.log | grep -E "ignored|Grace (opened|expired)|Retake detected"
+```
+
+The summary line's `attempts=` and `approved_by=` (§5) answer "how many
+times did they shoot, and which door closed it" in one read. The second grep
+answers "what happened to every OTHER attempt or upload that did not become
+the delivered photo" — a guest who insists they took a better second shot
+that never arrived almost always has a `printing ignored: composite …`
+line for the reprint they think should have counted, or a `Grace expired`
+line for a retake attempt that never actually opened because they were
+outside `RETAKE_GRACE_MS` by the time they came back to the camera.
+
+### What did not change
+
+The Agent (D-05), the notification delivery mechanism (`notification_record`,
+its sweeper, its retry budget — §8), the display feed protocol, and
+`web-slide` are all untouched by this phase. `dslrbooth-agent`'s
+`/api/cancel` command (deferred — would let the operator's control also push
+dslrBooth back to its start screen, not just release the booth server-side)
+is not called by anything in this phase; the operator control above only
+ever changes this service's own state.
