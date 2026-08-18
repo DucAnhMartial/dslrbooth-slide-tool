@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import { QueueService, queueLogger } from '../src/queue/queueService';
 import type { LocalStore } from '../src/state/localStore';
 import { createPendingPrintRegistry } from './helpers/pendingPrintRegistry';
@@ -169,6 +171,17 @@ describe('QueueService — the 2026-08-18 11:22 live race, replayed (11-06)', ()
     service.bindNotificationService({ sendPhotoLink });
     service.bindIsAgentOnline(() => true);
 
+    // Task 3 (11-06): the audit. Captured from before the FIRST event of the
+    // replay, not just around the racing session_start, so a silent decline
+    // anywhere in the whole measured sequence — not merely the one this plan
+    // fixes — would show up here. 11-04's own structural test
+    // (queue-ignored-branches.test.ts) already proves every early return in
+    // sessionAckedFromEvent/onPrintComposite/onFileUpload/sessionEnded is
+    // logged; this spy is this file's own behavioural proof that NONE of
+    // those branches actually fire anywhere across this specific incident's
+    // replay — the whole sequence resolves cleanly start to finish.
+    const warnSpy = vi.spyOn(queueLogger, 'warn');
+
     // --- announcement + dispatch: the real production path, not a seeded
     // store — setBoothBusy(JOB_ID) is what writes booth_state.current_job_id
     // the fallback below reads. ---------------------------------------------
@@ -323,6 +336,17 @@ describe('QueueService — the 2026-08-18 11:22 live race, replayed (11-06)', ()
     expect(sendAnnouncement).toHaveBeenCalledTimes(2);
     expect(sendAnnouncement.mock.calls[1][0]).toMatchObject({ jobId: JOB_B });
 
+    // Task 3 (11-06): the audit's own assertion — across the ENTIRE replay
+    // (dispatch, the race, attempt 1, the retake, attempt 2, printing), not
+    // one warn line is a silent-decline branch. The defect this plan closes
+    // cost a live session precisely because a decline had NO log line at
+    // all; this proves the fixed sequence produces none of those lines
+    // either, not merely that the ones it does produce are informational.
+    const declineWarnLines = warnSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.includes('ignored') || m.includes('dropped') || m.includes('does not match'));
+    expect(declineWarnLines).toEqual([]);
+
     service.stop();
   });
 
@@ -347,5 +371,38 @@ describe('QueueService — the 2026-08-18 11:22 live race, replayed (11-06)', ()
     expect(lines[0]).toBe('session_start ignored: no jobId and no booth binding');
 
     service.stop();
+  });
+});
+
+/**
+ * Task 3 (11-06): the structural half of the audit. A behavioural sample
+ * (above) can only prove the fixtures written so far do not observe a silent
+ * decline — it cannot prove the new branch itself is structurally incapable
+ * of one. This reads onAgentEvent()'s own `session_start` branch directly
+ * from source (comments stripped, the same technique
+ * test/queue-ignored-branches.test.ts already established for
+ * sessionAckedFromEvent/onPrintComposite/onFileUpload/sessionEnded — that
+ * file's own METHODS list does not cover onAgentEvent, since 11-04 predates
+ * this branch, so this is that same guarantee extended to the one new
+ * branch 11-06 adds).
+ */
+describe('QueueService source invariant — the new session_start fallback branch is not silent (11-06, D11-09)', () => {
+  it('onAgentEvent()\'s own session_start branch names a queueLogger call before its no-op path — the fallback introduced by this plan cannot decline without logging why', () => {
+    const sourcePath = path.join(__dirname, '..', 'src', 'queue', 'queueService.ts');
+    const stripped = fs.readFileSync(sourcePath, 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/.*$/gm, '');
+
+    const branchStart = stripped.indexOf("else if (eventType === 'session_start')");
+    const branchEnd = stripped.indexOf("else if (eventType === 'file_upload'", branchStart);
+    expect(branchStart).toBeGreaterThan(-1);
+    expect(branchEnd).toBeGreaterThan(branchStart);
+    const branchText = stripped.slice(branchStart, branchEnd);
+
+    // The branch's own no-op path (the `if (effectiveJobId === undefined)`
+    // arm) must contain a queueLogger call — this is what makes the D-06
+    // stray-session_start guard's silence a LOGGED silence, not a bare one.
+    expect(branchText).toContain('queueLogger.');
+    expect(branchText).toContain('effectiveJobId === undefined');
   });
 });
