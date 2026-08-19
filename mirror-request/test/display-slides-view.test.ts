@@ -157,6 +157,14 @@ describe('Slides screen — caption templates are rendered as text, not markup',
 });
 
 describe('Slides screen — trusted caption layout and contain_blur composition (D999.1-02..07)', () => {
+  it('offers an accessible fullscreen control without entering fullscreen until the operator clicks it', () => {
+    expect(SLIDES_HTML).toContain('id="fullscreenToggle"');
+    expect(SLIDES_HTML).toContain('Toàn màn hình');
+    expect(SLIDES_HTML).toContain('document.documentElement.requestFullscreen()');
+    expect(SLIDES_HTML).toContain('document.exitFullscreen()');
+    expect(SLIDES_HTML).toContain("document.addEventListener('fullscreenchange',updateFullscreenToggle)");
+  });
+
   it('normalizes all three fit values and keeps unknown live values on contain', () => {
     expect(SLIDES_HTML).toMatch(/\['contain','cover','contain_blur'\]\.indexOf\(cfg\.photoFit\)>=0\?cfg\.photoFit:'contain'/);
     expect(SLIDES_HTML).toContain("photoFit==='contain_blur'");

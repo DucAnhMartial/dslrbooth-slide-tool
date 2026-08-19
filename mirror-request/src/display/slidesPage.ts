@@ -209,6 +209,14 @@ export function renderSlidesPage(): string {
     #agentOffline{position:fixed;bottom:1.5rem;right:1.5rem;z-index:8;
       background:rgba(10,10,15,.72);color:#a33127;font-size:var(--t-caption);
       font-weight:700;letter-spacing:.04em;padding:.5rem 1.1rem;border-radius:2rem}
+    #fullscreenToggle{position:fixed;top:1rem;right:1rem;z-index:8;display:inline-flex;align-items:center;gap:.45rem;
+      min-height:2.5rem;padding:.45rem .7rem;border:1px solid rgba(255,255,255,.34);border-radius:999px;
+      background:rgba(0,0,0,.58);color:#fff;font:700 var(--t-caption)/1 var(--event-font);cursor:pointer;
+      box-shadow:0 .3rem 1.25rem rgba(0,0,0,.24);backdrop-filter:blur(10px);transition:background .16s ease,transform .16s ease}
+    #fullscreenToggle:hover{background:rgba(0,0,0,.82);transform:translateY(-1px)}
+    #fullscreenToggle:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+    #fullscreenToggle[disabled]{display:none}
+    #fullscreenToggle svg{width:1rem;height:1rem;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
   </style>
 </head>
 <body data-view="slides">
@@ -217,6 +225,10 @@ export function renderSlidesPage(): string {
 <div id="banner" role="status">Mất kết nối — đang thử kết nối lại…</div>
 <div class="screenbadge" id="screenbadge" aria-hidden="true"><b>${SLIDES_BADGE_LABEL}</b><span>${SLIDES_BADGE_HINT}</span></div>
 <div id="agentOffline" role="status" hidden>● Agent mất kết nối</div>
+<button id="fullscreenToggle" type="button" aria-label="Bật toàn màn hình" title="Bật toàn màn hình">
+  <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5"/></svg>
+  <span id="fullscreenToggleLabel">Toàn màn hình</span>
+</button>
 <div class="stage" id="stage">
   <!-- UI-01: server-rendered idle backstop, in the first bytes the browser
        receives — a .slide layer already active, so the first real photo
@@ -238,7 +250,28 @@ export function renderSlidesPage(): string {
 
   var stage=document.querySelector('#stage'),dots=document.querySelector('#dots'),
       banner=document.querySelector('#banner'),agentOffline=document.querySelector('#agentOffline'),
-      hero=document.querySelector('#hero');
+      hero=document.querySelector('#hero'),fullscreenToggle=document.querySelector('#fullscreenToggle'),
+      fullscreenToggleLabel=document.querySelector('#fullscreenToggleLabel');
+
+  function updateFullscreenToggle(){
+    if(!fullscreenToggle||!fullscreenToggleLabel)return;
+    var active=Boolean(document.fullscreenElement);
+    fullscreenToggleLabel.textContent=active?'Thoát toàn màn hình':'Toàn màn hình';
+    fullscreenToggle.setAttribute('aria-label',active?'Thoát toàn màn hình':'Bật toàn màn hình');
+    fullscreenToggle.title=active?'Thoát toàn màn hình':'Bật toàn màn hình';
+  }
+  if(fullscreenToggle){
+    if(!document.fullscreenEnabled){ fullscreenToggle.disabled=true; }
+    else {
+      fullscreenToggle.addEventListener('click',function(){
+        var action=document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen();
+        action.catch(function(){ updateFullscreenToggle(); });
+      });
+      document.addEventListener('fullscreenchange',updateFullscreenToggle);
+      document.addEventListener('fullscreenerror',updateFullscreenToggle);
+      updateFullscreenToggle();
+    }
+  }
 
   // CMS-01: same explicit five-colour-role-plus-font allow-list as the
   // default screen's applier, run on every snapshot rather than once at load
