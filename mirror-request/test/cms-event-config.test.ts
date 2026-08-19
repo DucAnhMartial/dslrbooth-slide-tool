@@ -191,18 +191,32 @@ describe('CMS-01: the form exposes every configurable field', () => {
 });
 
 describe('caption configuration', () => {
-  it('saves valid template and closed-value settings, and rejects an invalid patch atomically', async () => {
+  it('saves contain_blur and rejects an invalid fit beside a valid field atomically', async () => {
     const h = build();
     const id = await createEvent(h, 'Chú thích');
     await request(h.app).post(`/cms/api/events/${id}`).set('Cookie', h.cookie).send({
-      guest_name_template: 'Chào {guest_name}', caption_position: 'top-right', photo_fit: 'cover',
+      guest_name_template: 'Chào {guest_name}', caption_position: 'top-right', photo_fit: 'contain_blur',
     }).expect(200);
-    expect(h.store.getEventConfig(id)).toMatchObject({ guestNameTemplate: 'Chào {guest_name}', captionPosition: 'top-right', photoFit: 'cover' });
+    expect(h.store.getEventConfig(id)).toMatchObject({ guestNameTemplate: 'Chào {guest_name}', captionPosition: 'top-right', photoFit: 'contain_blur' });
     const before = h.store.getEventConfig(id);
     await request(h.app).post(`/cms/api/events/${id}`).set('Cookie', h.cookie).send({
-      guest_name_template: '', caption_position: 'bad-position', photo_fit: 'contain',
+      guest_name_template: 'Thay đổi hợp lệ', photo_fit: 'invalid-fit',
     }).expect(400);
     expect(h.store.getEventConfig(id)).toEqual(before);
+  });
+
+  it('offers all three slides-only fits and explains contain_blur and cover', async () => {
+    const h = build();
+    const id = await createEvent(h, 'Khung ngang');
+    const res = await request(h.app).get(`/cms/events/${id}`).set('Cookie', h.cookie);
+
+    expect(res.text).toContain('<option value="contain"');
+    expect(res.text).toContain('<option value="cover"');
+    expect(res.text).toContain('<option value="contain_blur"');
+    expect(res.text).toContain('giữ trọn ảnh');
+    expect(res.text).toContain('bản ảnh làm mờ');
+    expect(res.text).toContain('cắt logo');
+    expect(res.text).toContain('screentag slides">Màn trình chiếu');
   });
 });
 

@@ -140,7 +140,7 @@ export type CaptionPosition =
   | 'middle-left' | 'middle-center' | 'middle-right'
   | 'bottom-left' | 'bottom-center' | 'bottom-right';
 
-export type PhotoFit = 'contain' | 'cover';
+export type PhotoFit = 'contain' | 'cover' | 'contain_blur';
 
 export interface DisplaySnapshot {
   // D-15: no `currentJob: QueueJob` field exists here, deliberately. The

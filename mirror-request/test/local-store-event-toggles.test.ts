@@ -219,10 +219,10 @@ describe('LocalStore — event.show_guest_name / event.hero_enabled migration (D
     expect(afterA).toEqual(beforeA);
   });
 
-  it('both columns survive a close-and-reopen with their written values intact, including a row explicitly set to 0', () => {
+  it('caption choices survive a close-and-reopen with contain_blur intact, including a row explicitly set to 0', () => {
     store = new LocalStore(dbPath);
     const event = store.createEvent({ name: 'Sự kiện kiểm tra' });
-    store.updateEvent(event.id, { show_guest_name: 0, hero_enabled: 1, guest_name_template: 'Chào {guest_name}', caption_position: 'top-right', photo_fit: 'cover' });
+    store.updateEvent(event.id, { show_guest_name: 0, hero_enabled: 1, guest_name_template: 'Chào {guest_name}', caption_position: 'top-right', photo_fit: 'contain_blur' });
     store.close();
 
     store = new LocalStore(dbPath);
@@ -231,7 +231,7 @@ describe('LocalStore — event.show_guest_name / event.hero_enabled migration (D
     expect(cfg?.heroEnabled).toBe(true);
     expect(cfg?.guestNameTemplate).toBe('Chào {guest_name}');
     expect(cfg?.captionPosition).toBe('top-right');
-    expect(cfg?.photoFit).toBe('cover');
+    expect(cfg?.photoFit).toBe('contain_blur');
   });
 
   it('a fresh event projects all three shipped caption defaults', () => {

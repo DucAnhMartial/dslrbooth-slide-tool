@@ -410,6 +410,10 @@ describe('UI-01: the shipped default config holds with zero events', () => {
     expect(snapshot.eventConfig).toBeTruthy();
     expect(snapshot.eventConfig.fontChoice).toBe('system-ui');
     expect(snapshot.eventConfig.layoutStyle).toBe('stage_sidebar');
+    // D999.1-08: zero rows still produce a complete caption contract.
+    expect(snapshot.eventConfig.guestNameTemplate).toBe(DEFAULT_EVENT_CONFIG.guestNameTemplate);
+    expect(snapshot.eventConfig.captionPosition).toBe(DEFAULT_EVENT_CONFIG.captionPosition);
+    expect(snapshot.eventConfig.photoFit).toBe(DEFAULT_EVENT_CONFIG.photoFit);
   });
 });
 
@@ -453,6 +457,16 @@ describe('the tracer: login -> create -> activate -> live screen feed', () => {
     expect(after.eventConfig.colorText).toBe(DEFAULT_EVENT_CONFIG.colorText);
     expect(after.eventConfig.idleHeading).toBe(DEFAULT_EVENT_CONFIG.idleHeading);
     expect(after.eventConfig.idleSub).toBe(DEFAULT_EVENT_CONFIG.idleSub);
+
+    // D999.1-06/D999.1-08: the already-connected slides screen sees the
+    // saved choice through the serialized snapshot diff, with no reload.
+    await request(app)
+      .post(`/cms/api/events/${created.body.id}`)
+      .set('Cookie', cookie)
+      .send({ photo_fit: 'contain_blur' })
+      .expect(200);
+    const updated = await awaitSnapshot(ws, (snap) => snap.eventConfig.photoFit === 'contain_blur');
+    expect(updated.eventConfig.photoFit).toBe('contain_blur');
   });
 
   it('the CMS dashboard escapes an event name rather than reflecting it as markup', async () => {

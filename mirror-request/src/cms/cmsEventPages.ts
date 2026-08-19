@@ -755,7 +755,9 @@ export function renderCmsEventFormPage(data: {
           <select id="photo_fit" name="photo_fit">
             <option value="contain"${event.photoFit === 'contain' ? ' selected' : ''}>contain</option>
             <option value="cover"${event.photoFit === 'cover' ? ' selected' : ''}>cover</option>
+            <option value="contain_blur"${event.photoFit === 'contain_blur' ? ' selected' : ''}>contain_blur</option>
           </select>
+          <p class="muted"><b>contain_blur</b> giữ trọn ảnh; bản ảnh làm mờ của chính ảnh đó sẽ lấp phần trống trên khung 16:9.</p>
           <p class="muted"><b>cover</b> phù hợp khung ảnh ngang và có thể cắt logo hoặc phần lớn dải ảnh dọc.</p>
         </div>
       </div>

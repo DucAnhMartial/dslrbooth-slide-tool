@@ -138,6 +138,10 @@ describe('UI-01 — the room screen is correct on a completely empty database', 
       photoCount: DEFAULT_EVENT_CONFIG.photoCount,
       photoDurationMs: DEFAULT_EVENT_CONFIG.photoDurationMs,
       layoutStyle: 'stage_sidebar',
+      // D999.1-08: the no-event display feed retains all caption defaults.
+      guestNameTemplate: DEFAULT_EVENT_CONFIG.guestNameTemplate,
+      captionPosition: DEFAULT_EVENT_CONFIG.captionPosition,
+      photoFit: DEFAULT_EVENT_CONFIG.photoFit,
     });
 
     display.stop();

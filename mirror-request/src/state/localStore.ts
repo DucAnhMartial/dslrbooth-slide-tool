@@ -133,7 +133,9 @@ function toEventConfig(row: EventRow): EventConfig {
     captionPosition: row.caption_position === 'top-left' || row.caption_position === 'top-center' || row.caption_position === 'top-right' || row.caption_position === 'middle-left' || row.caption_position === 'middle-center' || row.caption_position === 'middle-right' || row.caption_position === 'bottom-left' || row.caption_position === 'bottom-center' || row.caption_position === 'bottom-right'
       ? row.caption_position as EventConfig['captionPosition']
       : DEFAULT_EVENT_CONFIG.captionPosition,
-    photoFit: row.photo_fit === 'cover' || row.photo_fit === 'contain' ? row.photo_fit : DEFAULT_EVENT_CONFIG.photoFit,
+    photoFit: row.photo_fit === 'cover' || row.photo_fit === 'contain' || row.photo_fit === 'contain_blur'
+      ? row.photo_fit
+      : DEFAULT_EVENT_CONFIG.photoFit,
     // Clamped on the way OUT as well as on the way in: a hand-edited database
     // or a rolled-back deploy must not be able to put an out-of-range number
     // into a CSS opacity on every TV.
