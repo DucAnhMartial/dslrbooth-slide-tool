@@ -71,6 +71,13 @@ describe('Default room screen — D9-04, both toggles honoured (hero takeover + 
     expect(HTML).not.toMatch(/function photoFrame/);
   });
 
+  it('does not consume any caption/template/fit configuration or construct a blur/photo layer (D999.1-09)', () => {
+    for (const field of ['guestNameTemplate', 'captionPosition', 'photoFit', 'contain_blur']) {
+      expect(HTML).not.toContain(field);
+    }
+    expect(HTML).not.toMatch(/photo-foreground|photo-blur/);
+  });
+
   it('leaves the sidebar untouched: the queue list renders regardless of the guest-name toggle', () => {
     // The toggle governs the name shown WITH A PHOTO, not the waiting list —
     // a different thing, per 09-CONTEXT.md D9-04.

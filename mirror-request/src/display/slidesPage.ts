@@ -106,15 +106,37 @@ export function renderSlidesPage(): string {
     .slide.active{opacity:1}
     .photo-frame{position:relative;max-width:100%;max-height:100%;display:flex;align-items:center;justify-content:center}
     .slide img{max-width:100%;max-height:100%;object-fit:contain}
-    .photo-frame.fit-cover{width:100%;height:100%}.photo-frame.fit-cover img{width:100%;height:100%;object-fit:cover}
+    .photo-frame .photo-foreground{position:relative;z-index:1;max-width:100%;max-height:100%;object-fit:contain}
+    .photo-frame.fit-cover{width:100%;height:100%}.photo-frame.fit-cover .photo-foreground{width:100%;height:100%;object-fit:cover}
+    /* D999.1-06: preserve a composed frame, with its own softened copy only
+       filling the otherwise-black stage. The source URL is never CSS; the
+       decorative layer receives it through its img.src property in shotTile. */
+    .photo-frame.fit-contain-blur{width:100%;height:100%;overflow:hidden}
+    .photo-frame .photo-blur{position:absolute;inset:-6%;width:112%;height:112%;object-fit:cover;
+      max-width:none;max-height:none;filter:blur(24px);transform:scale(1.04);opacity:.72}
 
     /* web-slide's bottom overlay: name small and bold over a gradient, fixed
        white on fixed black-fade — legibility over an arbitrary photo cannot
        depend on the event's own theme choices. */
-    .slide-overlay{position:absolute;bottom:0;left:0;right:0;padding:2rem 1.75rem 1.5rem;
-      background:linear-gradient(to top,rgba(0,0,0,.85),transparent);pointer-events:none}
+    .slide-overlay{position:absolute;z-index:2;display:flex;max-width:calc(100% - 2rem);padding:.8rem 1rem;
+      background:linear-gradient(to top,rgba(0,0,0,.72),transparent);pointer-events:none}
+    .caption-top-left{top:1rem;left:1rem;justify-content:flex-start;text-align:left}
+    .caption-top-center{top:1rem;left:50%;transform:translateX(-50%);justify-content:center;text-align:center}
+    .caption-top-right{top:1rem;right:1rem;justify-content:flex-end;text-align:right}
+    .caption-middle-left{top:50%;left:1rem;transform:translateY(-50%);justify-content:flex-start;text-align:left}
+    .caption-middle-center{top:50%;left:50%;transform:translate(-50%,-50%);justify-content:center;text-align:center}
+    .caption-middle-right{top:50%;right:1rem;transform:translateY(-50%);justify-content:flex-end;text-align:right}
+    .caption-bottom-left{bottom:1rem;left:1rem;justify-content:flex-start;text-align:left}
+    .caption-bottom-center{bottom:1rem;left:50%;transform:translateX(-50%);justify-content:center;text-align:center}
+    .caption-bottom-right{bottom:1rem;right:1rem;justify-content:flex-end;text-align:right}
+    /* Cover has no letterbox bar, so its position token selects one of these
+       static contrast treatments. No snapshot text or URL enters CSS. */
+    .fit-cover .caption-top-left,.fit-cover .caption-top-center,.fit-cover .caption-top-right{background:linear-gradient(to bottom,rgba(0,0,0,.85),transparent)}
+    .fit-cover .caption-middle-left,.fit-cover .caption-middle-center,.fit-cover .caption-middle-right{background:rgba(0,0,0,.55)}
+    .fit-cover .caption-bottom-left,.fit-cover .caption-bottom-center,.fit-cover .caption-bottom-right{background:linear-gradient(to top,rgba(0,0,0,.85),transparent)}
     .shotname{font-size:clamp(1.25rem,2vw,2.25rem);font-weight:700;letter-spacing:-.02em;
-      margin:0;max-width:24ch;overflow-wrap:anywhere;color:#fff}
+      margin:0;max-width:24ch;overflow-wrap:anywhere;color:#fff;display:-webkit-box;
+      -webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
 
     /* The fresh-capture pill, in the event's accent — web-slide's MỚI badge,
        carrying this screen's own copy. */
@@ -269,8 +291,17 @@ export function renderSlidesPage(): string {
     slide.className='slide';
     if(photo&&photo.photoUrl){
       var frame=document.createElement('div');
-      frame.className='photo-frame'+(photoFit==='cover'?' fit-cover':'');
+      frame.className='photo-frame'+(photoFit==='cover'?' fit-cover':photoFit==='contain_blur'?' fit-contain-blur':'');
+      if(photoFit==='contain_blur'){
+        var blur=document.createElement('img');
+        blur.className='photo-blur';
+        blur.alt='';
+        blur.setAttribute('aria-hidden','true');
+        blur.src=photo.photoUrl;
+        frame.appendChild(blur);
+      }
       var img=document.createElement('img');
+      img.className='photo-foreground';
       img.alt='';
       img.addEventListener('error',function(){
         slide.innerHTML='<div class="broken"><svg width="64" height="64" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
@@ -404,7 +435,7 @@ export function renderSlidesPage(): string {
     guestNameEnabled=cfg.showGuestName!==false;
     guestNameTemplate=typeof cfg.guestNameTemplate==='string'&&cfg.guestNameTemplate?cfg.guestNameTemplate:'{guest_name}';
     captionPosition=['top-left','top-center','top-right','middle-left','middle-center','middle-right','bottom-left','bottom-center','bottom-right'].indexOf(cfg.captionPosition)>=0?cfg.captionPosition:'bottom-left';
-    photoFit=cfg.photoFit==='cover'?'cover':'contain';
+    photoFit=['contain','cover','contain_blur'].indexOf(cfg.photoFit)>=0?cfg.photoFit:'contain';
     // T-09-13: the fault-only Agent signal, re-derived every snapshot.
     agentOffline.hidden=data.agentOnline!==false;
     syncSlides(data);

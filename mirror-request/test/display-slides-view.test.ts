@@ -129,15 +129,20 @@ class FakeElement {
   children: FakeElement[] = [];
   appendChild(child: FakeElement): FakeElement { this.children.push(child); return child; }
   addEventListener(): void { /* no-op */ }
+  setAttribute(): void { /* no-op */ }
 }
 
-function renderedCaption(template: string): string {
+function renderedTile(template: string, photoFit = 'contain', photoUrl = 'https://example.test/photo.jpg'): FakeElement {
   const start = SLIDES_HTML.indexOf('function shotTile(');
   const end = SLIDES_HTML.indexOf('\n\n  /* The cross-fade', start);
   const shotTileSource = SLIDES_HTML.slice(start, end);
-  const context = { document: { createElement: () => new FakeElement() }, guestNameEnabled: true, guestNameTemplate: template, captionPosition: 'bottom-left', photoFit: 'contain' };
-  vm.runInNewContext(`${shotTileSource}; result=shotTile({photoUrl:'https://example.test/photo.jpg',name:'An'},null);`, context);
-  const result = (context as typeof context & { result: FakeElement }).result;
+  const context = { document: { createElement: () => new FakeElement() }, guestNameEnabled: true, guestNameTemplate: template, captionPosition: 'bottom-left', photoFit };
+  vm.runInNewContext(`${shotTileSource}; result=shotTile({photoUrl:${JSON.stringify(photoUrl)},name:'An'},null);`, context);
+  return (context as typeof context & { result: FakeElement }).result;
+}
+
+function renderedCaption(template: string): string {
+  const result = renderedTile(template);
   const frame = result.children[0];
   const overlay = frame.children.find((child) => child.className.includes('slide-overlay'))!;
   return overlay.children[0].textContent;
@@ -147,6 +152,37 @@ describe('Slides screen — caption templates are rendered as text, not markup',
   it('replaces every guest-name token and preserves a fixed template', () => {
     expect(renderedCaption('{guest_name} & {guest_name}')).toBe('An & An');
     expect(renderedCaption('Cảm ơn bạn đã đến')).toBe('Cảm ơn bạn đã đến');
+  });
+});
+
+describe('Slides screen — trusted caption layout and contain_blur composition (D999.1-02..07)', () => {
+  it('normalizes all three fit values and keeps unknown live values on contain', () => {
+    expect(SLIDES_HTML).toMatch(/\['contain','cover','contain_blur'\]\.indexOf\(cfg\.photoFit\)>=0\?cfg\.photoFit:'contain'/);
+    expect(SLIDES_HTML).toContain("photoFit==='contain_blur'");
+    expect(SLIDES_HTML).not.toContain('custom_css');
+  });
+
+  it('uses static two-line and nine-position layout tokens, with cover-only contrast', () => {
+    expect(SLIDES_HTML).toMatch(/-webkit-line-clamp:2/);
+    for (const position of ['top-left', 'top-center', 'top-right', 'middle-left', 'middle-center', 'middle-right', 'bottom-left', 'bottom-center', 'bottom-right']) {
+      expect(SLIDES_HTML).toContain(`.caption-${position}`);
+    }
+    expect(SLIDES_HTML).toMatch(/\.fit-cover \.caption-bottom-left[^\n]*linear-gradient/);
+  });
+
+  it('creates a decorative blurred img and foreground img with direct, exact adversarial URL properties', () => {
+    const adversarialUrl = 'https://example.test/a\" ) ; background:evil( // .jpg';
+    const tile = renderedTile('{guest_name}', 'contain_blur', adversarialUrl);
+    const frame = tile.children[0];
+    const images = frame.children.filter((child) => child.className.includes('photo-'));
+    expect(images.map((child) => child.className)).toEqual(['photo-blur', 'photo-foreground']);
+    expect(images.map((child) => child.src)).toEqual([adversarialUrl, adversarialUrl]);
+    expect(SLIDES_HTML).toMatch(/blur\.src=photo\.photoUrl/);
+    expect(SLIDES_HTML).toMatch(/img\.src=photo\.photoUrl/);
+    expect(SLIDES_HTML).not.toMatch(/backgroundImage\s*=.*photo\.photoUrl/);
+    expect(SLIDES_HTML).not.toMatch(/url\([^)]*photo\.photoUrl/);
+    expect(SLIDES_HTML).toMatch(/\.photo-frame \.photo-blur\{[^}]*filter:blur/);
+    expect(SLIDES_HTML).toMatch(/\.photo-frame \.photo-foreground\{[^}]*object-fit:contain/);
   });
 });
 
