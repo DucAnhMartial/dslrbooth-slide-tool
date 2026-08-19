@@ -299,8 +299,8 @@ describe('an event saved with only a name still renders a correct screen', () =>
 // ---------------------------------------------------------------------------
 
 describe('every text field is capped, and the cap is enforced server-side', () => {
-  it('publishes the caps, including caption copy and bounded custom CSS', () => {
-    expect(FIELD_CAPS).toEqual({ name: 60, idle_heading: 80, idle_sub: 120, qr_cta_text: 60, guest_name_template: 240, custom_css: 20_000 });
+  it('publishes the caps, including multi-line captions and bounded custom CSS', () => {
+    expect(FIELD_CAPS).toEqual({ name: 60, idle_heading: 80, idle_sub: 120, qr_cta_text: 60, guest_name_template: 2_000, custom_css: 20_000 });
   });
 
   it('renders each cap as a maxlength attribute on its input', async () => {

@@ -136,7 +136,7 @@ function renderedTile(template: string, photoFit = 'contain', photoUrl = 'https:
   const start = SLIDES_HTML.indexOf('function shotTile(');
   const end = SLIDES_HTML.indexOf('\n\n  /* The cross-fade', start);
   const shotTileSource = SLIDES_HTML.slice(start, end);
-  const context = { document: { createElement: () => new FakeElement() }, guestNameEnabled: true, guestNameTemplate: template, captionPosition: 'bottom-left', photoFit };
+  const context = { document: { createElement: () => new FakeElement() }, guestNameEnabled: true, guestNameTemplate: template, captionPosition: 'bottom-left', photoFit, captionMode: 'sequential' };
   vm.runInNewContext(`${shotTileSource}; result=shotTile({photoUrl:${JSON.stringify(photoUrl)},name:'An'},null);`, context);
   return (context as typeof context & { result: FakeElement }).result;
 }
@@ -153,6 +153,12 @@ describe('Slides screen — caption templates are rendered as text, not markup',
   it('replaces every guest-name token and preserves a fixed template', () => {
     expect(renderedCaption('{guest_name} & {guest_name}')).toBe('An & An');
     expect(renderedCaption('Cảm ơn bạn đã đến')).toBe('Cảm ơn bạn đã đến');
+  });
+
+  it('uses one caption line per slide sequentially, or randomly when configured', () => {
+    expect(SLIDES_HTML).toContain("guestNameTemplate.split(/\\r?\\n/)");
+    expect(SLIDES_HTML).toContain("captionMode==='random'");
+    expect(SLIDES_HTML).toContain("captionMode=cfg.captionMode==='random'?'random':'sequential'");
   });
 });
 

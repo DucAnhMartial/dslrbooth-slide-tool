@@ -333,7 +333,7 @@ export function renderSlidesPage(): string {
      and minus its innerHTML interpolation. Same trust-boundary discipline as
      displayPage.ts: the URL is assigned to the img's src PROPERTY and the
      name to textContent — never interpolated into markup (T-08-10/T-09-03). */
-  function shotTile(photo,badgeText){
+  function shotTile(photo,badgeText,captionOrdinal){
     var slide=document.createElement('div');
     slide.className='slide';
     if(photo&&photo.photoUrl){
@@ -380,7 +380,10 @@ export function renderSlidesPage(): string {
       overlay.className='slide-overlay caption-'+captionPosition;
       var name=document.createElement('p');
       name.className='shotname';
-      name.textContent=guestNameTemplate.replace(/\{guest_name\}/g,(photo&&photo.name)||'');
+      var templates=guestNameTemplate.split(/\\r?\\n/).map(function(line){return line.trim()}).filter(Boolean);
+      if(!templates.length)templates=['{guest_name}'];
+      var ordinal=captionMode==='random'?Math.floor(Math.random()*templates.length):(captionOrdinal||0)%templates.length;
+      name.textContent=templates[ordinal].replace(/\{guest_name\}/g,(photo&&photo.name)||'');
       overlay.appendChild(name);
       (photo&&photo.photoUrl ? photoContent : slide).appendChild(overlay);
     }
@@ -429,7 +432,7 @@ export function renderSlidesPage(): string {
   // D9-04: the two per-event toggles, re-derived on every render() call from
   // the snapshot's eventConfig (never captured once at load) and read by
   // shotTile()/drawSlide() outside render()'s own call stack.
-  var heroTakeoverEnabled=true,guestNameEnabled=true,guestNameTemplate='{guest_name}',captionPosition='bottom-left',photoFit='contain';
+  var heroTakeoverEnabled=true,guestNameEnabled=true,guestNameTemplate='{guest_name}',captionPosition='bottom-left',photoFit='contain',captionMode='sequential';
   function stopSlideshow(){ if(slideTimer){clearInterval(slideTimer);slideTimer=null} }
   function syncSlides(data){
     var cfg=data.eventConfig||{};
@@ -450,7 +453,7 @@ export function renderSlidesPage(): string {
   }
   function drawSlide(){
     var photo=slides[slideIndex];
-    showLayer('slide|'+slideIndex+'|'+(photo&&photo.photoUrl),function(){return shotTile(photo,null)});
+    showLayer('slide|'+slideIndex+'|'+(photo&&photo.photoUrl),function(){return shotTile(photo,null,slideIndex)});
     drawDots(slides.length,slideIndex);
   }
 
@@ -486,6 +489,7 @@ export function renderSlidesPage(): string {
     guestNameTemplate=typeof cfg.guestNameTemplate==='string'&&cfg.guestNameTemplate?cfg.guestNameTemplate:'{guest_name}';
     captionPosition=['top-left','top-center','top-right','middle-left','middle-center','middle-right','bottom-left','bottom-center','bottom-right'].indexOf(cfg.captionPosition)>=0?cfg.captionPosition:'bottom-left';
     photoFit=['contain','cover','contain_blur'].indexOf(cfg.photoFit)>=0?cfg.photoFit:'contain';
+    captionMode=cfg.captionMode==='random'?'random':'sequential';
     // T-09-13: the fault-only Agent signal, re-derived every snapshot.
     agentOffline.hidden=data.agentOnline!==false;
     syncSlides(data);

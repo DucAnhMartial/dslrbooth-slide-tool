@@ -121,6 +121,7 @@ export interface EventConfig {
   guestNameTemplate: string;
   captionPosition: CaptionPosition;
   photoFit: PhotoFit;
+  captionMode: 'sequential' | 'random';
   /** Slides-only operator CSS. It is applied as style text, never HTML. */
   customCss: string;
   /**

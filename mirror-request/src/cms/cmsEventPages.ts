@@ -71,7 +71,7 @@ export const FIELD_CAPS = {
   idle_heading: 80,
   idle_sub: 120,
   qr_cta_text: 60,
-  guest_name_template: 240,
+  guest_name_template: 2_000,
   custom_css: 20_000,
 } as const;
 
@@ -502,6 +502,7 @@ export const FIELD_SCREEN_MAP: Record<string, ScreenTagKey> = {
   guest_name_template: 'slides',
   caption_position: 'slides',
   photo_fit: 'slides',
+  caption_mode: 'slides',
   custom_css: 'slides',
   layout_style: 'inactive',
 };
@@ -743,14 +744,14 @@ export function renderCmsEventFormPage(data: {
         checked: event.heroEnabled,
         hint: 'Chỉ áp dụng cho màn hình trình chiếu (?view=slides) — màn hình chờ chụp không hiển thị ảnh nào. Tắt để ảnh vừa chụp vào thẳng vòng trình chiếu, không phóng to riêng trước.',
       })}
-      ${textField({
-        name: 'guest_name_template',
-        label: 'Mẫu chú thích tên khách',
-        value: event.guestNameTemplate,
-        maxlength: FIELD_CAPS.guest_name_template,
-        hint: `Dùng {guest_name} để chèn tên khách. Tối đa ${FIELD_CAPS.guest_name_template} ký tự.`,
-      })}
+      <div class="field"><label for="guest_name_template">Danh sách mẫu chú thích${screenTag('guest_name_template')}</label>
+        <textarea id="guest_name_template" name="guest_name_template" maxlength="${FIELD_CAPS.guest_name_template}" rows="5" spellcheck="false">${escapeHtml(event.guestNameTemplate)}</textarea>
+        <p class="muted">Mỗi dòng là một mẫu; dùng {guest_name} trong từng dòng.</p></div>
       <div class="grid">
+        <div class="field">
+          <label for="caption_mode">Cách chọn chú thích${screenTag('caption_mode')}</label>
+          <select id="caption_mode" name="caption_mode"><option value="sequential"${event.captionMode === 'sequential' ? ' selected' : ''}>Tuần tự theo ảnh</option><option value="random"${event.captionMode === 'random' ? ' selected' : ''}>Ngẫu nhiên</option></select>
+        </div>
         <div class="field">
           <label for="caption_position">Vị trí chú thích${screenTag('caption_position')}</label>
           <select id="caption_position" name="caption_position">
