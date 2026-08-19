@@ -118,6 +118,9 @@ export interface EventConfig {
   // gates D-09's just-captured takeover (off means the capture still joins
   // the slideshow rotation, it simply does not take over the screen).
   showGuestName: boolean;
+  guestNameTemplate: string;
+  captionPosition: CaptionPosition;
+  photoFit: PhotoFit;
   /**
    * CMS-10: how strongly the event background image is dimmed behind the
    * content, 0-100. Zero shows the artwork untouched.
@@ -131,6 +134,13 @@ export interface EventConfig {
   backgroundOverlay: number;
   heroEnabled: boolean;
 }
+
+export type CaptionPosition =
+  | 'top-left' | 'top-center' | 'top-right'
+  | 'middle-left' | 'middle-center' | 'middle-right'
+  | 'bottom-left' | 'bottom-center' | 'bottom-right';
+
+export type PhotoFit = 'contain' | 'cover';
 
 export interface DisplaySnapshot {
   // D-15: no `currentJob: QueueJob` field exists here, deliberately. The

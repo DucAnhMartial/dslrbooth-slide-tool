@@ -48,6 +48,9 @@ export const DEFAULT_EVENT_CONFIG: EventConfig = Object.freeze({
   layoutStyle: 'stage_sidebar',
   // D9-04: both default ON — see the field comments on EventConfig itself.
   showGuestName: true,
+  guestNameTemplate: '{guest_name}',
+  captionPosition: 'bottom-left',
+  photoFit: 'contain',
   heroEnabled: true,
   /* CMS-10: how strongly the event background is dimmed, 0-100.
      72 is what both room screens hard-coded before this was configurable, so
@@ -83,6 +86,9 @@ interface EventRow {
   // presentation column above), so `number | null` here is defence-in-depth
   // against a hand-edited row, not an expected state — see toEventConfig().
   show_guest_name: number | null;
+  guest_name_template: string | null;
+  caption_position: string | null;
+  photo_fit: string | null;
   background_overlay: number | null;
   hero_enabled: number | null;
   created_at: number;
@@ -123,6 +129,11 @@ function toEventConfig(row: EventRow): EventConfig {
     // tested for truthiness, so a stray non-zero-non-one value still reads as
     // ON rather than silently falling through to a default it did not ask for.
     showGuestName: row.show_guest_name === null ? DEFAULT_EVENT_CONFIG.showGuestName : row.show_guest_name !== 0,
+    guestNameTemplate: row.guest_name_template ?? DEFAULT_EVENT_CONFIG.guestNameTemplate,
+    captionPosition: row.caption_position === 'top-left' || row.caption_position === 'top-center' || row.caption_position === 'top-right' || row.caption_position === 'middle-left' || row.caption_position === 'middle-center' || row.caption_position === 'middle-right' || row.caption_position === 'bottom-left' || row.caption_position === 'bottom-center' || row.caption_position === 'bottom-right'
+      ? row.caption_position as EventConfig['captionPosition']
+      : DEFAULT_EVENT_CONFIG.captionPosition,
+    photoFit: row.photo_fit === 'cover' || row.photo_fit === 'contain' ? row.photo_fit : DEFAULT_EVENT_CONFIG.photoFit,
     // Clamped on the way OUT as well as on the way in: a hand-edited database
     // or a rolled-back deploy must not be able to put an out-of-range number
     // into a CSS opacity on every TV.
@@ -162,6 +173,9 @@ const EVENT_UPDATABLE_COLUMNS = [
   // other column in this list, which are nullable-on-purpose (see the
   // `event` table's own header comment above).
   'show_guest_name',
+  'guest_name_template',
+  'caption_position',
+  'photo_fit',
   'background_overlay',
   'hero_enabled',
 ] as const;
@@ -317,6 +331,9 @@ export class LocalStore {
         -- shipped zero ALTER TABLE on this table, so this is the first.
         show_guest_name   INTEGER NOT NULL DEFAULT 1,
         hero_enabled      INTEGER NOT NULL DEFAULT 1,
+        guest_name_template TEXT NOT NULL DEFAULT '{guest_name}',
+        caption_position    TEXT NOT NULL DEFAULT 'bottom-left',
+        photo_fit           TEXT NOT NULL DEFAULT 'contain',
         created_at        INTEGER NOT NULL,
         updated_at        INTEGER NOT NULL
       );
@@ -570,6 +587,15 @@ export class LocalStore {
     // reads back as exactly what it rendered a moment before this ran.
     if (!eventColumns.some((c) => c.name === 'background_overlay')) {
       this.db.exec('ALTER TABLE event ADD COLUMN background_overlay INTEGER NOT NULL DEFAULT 72');
+    }
+    if (!eventColumns.some((c) => c.name === 'guest_name_template')) {
+      this.db.exec("ALTER TABLE event ADD COLUMN guest_name_template TEXT NOT NULL DEFAULT '{guest_name}'");
+    }
+    if (!eventColumns.some((c) => c.name === 'caption_position')) {
+      this.db.exec("ALTER TABLE event ADD COLUMN caption_position TEXT NOT NULL DEFAULT 'bottom-left'");
+    }
+    if (!eventColumns.some((c) => c.name === 'photo_fit')) {
+      this.db.exec("ALTER TABLE event ADD COLUMN photo_fit TEXT NOT NULL DEFAULT 'contain'");
     }
 
     // event_photo.image_url — the file behind dslrBooth's share page. See the

@@ -71,6 +71,7 @@ export const FIELD_CAPS = {
   idle_heading: 80,
   idle_sub: 120,
   qr_cta_text: 60,
+  guest_name_template: 240,
 } as const;
 
 /** How many photos the slideshow holds. */
@@ -497,6 +498,9 @@ export const FIELD_SCREEN_MAP: Record<string, ScreenTagKey> = {
   photo_duration_ms: 'slides',
   show_guest_name: 'slides',
   hero_enabled: 'slides',
+  guest_name_template: 'slides',
+  caption_position: 'slides',
+  photo_fit: 'slides',
   layout_style: 'inactive',
 };
 
@@ -732,6 +736,29 @@ export function renderCmsEventFormPage(data: {
         checked: event.heroEnabled,
         hint: 'Chỉ áp dụng cho màn hình trình chiếu (?view=slides) — màn hình chờ chụp không hiển thị ảnh nào. Tắt để ảnh vừa chụp vào thẳng vòng trình chiếu, không phóng to riêng trước.',
       })}
+      ${textField({
+        name: 'guest_name_template',
+        label: 'Mẫu chú thích tên khách',
+        value: event.guestNameTemplate,
+        maxlength: FIELD_CAPS.guest_name_template,
+        hint: `Dùng {guest_name} để chèn tên khách. Tối đa ${FIELD_CAPS.guest_name_template} ký tự.`,
+      })}
+      <div class="grid">
+        <div class="field">
+          <label for="caption_position">Vị trí chú thích${screenTag('caption_position')}</label>
+          <select id="caption_position" name="caption_position">
+            ${['top-left','top-center','top-right','middle-left','middle-center','middle-right','bottom-left','bottom-center','bottom-right'].map((value) => `<option value="${value}"${event.captionPosition === value ? ' selected' : ''}>${value}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label for="photo_fit">Cách vừa ảnh${screenTag('photo_fit')}</label>
+          <select id="photo_fit" name="photo_fit">
+            <option value="contain"${event.photoFit === 'contain' ? ' selected' : ''}>contain</option>
+            <option value="cover"${event.photoFit === 'cover' ? ' selected' : ''}>cover</option>
+          </select>
+          <p class="muted"><b>cover</b> phù hợp khung ảnh ngang và có thể cắt logo hoặc phần lớn dải ảnh dọc.</p>
+        </div>
+      </div>
 
       <div class="actions">
         <button type="submit" id="saveBtn" data-mutating data-inflight-label="Đang lưu…">Lưu cấu hình</button>

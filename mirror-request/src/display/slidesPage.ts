@@ -104,7 +104,9 @@ export function renderSlidesPage(): string {
     .slide{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
       opacity:0;transition:opacity .6s ease;pointer-events:none}
     .slide.active{opacity:1}
+    .photo-frame{position:relative;max-width:100%;max-height:100%;display:flex;align-items:center;justify-content:center}
     .slide img{max-width:100%;max-height:100%;object-fit:contain}
+    .photo-frame.fit-cover{width:100%;height:100%}.photo-frame.fit-cover img{width:100%;height:100%;object-fit:cover}
 
     /* web-slide's bottom overlay: name small and bold over a gradient, fixed
        white on fixed black-fade — legibility over an arbitrary photo cannot
@@ -266,6 +268,8 @@ export function renderSlidesPage(): string {
     var slide=document.createElement('div');
     slide.className='slide';
     if(photo&&photo.photoUrl){
+      var frame=document.createElement('div');
+      frame.className='photo-frame'+(photoFit==='cover'?' fit-cover':'');
       var img=document.createElement('img');
       img.alt='';
       img.addEventListener('error',function(){
@@ -277,7 +281,8 @@ export function renderSlidesPage(): string {
         slide.querySelector('.broken span').textContent='Không tải được ảnh';
       });
       img.src=photo.photoUrl;
-      slide.appendChild(img);
+      frame.appendChild(img);
+      slide.appendChild(frame);
     }else{
       var avatar=document.createElement('div');
       avatar.className='avatar';
@@ -291,12 +296,12 @@ export function renderSlidesPage(): string {
     // bottom-gradient overlay, small and bold, never at display size.
     if(guestNameEnabled){
       var overlay=document.createElement('div');
-      overlay.className='slide-overlay';
+      overlay.className='slide-overlay caption-'+captionPosition;
       var name=document.createElement('p');
       name.className='shotname';
-      name.textContent=(photo&&photo.name)||'';
+      name.textContent=guestNameTemplate.replace(/\{guest_name\}/g,(photo&&photo.name)||'');
       overlay.appendChild(name);
-      slide.appendChild(overlay);
+      (photo&&photo.photoUrl ? frame : slide).appendChild(overlay);
     }
     if(badgeText){
       var badge=document.createElement('div');
@@ -343,7 +348,7 @@ export function renderSlidesPage(): string {
   // D9-04: the two per-event toggles, re-derived on every render() call from
   // the snapshot's eventConfig (never captured once at load) and read by
   // shotTile()/drawSlide() outside render()'s own call stack.
-  var heroTakeoverEnabled=true,guestNameEnabled=true;
+  var heroTakeoverEnabled=true,guestNameEnabled=true,guestNameTemplate='{guest_name}',captionPosition='bottom-left',photoFit='contain';
   function stopSlideshow(){ if(slideTimer){clearInterval(slideTimer);slideTimer=null} }
   function syncSlides(data){
     var cfg=data.eventConfig||{};
@@ -397,6 +402,9 @@ export function renderSlidesPage(): string {
     // deploy rather than silently losing the hero moment or the guest name.
     heroTakeoverEnabled=cfg.heroEnabled!==false;
     guestNameEnabled=cfg.showGuestName!==false;
+    guestNameTemplate=typeof cfg.guestNameTemplate==='string'&&cfg.guestNameTemplate?cfg.guestNameTemplate:'{guest_name}';
+    captionPosition=['top-left','top-center','top-right','middle-left','middle-center','middle-right','bottom-left','bottom-center','bottom-right'].indexOf(cfg.captionPosition)>=0?cfg.captionPosition:'bottom-left';
+    photoFit=cfg.photoFit==='cover'?'cover':'contain';
     // T-09-13: the fault-only Agent signal, re-derived every snapshot.
     agentOffline.hidden=data.agentOnline!==false;
     syncSlides(data);

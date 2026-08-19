@@ -4,6 +4,7 @@ import express from 'express';
 import request from 'supertest';
 import { WebSocket } from 'ws';
 import Database from 'better-sqlite3';
+import vm from 'node:vm';
 import { renderSlidesPage } from '../src/display/slidesPage';
 import { renderDisplayPage } from '../src/display/displayPage';
 import { DisplayServer } from '../src/display/displayServer';
@@ -119,6 +120,35 @@ async function firstSnapshot(store: LocalStore): Promise<DisplaySnapshot> {
 
 const SLIDES_HTML = renderSlidesPage();
 const DEFAULT_HTML = renderDisplayPage();
+
+class FakeElement {
+  className = '';
+  textContent = '';
+  src = '';
+  alt = '';
+  children: FakeElement[] = [];
+  appendChild(child: FakeElement): FakeElement { this.children.push(child); return child; }
+  addEventListener(): void { /* no-op */ }
+}
+
+function renderedCaption(template: string): string {
+  const start = SLIDES_HTML.indexOf('function shotTile(');
+  const end = SLIDES_HTML.indexOf('\n\n  /* The cross-fade', start);
+  const shotTileSource = SLIDES_HTML.slice(start, end);
+  const context = { document: { createElement: () => new FakeElement() }, guestNameEnabled: true, guestNameTemplate: template, captionPosition: 'bottom-left', photoFit: 'contain' };
+  vm.runInNewContext(`${shotTileSource}; result=shotTile({photoUrl:'https://example.test/photo.jpg',name:'An'},null);`, context);
+  const result = (context as typeof context & { result: FakeElement }).result;
+  const frame = result.children[0];
+  const overlay = frame.children.find((child) => child.className.includes('slide-overlay'))!;
+  return overlay.children[0].textContent;
+}
+
+describe('Slides screen — caption templates are rendered as text, not markup', () => {
+  it('replaces every guest-name token and preserves a fixed template', () => {
+    expect(renderedCaption('{guest_name} & {guest_name}')).toBe('An & An');
+    expect(renderedCaption('Cảm ơn bạn đã đến')).toBe('Cảm ơn bạn đã đến');
+  });
+});
 
 describe('GET /display-screen?view=slides — serves the slides variant, byte for byte', () => {
   it('returns 200 HTML identical to renderSlidesPage()', async () => {
@@ -239,6 +269,20 @@ describe('Slides screen — UI-01, the idle backstop renders in the first bytes'
 });
 
 describe('Wire — the two new toggles reach a live WS client (D9-04)', () => {
+  it('an active event carries the saved caption configuration to a live slides snapshot', async () => {
+    const store = makeStore();
+    const event = store.createEvent({ name: 'Sự kiện chú thích' });
+    store.updateEvent(event.id, {
+      guest_name_template: 'Chào {guest_name}', caption_position: 'top-right', photo_fit: 'cover',
+    });
+    store.setActiveEvent(event.id);
+
+    const snapshot = await firstSnapshot(store);
+    expect(snapshot.eventConfig).toMatchObject({
+      guestNameTemplate: 'Chào {guest_name}', captionPosition: 'top-right', photoFit: 'cover',
+    });
+  });
+
   it('a freshly created, uncustomized active event reads both toggles ON', async () => {
     const store = makeStore();
     const event = store.createEvent({ name: 'Sự kiện chưa tuỳ chỉnh' });

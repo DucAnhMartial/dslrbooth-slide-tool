@@ -114,6 +114,13 @@ const nameField: FieldValidator = (raw) => {
   return trimmed.length <= FIELD_CAPS.name ? trimmed : undefined;
 };
 
+/** A required caption template: unlike ordinary copy, this backs a NOT NULL column. */
+const requiredTextField = (cap: number): FieldValidator => (raw) => {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 && trimmed.length <= cap ? trimmed : undefined;
+};
+
 /**
  * Exactly six hex digits after a `#`, and nothing else.
  *
@@ -187,6 +194,9 @@ const FIELD_VALIDATORS: Record<string, FieldValidator> = {
   background_overlay: intField(BACKGROUND_OVERLAY_RANGE),
   show_guest_name: boolField,
   hero_enabled: boolField,
+  guest_name_template: requiredTextField(FIELD_CAPS.guest_name_template),
+  caption_position: enumField(['top-left', 'top-center', 'top-right', 'middle-left', 'middle-center', 'middle-right', 'bottom-left', 'bottom-center', 'bottom-right']),
+  photo_fit: enumField(['contain', 'cover']),
 };
 
 /**

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { LocalStore } from '../src/state/localStore';
+import { DEFAULT_EVENT_CONFIG, LocalStore } from '../src/state/localStore';
 
 /**
  * D9-05: the first ALTER TABLE against `event` since Phase 8 shipped it with
@@ -142,11 +142,17 @@ describe('LocalStore — event.show_guest_name / event.hero_enabled migration (D
       .all() as Array<{ name: string }>;
     expect(columns.some((c) => c.name === 'show_guest_name')).toBe(true);
     expect(columns.some((c) => c.name === 'hero_enabled')).toBe(true);
+    expect(columns.some((c) => c.name === 'guest_name_template')).toBe(true);
+    expect(columns.some((c) => c.name === 'caption_position')).toBe(true);
+    expect(columns.some((c) => c.name === 'photo_fit')).toBe(true);
 
     for (const id of ['evt-a', 'evt-b', 'evt-bare']) {
       const cfg = store.getEventConfig(id);
       expect(cfg?.showGuestName).toBe(true);
       expect(cfg?.heroEnabled).toBe(true);
+      expect(cfg?.guestNameTemplate).toBe('{guest_name}');
+      expect(cfg?.captionPosition).toBe('bottom-left');
+      expect(cfg?.photoFit).toBe('contain');
     }
   });
 
@@ -216,12 +222,25 @@ describe('LocalStore — event.show_guest_name / event.hero_enabled migration (D
   it('both columns survive a close-and-reopen with their written values intact, including a row explicitly set to 0', () => {
     store = new LocalStore(dbPath);
     const event = store.createEvent({ name: 'Sự kiện kiểm tra' });
-    store.updateEvent(event.id, { show_guest_name: 0, hero_enabled: 1 });
+    store.updateEvent(event.id, { show_guest_name: 0, hero_enabled: 1, guest_name_template: 'Chào {guest_name}', caption_position: 'top-right', photo_fit: 'cover' });
     store.close();
 
     store = new LocalStore(dbPath);
     const cfg = store.getEventConfig(event.id);
     expect(cfg?.showGuestName).toBe(false);
     expect(cfg?.heroEnabled).toBe(true);
+    expect(cfg?.guestNameTemplate).toBe('Chào {guest_name}');
+    expect(cfg?.captionPosition).toBe('top-right');
+    expect(cfg?.photoFit).toBe('cover');
+  });
+
+  it('a fresh event projects all three shipped caption defaults', () => {
+    store = new LocalStore(dbPath);
+    const event = store.createEvent({ name: 'Mặc định' });
+    expect(store.getEventConfig(event.id)).toMatchObject({
+      guestNameTemplate: DEFAULT_EVENT_CONFIG.guestNameTemplate,
+      captionPosition: DEFAULT_EVENT_CONFIG.captionPosition,
+      photoFit: DEFAULT_EVENT_CONFIG.photoFit,
+    });
   });
 });

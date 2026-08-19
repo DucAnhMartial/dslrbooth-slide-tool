@@ -157,6 +157,9 @@ describe('CMS-01: the form exposes every configurable field', () => {
       'photo_count',
       'photo_duration_ms',
       'layout_style',
+      'guest_name_template',
+      'caption_position',
+      'photo_fit',
     ];
     for (const field of fields) {
       expect(res.text, `${field} must be reachable from the form`).toContain(`name="${field}"`);
@@ -184,6 +187,22 @@ describe('CMS-01: the form exposes every configurable field', () => {
     expect(res.status).toBe(200);
     expect(res.text).toContain('name="name"');
     expect(res.text).toContain('Tạo sự kiện mới');
+  });
+});
+
+describe('caption configuration', () => {
+  it('saves valid template and closed-value settings, and rejects an invalid patch atomically', async () => {
+    const h = build();
+    const id = await createEvent(h, 'Chú thích');
+    await request(h.app).post(`/cms/api/events/${id}`).set('Cookie', h.cookie).send({
+      guest_name_template: 'Chào {guest_name}', caption_position: 'top-right', photo_fit: 'cover',
+    }).expect(200);
+    expect(h.store.getEventConfig(id)).toMatchObject({ guestNameTemplate: 'Chào {guest_name}', captionPosition: 'top-right', photoFit: 'cover' });
+    const before = h.store.getEventConfig(id);
+    await request(h.app).post(`/cms/api/events/${id}`).set('Cookie', h.cookie).send({
+      guest_name_template: '', caption_position: 'bad-position', photo_fit: 'contain',
+    }).expect(400);
+    expect(h.store.getEventConfig(id)).toEqual(before);
   });
 });
 
@@ -252,8 +271,8 @@ describe('an event saved with only a name still renders a correct screen', () =>
 // ---------------------------------------------------------------------------
 
 describe('every text field is capped, and the cap is enforced server-side', () => {
-  it('publishes the caps this plan chose: name 60, heading 80, sub 120, CTA 60', () => {
-    expect(FIELD_CAPS).toEqual({ name: 60, idle_heading: 80, idle_sub: 120, qr_cta_text: 60 });
+  it('publishes the caps this plan chose, including the 240-character caption template', () => {
+    expect(FIELD_CAPS).toEqual({ name: 60, idle_heading: 80, idle_sub: 120, qr_cta_text: 60, guest_name_template: 240 });
   });
 
   it('renders each cap as a maxlength attribute on its input', async () => {
