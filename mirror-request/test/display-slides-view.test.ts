@@ -144,7 +144,8 @@ function renderedTile(template: string, photoFit = 'contain', photoUrl = 'https:
 function renderedCaption(template: string): string {
   const result = renderedTile(template);
   const frame = result.children[0];
-  const overlay = frame.children.find((child) => child.className.includes('slide-overlay'))!;
+  const content = frame.children.find((child) => child.className === 'photo-content')!;
+  const overlay = content.children.find((child) => child.className.includes('slide-overlay'))!;
   return overlay.children[0].textContent;
 }
 
@@ -174,9 +175,13 @@ describe('Slides screen — trusted caption layout and contain_blur composition 
     const adversarialUrl = 'https://example.test/a\" ) ; background:evil( // .jpg';
     const tile = renderedTile('{guest_name}', 'contain_blur', adversarialUrl);
     const frame = tile.children[0];
-    const images = frame.children.filter((child) => child.className.includes('photo-'));
-    expect(images.map((child) => child.className)).toEqual(['photo-blur', 'photo-foreground']);
-    expect(images.map((child) => child.src)).toEqual([adversarialUrl, adversarialUrl]);
+    const content = frame.children.find((child) => child.className === 'photo-content')!;
+    const blur = frame.children.find((child) => child.className === 'photo-blur')!;
+    const foreground = content.children.find((child) => child.className === 'photo-foreground')!;
+    expect([blur.src, foreground.src]).toEqual([adversarialUrl, adversarialUrl]);
+    expect(content.children.find((child) => child.className.includes('slide-overlay'))).toBeTruthy();
+    expect(SLIDES_HTML).toMatch(/\.photo-content\{position:relative/);
+    expect(SLIDES_HTML).toMatch(/\? photoContent : slide\)\.appendChild\(overlay\)/);
     expect(SLIDES_HTML).toMatch(/blur\.src=photo\.photoUrl/);
     expect(SLIDES_HTML).toMatch(/img\.src=photo\.photoUrl/);
     expect(SLIDES_HTML).not.toMatch(/backgroundImage\s*=.*photo\.photoUrl/);

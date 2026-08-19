@@ -106,7 +106,12 @@ export function renderSlidesPage(): string {
     .slide.active{opacity:1}
     .photo-frame{position:relative;max-width:100%;max-height:100%;display:flex;align-items:center;justify-content:center}
     .slide img{max-width:100%;max-height:100%;object-fit:contain}
+    /* The content box shrinks to the visible foreground image. Captions live
+       here, never on the full 16:9 blur frame, so their nine positions keep
+       following the real photograph in contain_blur mode. */
+    .photo-content{position:relative;display:inline-flex;align-items:center;justify-content:center;max-width:100%;max-height:100%;z-index:1}
     .photo-frame .photo-foreground{position:relative;z-index:1;max-width:100%;max-height:100%;object-fit:contain}
+    .photo-frame.fit-cover .photo-content{width:100%;height:100%}
     .photo-frame.fit-cover{width:100%;height:100%}.photo-frame.fit-cover .photo-foreground{width:100%;height:100%;object-fit:cover}
     /* D999.1-06: preserve a composed frame, with its own softened copy only
        filling the otherwise-black stage. The source URL is never CSS; the
@@ -300,6 +305,8 @@ export function renderSlidesPage(): string {
         blur.src=photo.photoUrl;
         frame.appendChild(blur);
       }
+      var photoContent=document.createElement('div');
+      photoContent.className='photo-content';
       var img=document.createElement('img');
       img.className='photo-foreground';
       img.alt='';
@@ -312,7 +319,8 @@ export function renderSlidesPage(): string {
         slide.querySelector('.broken span').textContent='Không tải được ảnh';
       });
       img.src=photo.photoUrl;
-      frame.appendChild(img);
+      photoContent.appendChild(img);
+      frame.appendChild(photoContent);
       slide.appendChild(frame);
     }else{
       var avatar=document.createElement('div');
@@ -332,7 +340,7 @@ export function renderSlidesPage(): string {
       name.className='shotname';
       name.textContent=guestNameTemplate.replace(/\{guest_name\}/g,(photo&&photo.name)||'');
       overlay.appendChild(name);
-      (photo&&photo.photoUrl ? frame : slide).appendChild(overlay);
+      (photo&&photo.photoUrl ? photoContent : slide).appendChild(overlay);
     }
     if(badgeText){
       var badge=document.createElement('div');
