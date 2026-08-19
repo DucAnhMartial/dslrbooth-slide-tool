@@ -225,11 +225,11 @@ export function renderSlidesPage(): string {
 <div id="banner" role="status">Mất kết nối — đang thử kết nối lại…</div>
 <div class="screenbadge" id="screenbadge" aria-hidden="true"><b>${SLIDES_BADGE_LABEL}</b><span>${SLIDES_BADGE_HINT}</span></div>
 <div id="agentOffline" role="status" hidden>● Agent mất kết nối</div>
-<button id="fullscreenToggle" type="button" aria-label="Bật toàn màn hình" title="Bật toàn màn hình">
-  <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5"/></svg>
-  <span id="fullscreenToggleLabel">Toàn màn hình</span>
-</button>
 <div class="stage" id="stage">
+  <button id="fullscreenToggle" type="button" aria-label="Bật toàn màn hình" title="Bật toàn màn hình">
+    <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5"/></svg>
+    <span id="fullscreenToggleLabel">Toàn màn hình</span>
+  </button>
   <!-- UI-01: server-rendered idle backstop, in the first bytes the browser
        receives — a .slide layer already active, so the first real photo
        cross-fades OVER it instead of appearing after a blank. Shipped-default
@@ -261,10 +261,13 @@ export function renderSlidesPage(): string {
     fullscreenToggle.title=active?'Thoát toàn màn hình':'Bật toàn màn hình';
   }
   if(fullscreenToggle){
-    if(!document.fullscreenEnabled){ fullscreenToggle.disabled=true; }
+    if(!document.fullscreenEnabled||!stage){ fullscreenToggle.disabled=true; }
     else {
       fullscreenToggle.addEventListener('click',function(){
-        var action=document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen();
+        /* Fullscreen only the slide stage. Fullscreening documentElement lets
+           browser chrome reflow the page around the stage on some displays,
+           which changes the composed photo's apparent proportions. */
+        var action=document.fullscreenElement?document.exitFullscreen():stage.requestFullscreen();
         action.catch(function(){ updateFullscreenToggle(); });
       });
       document.addEventListener('fullscreenchange',updateFullscreenToggle);

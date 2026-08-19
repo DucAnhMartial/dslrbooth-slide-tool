@@ -160,9 +160,10 @@ describe('Slides screen — trusted caption layout and contain_blur composition 
   it('offers an accessible fullscreen control without entering fullscreen until the operator clicks it', () => {
     expect(SLIDES_HTML).toContain('id="fullscreenToggle"');
     expect(SLIDES_HTML).toContain('Toàn màn hình');
-    expect(SLIDES_HTML).toContain('document.documentElement.requestFullscreen()');
+    expect(SLIDES_HTML).toContain('stage.requestFullscreen()');
     expect(SLIDES_HTML).toContain('document.exitFullscreen()');
     expect(SLIDES_HTML).toContain("document.addEventListener('fullscreenchange',updateFullscreenToggle)");
+    expect(SLIDES_HTML).toMatch(/<div class="stage" id="stage">\s*<button id="fullscreenToggle"/);
   });
 
   it('normalizes all three fit values and keeps unknown live values on contain', () => {
