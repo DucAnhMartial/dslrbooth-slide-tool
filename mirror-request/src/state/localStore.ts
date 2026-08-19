@@ -51,6 +51,7 @@ export const DEFAULT_EVENT_CONFIG: EventConfig = Object.freeze({
   guestNameTemplate: '{guest_name}',
   captionPosition: 'bottom-left',
   photoFit: 'contain',
+  customCss: '',
   heroEnabled: true,
   /* CMS-10: how strongly the event background is dimmed, 0-100.
      72 is what both room screens hard-coded before this was configurable, so
@@ -89,6 +90,7 @@ interface EventRow {
   guest_name_template: string | null;
   caption_position: string | null;
   photo_fit: string | null;
+  custom_css: string | null;
   background_overlay: number | null;
   hero_enabled: number | null;
   created_at: number;
@@ -136,6 +138,7 @@ function toEventConfig(row: EventRow): EventConfig {
     photoFit: row.photo_fit === 'cover' || row.photo_fit === 'contain' || row.photo_fit === 'contain_blur'
       ? row.photo_fit
       : DEFAULT_EVENT_CONFIG.photoFit,
+    customCss: row.custom_css ?? DEFAULT_EVENT_CONFIG.customCss,
     // Clamped on the way OUT as well as on the way in: a hand-edited database
     // or a rolled-back deploy must not be able to put an out-of-range number
     // into a CSS opacity on every TV.
@@ -178,6 +181,7 @@ const EVENT_UPDATABLE_COLUMNS = [
   'guest_name_template',
   'caption_position',
   'photo_fit',
+  'custom_css',
   'background_overlay',
   'hero_enabled',
 ] as const;
@@ -336,6 +340,7 @@ export class LocalStore {
         guest_name_template TEXT NOT NULL DEFAULT '{guest_name}',
         caption_position    TEXT NOT NULL DEFAULT 'bottom-left',
         photo_fit           TEXT NOT NULL DEFAULT 'contain',
+        custom_css          TEXT NOT NULL DEFAULT '',
         created_at        INTEGER NOT NULL,
         updated_at        INTEGER NOT NULL
       );
@@ -598,6 +603,9 @@ export class LocalStore {
     }
     if (!eventColumns.some((c) => c.name === 'photo_fit')) {
       this.db.exec("ALTER TABLE event ADD COLUMN photo_fit TEXT NOT NULL DEFAULT 'contain'");
+    }
+    if (!eventColumns.some((c) => c.name === 'custom_css')) {
+      this.db.exec("ALTER TABLE event ADD COLUMN custom_css TEXT NOT NULL DEFAULT ''");
     }
 
     // event_photo.image_url — the file behind dslrBooth's share page. See the

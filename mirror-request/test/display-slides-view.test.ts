@@ -172,6 +172,13 @@ describe('Slides screen — trusted caption layout and contain_blur composition 
     expect(SLIDES_HTML).not.toContain('custom_css');
   });
 
+  it('applies event custom CSS as style text only and ships a brighter blur plus larger caption default', () => {
+    expect(SLIDES_HTML).toContain("eventCustomCss.textContent=typeof cfg.customCss==='string'?cfg.customCss:''");
+    expect(SLIDES_HTML).toContain("eventCustomCss.id='eventCustomCss'");
+    expect(SLIDES_HTML).toContain('opacity:.94');
+    expect(SLIDES_HTML).toContain('font-size:clamp(1.7rem,2.75vw,3.25rem)');
+  });
+
   it('uses static two-line and nine-position layout tokens, with cover-only contrast', () => {
     expect(SLIDES_HTML).toMatch(/-webkit-line-clamp:2/);
     for (const position of ['top-left', 'top-center', 'top-right', 'middle-left', 'middle-center', 'middle-right', 'bottom-left', 'bottom-center', 'bottom-right']) {

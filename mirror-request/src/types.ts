@@ -121,6 +121,8 @@ export interface EventConfig {
   guestNameTemplate: string;
   captionPosition: CaptionPosition;
   photoFit: PhotoFit;
+  /** Slides-only operator CSS. It is applied as style text, never HTML. */
+  customCss: string;
   /**
    * CMS-10: how strongly the event background image is dimmed behind the
    * content, 0-100. Zero shows the artwork untouched.

@@ -118,7 +118,7 @@ export function renderSlidesPage(): string {
        decorative layer receives it through its img.src property in shotTile. */
     .photo-frame.fit-contain-blur{width:100%;height:100%;overflow:hidden}
     .photo-frame .photo-blur{position:absolute;inset:-6%;width:112%;height:112%;object-fit:cover;
-      max-width:none;max-height:none;filter:blur(24px);transform:scale(1.04);opacity:.72}
+      max-width:none;max-height:none;filter:blur(24px);transform:scale(1.04);opacity:.94}
 
     /* web-slide's bottom overlay: name small and bold over a gradient, fixed
        white on fixed black-fade — legibility over an arbitrary photo cannot
@@ -139,7 +139,7 @@ export function renderSlidesPage(): string {
     .fit-cover .caption-top-left,.fit-cover .caption-top-center,.fit-cover .caption-top-right{background:linear-gradient(to bottom,rgba(0,0,0,.85),transparent)}
     .fit-cover .caption-middle-left,.fit-cover .caption-middle-center,.fit-cover .caption-middle-right{background:rgba(0,0,0,.55)}
     .fit-cover .caption-bottom-left,.fit-cover .caption-bottom-center,.fit-cover .caption-bottom-right{background:linear-gradient(to top,rgba(0,0,0,.85),transparent)}
-    .shotname{font-size:clamp(1.25rem,2vw,2.25rem);font-weight:700;letter-spacing:-.02em;
+    .shotname{font-size:clamp(1.7rem,2.75vw,3.25rem);font-weight:700;letter-spacing:-.02em;
       margin:0;max-width:24ch;overflow-wrap:anywhere;color:#fff;display:-webkit-box;
       -webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
 
@@ -252,6 +252,9 @@ export function renderSlidesPage(): string {
       banner=document.querySelector('#banner'),agentOffline=document.querySelector('#agentOffline'),
       hero=document.querySelector('#hero'),fullscreenToggle=document.querySelector('#fullscreenToggle'),
       fullscreenToggleLabel=document.querySelector('#fullscreenToggleLabel');
+  var eventCustomCss=document.createElement('style');
+  eventCustomCss.id='eventCustomCss';
+  document.head.appendChild(eventCustomCss);
 
   function updateFullscreenToggle(){
     if(!fullscreenToggle||!fullscreenToggleLabel)return;
@@ -288,6 +291,9 @@ export function renderSlidesPage(): string {
   function applyEventConfig(cfg){
     if(!cfg)return;
     var root=document.documentElement.style;
+    // CSS is trusted operator configuration but never template-interpolated:
+    // textContent cannot close this element or create script/HTML nodes.
+    eventCustomCss.textContent=typeof cfg.customCss==='string'?cfg.customCss:'';
     root.setProperty('--event-bg',cfg.colorDominant);
     root.setProperty('--event-surface',cfg.colorSecondary);
     root.setProperty('--event-accent',cfg.colorAccent);

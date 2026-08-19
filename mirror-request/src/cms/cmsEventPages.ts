@@ -72,6 +72,7 @@ export const FIELD_CAPS = {
   idle_sub: 120,
   qr_cta_text: 60,
   guest_name_template: 240,
+  custom_css: 20_000,
 } as const;
 
 /** How many photos the slideshow holds. */
@@ -501,6 +502,7 @@ export const FIELD_SCREEN_MAP: Record<string, ScreenTagKey> = {
   guest_name_template: 'slides',
   caption_position: 'slides',
   photo_fit: 'slides',
+  custom_css: 'slides',
   layout_style: 'inactive',
 };
 
@@ -706,6 +708,11 @@ export function renderCmsEventFormPage(data: {
       })}
 
       <h2>Trình chiếu ảnh</h2>
+      <div class="field">
+        <label for="custom_css">Custom CSS${screenTag('custom_css')}</label>
+        <textarea id="custom_css" name="custom_css" maxlength="${FIELD_CAPS.custom_css}" rows="10" spellcheck="false" placeholder=".shotname { font-size: 3rem; }">${escapeHtml(event.customCss)}</textarea>
+        <p class="muted">Chỉ áp dụng cho màn hình trình chiếu. Dùng để chỉnh cỡ chữ, màu, vị trí hoặc độ mờ. Tối đa ${FIELD_CAPS.custom_css.toLocaleString('vi-VN')} ký tự; không hỗ trợ <code>@import</code>.</p>
+      </div>
       <div class="grid">
         <div class="field">
           <label for="photo_count">Số ảnh hiển thị${screenTag('photo_count')}</label>

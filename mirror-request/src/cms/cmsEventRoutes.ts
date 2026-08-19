@@ -121,6 +121,14 @@ const requiredTextField = (cap: number): FieldValidator => (raw) => {
   return trimmed.length > 0 && trimmed.length <= cap ? trimmed : undefined;
 };
 
+/** CSS belongs to the authenticated operator, but is still bounded and must
+ * not fetch/import an unbounded remote stylesheet. It is later assigned with
+ * style.textContent, never interpolated into the display HTML. */
+const customCssField: FieldValidator = (raw) => {
+  if (typeof raw !== 'string' || raw.length > FIELD_CAPS.custom_css) return undefined;
+  return /@import\b/i.test(raw) ? undefined : raw;
+};
+
 /**
  * Exactly six hex digits after a `#`, and nothing else.
  *
@@ -197,6 +205,7 @@ const FIELD_VALIDATORS: Record<string, FieldValidator> = {
   guest_name_template: requiredTextField(FIELD_CAPS.guest_name_template),
   caption_position: enumField(['top-left', 'top-center', 'top-right', 'middle-left', 'middle-center', 'middle-right', 'bottom-left', 'bottom-center', 'bottom-right']),
   photo_fit: enumField(['contain', 'cover', 'contain_blur']),
+  custom_css: customCssField,
 };
 
 /**

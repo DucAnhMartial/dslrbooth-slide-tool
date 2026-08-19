@@ -125,7 +125,7 @@ describe('the tags tell the truth about the screens as they are today', () => {
   });
 
   it('the photo settings are slides-only, and the pages agree', () => {
-    for (const f of ['photo_count', 'photo_duration_ms', 'show_guest_name', 'hero_enabled', 'guest_name_template', 'caption_position', 'photo_fit']) {
+    for (const f of ['photo_count', 'photo_duration_ms', 'show_guest_name', 'hero_enabled', 'guest_name_template', 'caption_position', 'photo_fit', 'custom_css']) {
       expect(FIELD_SCREEN_MAP[f]).toBe('slides');
     }
     expect(waiting).not.toContain('photoDurationMs');
@@ -136,6 +136,8 @@ describe('the tags tell the truth about the screens as they are today', () => {
     expect(slides).toContain('guestNameTemplate');
     expect(slides).toContain('captionPosition');
     expect(slides).toContain('photoFit');
+    expect(waiting).not.toContain('customCss');
+    expect(slides).toContain('customCss');
   });
 
   it('layout_style is honestly labelled as not yet doing anything', () => {

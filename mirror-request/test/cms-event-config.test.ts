@@ -160,6 +160,7 @@ describe('CMS-01: the form exposes every configurable field', () => {
       'guest_name_template',
       'caption_position',
       'photo_fit',
+      'custom_css',
     ];
     for (const field of fields) {
       expect(res.text, `${field} must be reachable from the form`).toContain(`name="${field}"`);
@@ -191,6 +192,17 @@ describe('CMS-01: the form exposes every configurable field', () => {
 });
 
 describe('caption configuration', () => {
+  it('saves bounded slides-only custom CSS and rejects @import atomically', async () => {
+    const h = build();
+    const id = await createEvent(h, 'Tùy biến slide');
+    const css = '.shotname { font-size: 3rem; color: #ffd166; }';
+    await request(h.app).post(`/cms/api/events/${id}`).set('Cookie', h.cookie).send({ custom_css: css }).expect(200);
+    expect(h.store.getEventConfig(id)?.customCss).toBe(css);
+    const before = h.store.getEventConfig(id);
+    await request(h.app).post(`/cms/api/events/${id}`).set('Cookie', h.cookie).send({ custom_css: '@import url(https://example.test/x.css);' }).expect(400);
+    expect(h.store.getEventConfig(id)).toEqual(before);
+  });
+
   it('saves contain_blur and rejects an invalid fit beside a valid field atomically', async () => {
     const h = build();
     const id = await createEvent(h, 'Chú thích');
@@ -217,6 +229,8 @@ describe('caption configuration', () => {
     expect(res.text).toContain('bản ảnh làm mờ');
     expect(res.text).toContain('cắt logo');
     expect(res.text).toContain('screentag slides">Màn trình chiếu');
+    expect(res.text).toContain('name="custom_css"');
+    expect(res.text).toContain('Custom CSS');
   });
 });
 
@@ -285,8 +299,8 @@ describe('an event saved with only a name still renders a correct screen', () =>
 // ---------------------------------------------------------------------------
 
 describe('every text field is capped, and the cap is enforced server-side', () => {
-  it('publishes the caps this plan chose, including the 240-character caption template', () => {
-    expect(FIELD_CAPS).toEqual({ name: 60, idle_heading: 80, idle_sub: 120, qr_cta_text: 60, guest_name_template: 240 });
+  it('publishes the caps, including caption copy and bounded custom CSS', () => {
+    expect(FIELD_CAPS).toEqual({ name: 60, idle_heading: 80, idle_sub: 120, qr_cta_text: 60, guest_name_template: 240, custom_css: 20_000 });
   });
 
   it('renders each cap as a maxlength attribute on its input', async () => {
@@ -297,6 +311,7 @@ describe('every text field is capped, and the cap is enforced server-side', () =
     expect(res.text).toContain('maxlength="60"');
     expect(res.text).toContain('maxlength="80"');
     expect(res.text).toContain('maxlength="120"');
+    expect(res.text).toContain('maxlength="20000"');
   });
 
   it('refuses an over-cap value for EVERY capped field and leaves the row unchanged', async () => {
