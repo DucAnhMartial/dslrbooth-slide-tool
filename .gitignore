@@ -1,0 +1,89 @@
+# ==========================================================================
+# .gitignore — gốc monorepo Photobooth
+#
+# Mỗi thư mục con (mirror-request/, dslrbooth-agent/, web-slide/) vẫn giữ
+# .gitignore riêng với các quy tắc đặc thù của nó (dữ liệu khách, backup DB,
+# output của electron-builder...). File này chỉ phủ những gì chung cho cả
+# repo, cộng thêm phần rác chỉ sinh ra ở gốc.
+# ==========================================================================
+
+# --- Bí mật: KHÔNG BAO GIỜ commit ----------------------------------------
+# .env chứa DB_PASSWORD, WEBHOOK_HMAC_SECRET, AGENT_WS_TOKEN, TWILIO_AUTH_TOKEN
+# và CMS_PASSWORD_HASH. Bản .env.example (chỉ có tên biến, giá trị rỗng) là
+# ngoại lệ duy nhất được track.
+.env
+.env.*
+!.env.example
+# Bản sao .env có dấu thời gian, tạo trước mỗi lần xoay khoá (OPS-RUNBOOK §3).
+# Một bản sao đầy đủ thì mang nguyên độ nhạy cảm của bản gốc — ignore .env mà
+# để .env.bak-20260813-042225 lọt vào history thì chẳng bảo vệ được gì.
+*.bak
+*.bak-*
+# Ngoại lệ: bản sao trước-khi-vá của web-slide đã nằm trong history từ commit
+# baseline; giữ nguyên để không tạo ra khác biệt ma giữa index và working tree.
+!web-slide/server.js.*.bak
+.env.bak*
+# Khoá và chứng chỉ, dù chỉ đặt tạm ở đây một lát để copy sang máy khác.
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+
+# --- Phụ thuộc và output build -------------------------------------------
+# Khôi phục bằng `npm ci` từ package-lock.json (đã được track).
+node_modules/
+dist/
+build/
+# Ngoại lệ: build/ của Agent là *nguồn* cấu hình đóng gói (icon, tài nguyên
+# installer) chứ không phải output — output của electron-builder nằm ở release/.
+!dslrbooth-agent/build/
+release/
+out/
+coverage/
+*.tsbuildinfo
+# Binary đóng gói của Agent — ~43MB, sinh lại được từ src/ bằng
+# `npm run build:exe` hoặc scripts/build-win.sh.
+*.exe
+.electron-builder-cache/
+
+# --- Trạng thái runtime ---------------------------------------------------
+# Log chạy thật: có tên và số điện thoại khách ở dạng rõ. Là output vận hành,
+# không phải mã nguồn.
+logs/
+*.log
+*-audit.json
+# winston-daily-rotate-file ghi sidecar audit cạnh LOG_DIR; trên máy dev Linux
+# một LOG_DIR kiểu Windows sẽ đẻ ra tên file có dấu backslash ngay ở gốc repo.
+.*-audit.json
+# Kết quả test của vitest, ghi ở gốc khi chạy suite từ đây.
+.vite/
+.vitest/
+# Cơ sở dữ liệu SQLite cục bộ và mọi bản backup của nó.
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite.bak*
+
+# --- Ảnh do khách và người vận hành tải lên -------------------------------
+# Ảnh của người thật tại sự kiện thật; thư mục được dựng lại lúc chạy.
+uploads/
+
+# --- Công cụ và trình soạn thảo ------------------------------------------
+# settings.local.json là cấu hình riêng của từng máy, không dùng chung.
+.claude/settings.local.json
+.gsd/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Rác hệ điều hành -----------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Cache kết quả tra cứu web của các agent nghiên cứu — sinh lại được,
+# không phải quyết định của dự án.
+.planning/research/.cache/

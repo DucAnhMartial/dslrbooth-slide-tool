@@ -1,0 +1,33 @@
+version: 2
+updates:
+  # Gom vá bảo mật và nâng cấp nhỏ thành một PR mỗi tháng cho mỗi dự án —
+  # đây là kho của một hệ thống đang chạy sự kiện thật, một dòng PR nâng cấp
+  # hằng tuần chỉ tạo nhiễu chứ không ai merge.
+  - package-ecosystem: npm
+    directory: /mirror-request
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: chore
+
+  - package-ecosystem: npm
+    directory: /dslrbooth-agent
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: chore
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci

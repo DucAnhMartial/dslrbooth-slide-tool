@@ -1,0 +1,27 @@
+# Chuẩn hoá kết thúc dòng. Agent được build và chạy trên Windows, máy chủ và
+# CI chạy Linux — không có file này thì mỗi lần checkout chéo hệ điều hành sẽ
+# sinh ra diff toàn-file vô nghĩa.
+* text=auto eol=lf
+
+# Script và cấu hình chỉ chạy trên Windows: phải giữ CRLF.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Nhị phân: không đụng vào, không cố merge.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.exe  binary
+*.dll  binary
+*.sqlite binary
+
+# Lockfile: sinh tự động, gộp bằng tay là sai — luôn chạy lại `npm install`.
+package-lock.json -diff linguist-generated=true
+
+# Không tính tài liệu kế hoạch vào thống kê ngôn ngữ của GitHub.
+.planning/**    linguist-documentation=true
+docs/**         linguist-documentation=true

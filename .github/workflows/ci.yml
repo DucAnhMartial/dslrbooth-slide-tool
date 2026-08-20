@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Đẩy commit mới lên cùng một nhánh thì huỷ lần chạy cũ — không có lý do gì
+# để chờ CI của một commit đã bị thay thế.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  extension-service:
+    name: Extension Service (mirror-request)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mirror-request
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # package.json khai báo engines.node = 20.x; đây là bản đang chạy
+          # production, CI phải khớp chứ không chạy bản mới hơn.
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: mirror-request/package-lock.json
+
+      - name: Cài phụ thuộc
+        run: npm ci
+
+      - name: Kiểm tra kiểu
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  agent:
+    name: dslrBooth Agent
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dslrbooth-agent
+    env:
+      # Agent chỉ được typecheck và test ở đây, không đóng gói installer —
+      # tải nhị phân Electron ~100MB cho việc đó là lãng phí thuần tuý.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: dslrbooth-agent/package-lock.json
+
+      - name: Cài phụ thuộc
+        run: npm ci
+
+      - name: Kiểm tra kiểu
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+  secrets:
+    name: Quét bí mật
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks cần đủ lịch sử để quét diff của PR, không chỉ cây hiện tại.
+          fetch-depth: 0
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

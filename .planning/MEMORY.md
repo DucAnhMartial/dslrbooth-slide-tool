@@ -1,0 +1,5 @@
+- [PROJECT.md](PROJECT.md) — project context, scope, stack
+- [REQUIREMENTS.md](REQUIREMENTS.md) — v1 requirements with REQ-IDs
+- [ROADMAP.md](ROADMAP.md) — 5 milestones, success criteria
+- [STATE.md](STATE.md) — current progress tracker
+- [config.json](config.json) — workflow & deployment config

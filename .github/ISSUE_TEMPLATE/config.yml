@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Lỗ hổng bảo mật
+    url: https://github.com/DucAnhMartial/dslrbooth-slide-tool/blob/main/SECURITY.md
+    about: Đừng mở issue công khai. Đọc SECURITY.md và báo trực tiếp cho chủ kho.
