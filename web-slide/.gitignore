@@ -1,0 +1,19 @@
+# Dependencies — restored by `npm ci` from package-lock.json (5.6MB)
+node_modules/
+
+# Guest-uploaded photos. Never version-controlled: these are pictures of real
+# people at real events, and the directory is rebuilt at runtime.
+uploads/
+
+# Webhook request log. Contains guest NAME and PHONE NUMBER in cleartext —
+# verified against the real file before this repo was initialised (it held a
+# real guest name from the 2026-08-12 live end-to-end run, alongside test rows).
+# It is operational debug output, not source. Keep it off disk-shared history.
+webhook-json.log
+
+# Runtime / editor noise
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
