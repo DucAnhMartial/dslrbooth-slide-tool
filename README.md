@@ -125,8 +125,13 @@ kiện chạy thật — đọc từ trên xuống. Hai runbook vận hành đi 
 ```
 
 Kho này là **monorepo**: lịch sử commit của ba dự án con đã được nhập vào đây
-bằng `git subtree`, nên `git log --follow mirror-request/src/...` vẫn truy được
-tới tận commit gốc.
+với đường dẫn viết lại sẵn dưới tiền tố tương ứng, nên `git log --follow` và
+`git blame` vẫn truy được tới tận commit gốc:
+
+```bash
+git log --follow -- mirror-request/src/index.ts
+git blame mirror-request/src/index.ts
+```
 
 ---
 
