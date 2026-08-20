@@ -1,0 +1,104 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  padding: 1.5rem;
+}
+
+h1 {
+  font-size: 1.25rem;
+  margin: 0 0 1rem;
+}
+
+section {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  border: 1px solid rgba(127, 127, 127, 0.4);
+  border-radius: 8px;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  margin: 0 0 1rem;
+}
+
+dt {
+  font-weight: 600;
+}
+
+dd {
+  margin: 0;
+}
+
+.field {
+  margin-bottom: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.field label {
+  font-weight: 600;
+}
+
+.field-checkbox label {
+  flex-direction: row;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.field-error {
+  color: #c0392b;
+  font-size: 0.85rem;
+  margin: 0;
+  min-height: 1em;
+}
+
+.field-hint {
+  color: rgba(127, 127, 127, 0.9);
+  font-size: 0.8rem;
+  margin: 0;
+}
+
+/* UAT-06: the CMS-overwrites-this notice. Dimmer than an error and quieter
+   than a label — it is a standing fact about the field, not a problem. */
+.field-notice {
+  color: rgba(127, 127, 127, 0.85);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  margin: 0.15rem 0 0;
+  border-left: 2px solid rgba(127, 127, 127, 0.35);
+  padding-left: 0.5rem;
+}
+
+#import-panel code {
+  font-size: 0.85rem;
+}
+
+#log-lines {
+  max-height: 12rem;
+  overflow-y: auto;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+}
+
+#save-error {
+  color: #c0392b;
+  min-height: 1em;
+}
+
+#restart-required-notice {
+  color: #b8860b;
+}
+
+button {
+  margin-right: 0.5rem;
+}

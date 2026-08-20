@@ -1,0 +1,43 @@
+{
+  "appId": "com.dslrbooth.agent",
+  "productName": "dslrBooth Agent",
+  "publish": null,
+  "directories": {
+    "output": "release",
+    "buildResources": "build"
+  },
+  "files": [
+    "package.json",
+    "dist/**/*",
+    "!dist/**/*.map",
+    "!dist/**/*.d.ts",
+    "node_modules/**/*",
+    "!node_modules/node-windows/**/*",
+    "!node_modules/electron/**/*",
+    "!node_modules/electron-builder/**/*",
+    "!node_modules/pkg/**/*",
+    "!node_modules/vitest/**/*",
+    "!node_modules/typescript/**/*",
+    "!node_modules/ts-node/**/*",
+    "!node_modules/@types/**/*",
+    "!.env",
+    "!.env.*",
+    "!logs",
+    "!logs/**/*",
+    "!*.log",
+    "!*-audit.json"
+  ],
+  "win": {
+    "target": ["nsis", "portable", "zip"],
+    "icon": "build/icon.png",
+    "artifactName": "dslrbooth-agent-${version}-${arch}.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "artifactName": "dslrbooth-agent-Setup-${version}-${arch}.${ext}"
+  },
+  "portable": {
+    "artifactName": "dslrbooth-agent-Portable-${version}-${arch}.${ext}"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "projectName": "dslrbooth-agent",
+  "description": "Stateless relay agent between dslrBooth Local API and Extension Service",
+  "version": "1.0.0",
+  "initialized": "2025-07-19",
+  "workflow": {
+    "mode": "manual",
+    "autoResearch": false,
+    "autoRequirements": false,
+    "autoRoadmap": false
+  },
+  "paths": {
+    "planningDir": ".planning",
+    "researchDir": ".planning/research",
+    "requirementsFile": ".planning/REQUIREMENTS.md",
+    "roadmapFile": ".planning/ROADMAP.md",
+    "projectFile": ".planning/PROJECT.md",
+    "stateFile": ".planning/STATE.md",
+    "planFile": ".planning/PLAN.md"
+  },
+  "milestones": {
+    "current": 2,
+    "completed": [1]
+  },
+  "preferences": {
+    "language": "typescript",
+    "runtime": "node",
+    "framework": "express",
+    "testing": "manual-integration",
+    "ci": "github-actions",
+    "serviceManager": "node-windows"
+  }
+}

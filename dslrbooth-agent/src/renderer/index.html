@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<!--
+  Same-origin resources only (R4): this page loads no remote script, style or
+  connection of any kind — every capability it has reaches the main process
+  over the preload's IPC bridge, never the network.
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';" />
+<title>dslrBooth Agent</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<main>
+  <h1>dslrBooth Agent</h1>
+
+  <section id="import-panel" aria-label="Import existing configuration" hidden>
+    <h2>Import existing configuration</h2>
+    <p>
+      A configuration file was found at <code id="legacy-path"></code>.
+      Import it instead of retyping the values.
+    </p>
+    <button type="button" id="import-button">Import</button>
+    <p id="import-result" role="status"></p>
+  </section>
+
+  <section id="status-panel" aria-label="Relay status">
+    <h2>Status</h2>
+    <dl>
+      <dt>Relay</dt><dd id="status-running">unknown</dd>
+      <dt>Service socket</dt><dd id="status-socket">unknown</dd>
+      <dt>Trigger port</dt><dd id="status-trigger-port">-</dd>
+      <dt>dslrBooth</dt><dd id="status-dslrbooth">unknown</dd>
+      <dt>Last event</dt><dd id="status-last-event">-</dd>
+      <dt>Uptime</dt><dd id="status-uptime">-</dd>
+      <dt>Last error</dt><dd id="status-last-error">-</dd>
+    </dl>
+    <button type="button" id="start-button">Start</button>
+    <button type="button" id="stop-button">Stop</button>
+  </section>
+
+  <section id="log-panel" aria-label="Recent log lines">
+    <h2>Recent log lines</h2>
+    <pre id="log-lines"></pre>
+  </section>
+
+  <section id="settings-panel" aria-label="Settings">
+    <h2>Settings</h2>
+    <form id="settings-form" autocomplete="off">
+      <div class="field">
+        <label for="extensionServiceWsUrl">Extension Service WebSocket URL</label>
+        <input type="text" id="extensionServiceWsUrl" name="extensionServiceWsUrl" />
+        <p class="field-error" id="error-extensionServiceWsUrl"></p>
+      </div>
+
+      <div class="field">
+        <label for="extensionServiceWsToken">Extension Service token</label>
+        <input type="password" id="extensionServiceWsToken" name="extensionServiceWsToken" placeholder="Leave blank to keep the stored value" />
+        <p class="field-error" id="error-extensionServiceWsToken"></p>
+        <p class="field-hint" id="hint-extensionServiceWsToken"></p>
+      </div>
+
+      <div class="field">
+        <label for="dslrBoothApiPort">dslrBooth API port</label>
+        <input type="number" id="dslrBoothApiPort" name="dslrBoothApiPort" min="1" max="65535" />
+        <p class="field-error" id="error-dslrBoothApiPort"></p>
+      </div>
+
+      <div class="field">
+        <label for="dslrBoothPassword">dslrBooth password</label>
+        <input type="password" id="dslrBoothPassword" name="dslrBoothPassword" placeholder="Leave blank to keep the stored value" />
+        <p class="field-error" id="error-dslrBoothPassword"></p>
+        <p class="field-hint" id="hint-dslrBoothPassword"></p>
+      </div>
+
+      <div class="field">
+        <label for="triggerServerPort">Trigger server port</label>
+        <input type="number" id="triggerServerPort" name="triggerServerPort" min="1" max="65535" />
+        <p class="field-error" id="error-triggerServerPort"></p>
+      </div>
+
+      <div class="field">
+        <label for="logLevel">Log level</label>
+        <select id="logLevel" name="logLevel">
+          <option value="error">error</option>
+          <option value="warn">warn</option>
+          <option value="info">info</option>
+          <option value="http">http</option>
+          <option value="verbose">verbose</option>
+          <option value="debug">debug</option>
+          <option value="silly">silly</option>
+        </select>
+        <p class="field-error" id="error-logLevel"></p>
+      </div>
+
+      <div class="field">
+        <label for="logDir">Log directory</label>
+        <input type="text" id="logDir" name="logDir" />
+        <p class="field-error" id="error-logDir"></p>
+      </div>
+
+      <div class="field field-checkbox">
+        <label for="autoOpenDisplay">
+          <input type="checkbox" id="autoOpenDisplay" name="autoOpenDisplay" />
+          Auto-open the booth display window
+        </label>
+        <p class="field-error" id="error-autoOpenDisplay"></p>
+      </div>
+
+      <p id="restart-required-notice" hidden>
+        Some changes need a restart of the relay to take effect.
+        <button type="button" id="restart-button">Restart relay</button>
+      </p>
+      <p id="save-error" role="alert"></p>
+      <button type="submit" id="save-button">Save</button>
+    </form>
+  </section>
+
+  <section id="preferences-panel" aria-label="Preferences">
+    <h2>Preferences</h2>
+    <div class="field field-checkbox">
+      <label for="startRelayOnLaunch">
+        <input type="checkbox" id="startRelayOnLaunch" />
+        Start the relay automatically when the app launches
+      </label>
+    </div>
+    <div class="field field-checkbox">
+      <label for="startWithWindows">
+        <input type="checkbox" id="startWithWindows" />
+        Start with Windows
+      </label>
+    </div>
+    <p id="preferences-error" role="alert"></p>
+  </section>
+</main>
+<script src="index.js"></script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+{
+  "name": "dslrbooth-agent",
+  "version": "1.0.0",
+  "description": "Stateless relay agent between dslrBooth Local API and Extension Service",
+  "main": "dist/electron/main.js",
+  "scripts": {
+    "build": "tsc && npm run copy:assets",
+    "copy:assets": "node scripts/copy-assets.js",
+    "build:exe": "npm run build && pkg dist/index.js --targets node18-win-x64 --output dslrbooth-agent.exe",
+    "typecheck": "tsc --noEmit",
+    "dev": "ts-node -r dotenv/config src/index.ts",
+    "start": "node -r dotenv/config dist/index.js",
+    "electron:dev": "npm run build && electron .",
+    "service:install": "node -r dotenv/config service/install-service.js",
+    "service:uninstall": "node -r dotenv/config service/install-service.js uninstall",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "dslrBooth",
+    "agent",
+    "windows-service"
+  ],
+  "license": "UNLICENSED",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-windows": "^1.0.0-beta.8",
+    "winston": "^3.13.0",
+    "winston-daily-rotate-file": "^5.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.5.0",
+    "@types/ws": "^8.5.12",
+    "electron": "^43.4.0",
+    "electron-builder": "^26.15.3",
+    "pkg": "^5.8.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.4"
+  }
+}
