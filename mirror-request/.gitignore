@@ -1,0 +1,38 @@
+node_modules/
+dist/
+*.log
+logs/
+.env
+
+# Timestamped copies of .env, made before editing it (OPS-RUNBOOK section 3's
+# rotation steps). A backup is a FULL copy — DB_PASSWORD, WEBHOOK_HMAC_SECRET,
+# AGENT_WS_TOKEN and CMS_PASSWORD_HASH all ride along — so ignoring `.env`
+# while leaving `.env.bak-20260813-042225` tracked protects nothing. Same
+# reasoning as data/backups/ below: the copy inherits the original's
+# sensitivity, and one `git add -A` puts it in history permanently.
+.env.bak*
+
+# Local SQLite state — runtime artifact, not source
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+
+# Manual pre-mutation backups of the local SQLite state (docs/OPS-RUNBOOK.md
+# section 6's "take a backup first" step). These are full copies of the
+# production database — same PII/sensitivity posture as the live file above
+# (§2), so they must never enter git history either.
+data/backups/
+
+# Guest- and operator-supplied images: event logos, waiting-screen backgrounds
+# and registration QR codes, served back out of /uploads. Same reasoning as the
+# database and its backups above — these are request-supplied bytes about real
+# people and real clients, they are runtime state rather than source, and one
+# `git add -A` would put them in history permanently. Found missing when a
+# backup taken beside the live database (rather than in data/backups/) left the
+# directory untracked and dragged its contents into view alongside it.
+data/uploads/
+
+# A pre-mutation backup belongs in data/backups/ above. This second pattern
+# exists because the convention is easy to miss in a hurry, and a backup left
+# beside the live file inherits its full sensitivity either way.
+data/*.sqlite.bak*

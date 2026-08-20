@@ -1,0 +1,227 @@
+import { WebSocket, WebSocketServer } from 'ws';
+import http from 'http';
+import { timingSafeEqual } from 'crypto';
+import { getConfig } from '../config';
+import logger from '../logging/logger';
+
+const HEARTBEAT_INTERVAL = 15_000;
+
+type AgentAckHandler = (jobId: string, ok: boolean, errorMessage?: string) => void;
+type AgentEventHandler = (eventType: string, jobId?: string, payload?: Record<string, unknown>) => void;
+/**
+ * Answers "what configuration should this booth be running?" — and takes no
+ * arguments, deliberately (D-17, T-08-19). The inbound `config_request` is a
+ * REQUEST: the Agent asks, the service answers from `agent_config`, and there
+ * is structurally nothing off the wire this handler could read even if a
+ * future edit wanted to. Returning `undefined` means "no source wired", which
+ * sends nothing rather than sending an empty configuration the Agent would
+ * dutifully apply.
+ */
+type AgentConfigRequestHandler = () => Record<string, unknown> | undefined;
+
+export class AgentServer {
+  private wss: WebSocketServer | null = null;
+  private agentConn: { ws: WebSocket; id: string; lastHeartbeat: number; online: boolean } | null = null;
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private config = getConfig();
+  private connSeq = 0;
+  private heartbeatIntervalMs: number;
+  private heartbeatTimeoutMs: number;
+
+  private ackHandler: AgentAckHandler = () => {};
+  private eventHandler: AgentEventHandler = () => {};
+  private disconnectHandler: () => void = () => {};
+  private configRequestHandler: AgentConfigRequestHandler = () => undefined;
+
+  constructor(opts: { heartbeatIntervalMs?: number; heartbeatTimeoutMs?: number } = {}) {
+    this.heartbeatIntervalMs = opts.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL;
+    this.heartbeatTimeoutMs = opts.heartbeatTimeoutMs ?? this.config.HEARTBEAT_TIMEOUT_MS;
+  }
+
+  registerAckHandler(fn: AgentAckHandler): void { this.ackHandler = fn; }
+  registerEventHandler(fn: AgentEventHandler): void { this.eventHandler = fn; }
+  registerDisconnectHandler(fn: () => void): void { this.disconnectHandler = fn; }
+  registerConfigRequestHandler(fn: AgentConfigRequestHandler): void { this.configRequestHandler = fn; }
+
+  /**
+   * Verifies the `Authorization: Bearer <token>` header against the
+   * configured `AGENT_WS_TOKEN`, reproducing the shape of `webhookAuth.ts`'s
+   * `verifySignature()` (Phase 1's precedent). `timingSafeEqual` throws
+   * `ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH` on a length mismatch rather than
+   * returning false, so the explicit length guard below is required — without
+   * it a wrong-length header would surface as an uncaught exception instead
+   * of a clean rejection. The whole body is wrapped in try/catch for the same
+   * reason a malformed header must never crash the upgrade path. Returns a
+   * bare boolean and logs nothing: the presented and configured credentials
+   * must never appear in a message, an error, or a thrown value (D-08).
+   */
+  private isValidBearerToken(authHeader: string): boolean {
+    const PREFIX = 'Bearer ';
+    if (!authHeader.startsWith(PREFIX)) return false;
+    try {
+      const received = Buffer.from(authHeader.slice(PREFIX.length), 'utf8');
+      const expected = Buffer.from(this.config.AGENT_WS_TOKEN, 'utf8');
+      if (received.length !== expected.length) return false;
+      return timingSafeEqual(received, expected);
+    } catch {
+      return false;
+    }
+  }
+
+  start(httpServer: http.Server): void {
+    this.wss = new WebSocketServer({
+      noServer: true,
+      perMessageDeflate: false,
+    });
+
+    httpServer.on('upgrade', (req, socket, head) => {
+      const pathname = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname;
+      if (pathname !== '/agent' || !this.wss) return;
+
+      const authHeader = req.headers.authorization ?? '';
+      if (!this.isValidBearerToken(authHeader)) {
+        logger.warn('Agent WS rejected: invalid or missing Authorization header');
+        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
+      this.wss.handleUpgrade(req, socket, head, (ws) => {
+        this.wss?.emit('connection', ws, req);
+      });
+    });
+
+    this.wss.on('connection', (ws) => {
+      // WINDOWS ledger item 5: mask()'s phone pattern (`PHONE_RE`,
+      // src/logging/logger.ts:8) matches any run of 7+ adjacent digits, and
+      // the raw id below embeds a 13-digit epoch timestamp — every id used
+      // to get partially asterisked in the logs, degrading the displaced-
+      // Agent diagnostic OPS-RUNBOOK §7 depends on. The fix is applied here,
+      // at the mint, not by loosening PHONE_RE: under-masking a real phone
+      // number is a strictly worse failure than over-masking an id, so the
+      // masking regexes stay exactly as Phase 1 (01-05) locked them. The
+      // guarantee this produces is structural — no two digits are ever
+      // adjacent in the id — not "the id is short enough", so it holds
+      // regardless of how large the timestamp or the sequence number grows.
+      // Same technique test/logging-mask.test.ts:87-89 already uses for
+      // synthetic test ids (safeId()), promoted from the test file into
+      // production. OPS-RUNBOOK.md §7 describes the old id format and needs
+      // updating for this change — done by plan 05-05.
+      const id = `agent-${Date.now()}-${++this.connSeq}`.replace(/(\d)(?=\d)/g, '$1x');
+      if (this.agentConn) {
+        const displacedId = this.agentConn.id;
+        logger.warn(`Agent WS replaced: ${displacedId} displaced by ${id}`);
+        try { this.agentConn.ws.close(); } catch { /* ignore */ }
+      }
+      this.agentConn = { ws, id, lastHeartbeat: Date.now(), online: true };
+      logger.info(`Agent connected: ${id}`);
+
+      ws.on('message', (raw) => {
+        if (this.agentConn) this.agentConn.lastHeartbeat = Date.now();
+        let msg: Record<string, unknown>;
+        try {
+          msg = JSON.parse(raw.toString());
+        } catch {
+          logger.warn('Agent WS: invalid JSON');
+          return;
+        }
+        const type = msg.type as string;
+        if (type === 'ack') {
+          this.ackHandler(
+            String(msg.jobId ?? ''),
+            Boolean(msg.ok),
+            typeof msg.errorMessage === 'string' ? msg.errorMessage : undefined
+          );
+        } else if (type === 'event') {
+          this.eventHandler(
+            String(msg.event ?? ''),
+            typeof msg.jobId === 'string' ? msg.jobId : undefined,
+            msg.payload as Record<string, unknown> | undefined
+          );
+        } else if (type === 'config_request') {
+          // D-17's pull, and its one-way property. `msg` is not read below —
+          // not its `data`, not any field riding beside it — so a booth that
+          // asks cannot also tell (T-08-19). An Agent built before this phase
+          // never sends this type and is unaffected; the branch is strictly
+          // additive to AGT-01..05.
+          const data = this.configRequestHandler();
+          if (data === undefined) {
+            logger.warn('Agent WS: config_request received but no configuration source is registered');
+          } else {
+            this.sendEvent({ type: 'config', data });
+          }
+        } else if (type === 'heartbeat') {
+          // heartbeat acknowledged, timestamp already updated above
+        } else {
+          logger.warn(`Agent WS: unknown message type "${type}"`);
+        }
+      });
+
+      ws.on('close', () => {
+        if (this.agentConn?.id === id) {
+          this.agentConn = null;
+          logger.info('Agent disconnected');
+          this.disconnectHandler();
+        }
+      });
+
+      ws.on('error', (err) => {
+        logger.warn(`Agent WS error: ${err.message}`);
+      });
+    });
+
+    this.startHeartbeatWatchdog();
+    logger.info('AgentServer started at /agent');
+  }
+
+  stop(): void {
+    this.stopHeartbeatWatchdog();
+    this.agentConn = null;
+    this.wss?.close();
+    this.wss = null;
+  }
+
+  isAgentOnline(): boolean {
+    return this.agentConn !== null && this.agentConn.online;
+  }
+
+  getAgentStatus(): { online: boolean; lastHeartbeat: number | null } {
+    if (!this.agentConn) return { online: false, lastHeartbeat: null };
+    return { online: this.agentConn.online, lastHeartbeat: this.agentConn.lastHeartbeat };
+  }
+
+  sendCommand(payload: { type: string; action: string; jobId: string; mode?: string }): boolean {
+    if (!this.agentConn || this.agentConn.ws.readyState !== WebSocket.OPEN) {
+      logger.warn('Agent WS: cannot send command — no connection');
+      return false;
+    }
+    this.agentConn.ws.send(JSON.stringify(payload));
+    return true;
+  }
+
+  sendEvent(payload: { type: string; data?: unknown }): boolean {
+    if (!this.agentConn || this.agentConn.ws.readyState !== WebSocket.OPEN) return false;
+    this.agentConn.ws.send(JSON.stringify(payload));
+    return true;
+  }
+
+  private startHeartbeatWatchdog(): void {
+    this.stopHeartbeatWatchdog();
+    this.heartbeatTimer = setInterval(() => {
+      if (!this.agentConn) return;
+      const elapsed = Date.now() - this.agentConn.lastHeartbeat;
+      if (elapsed > this.heartbeatTimeoutMs) {
+        logger.warn(`Agent heartbeat timeout (${elapsed}ms > ${this.heartbeatTimeoutMs}ms)`);
+        this.agentConn.online = false;
+        try { this.agentConn.ws.close(4002, 'heartbeat timeout'); } catch { /* ignore */ }
+        this.agentConn = null;
+        this.disconnectHandler();
+      }
+    }, this.heartbeatIntervalMs);
+  }
+
+  private stopHeartbeatWatchdog(): void {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+  }
+}
