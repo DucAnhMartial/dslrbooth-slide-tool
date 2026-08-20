@@ -24,7 +24,7 @@ jobs:
       run:
         working-directory: mirror-request
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:
@@ -60,7 +60,7 @@ jobs:
       # tải nhị phân Electron ~100MB cho việc đó là lãng phí thuần tuý.
       ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:
@@ -81,7 +81,7 @@ jobs:
     name: Quét bí mật
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # gitleaks cần đủ lịch sử để quét diff của PR, không chỉ cây hiện tại.
           fetch-depth: 0
